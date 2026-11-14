@@ -1,0 +1,13 @@
+[package]
+name = "fm-clap"
+description = "CLAP shell of the FM engine (a stub in this round: docs/design.md, \"The shell\")"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fm-core = { path = "../fm-core" }
+
+[lints]
+workspace = true
