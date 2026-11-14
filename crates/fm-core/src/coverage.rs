@@ -47,7 +47,6 @@ pub fn status(p: &Param) -> &'static str {
     } else if op && starts(&["form", "spread", "formant"]) {
         "M2 (waves)"
     } else if starts(&[
-        "peg_",
         "pitch_",
         "random_pitch",
         "portamento",
@@ -64,7 +63,6 @@ pub fn status(p: &Param) -> &'static str {
         "resonance",
         "hpf_",
         "distance",
-        "feg_",
         "random_pan",
         "alternate_pan",
     ]) || starts(&["scaling_pan", "key_on_delay"])

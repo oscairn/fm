@@ -26,18 +26,18 @@ At M1: every operator is a sine; the laws below are played on every routing; not
 | `random_pitch` | 7 | M3 (pitch) | 0 to 127 (0) |  |
 | `pitch_key_follow` | 8 | M3 (pitch) | 0 to 127 (96) |  |
 | `pitch_key_centre` | 9 | M3 (pitch) | 0 to 127 (60) |  |
-| `peg_level_initial` | 10 | M3 (pitch) | -50 to 50 (0) |  |
-| `peg_level_attack` | 11 | M3 (pitch) | -50 to 50 (0) |  |
-| `peg_level_decay1` | 12 | M3 (pitch) | -50 to 50 (0) |  |
-| `peg_level_decay2` | 13 | M3 (pitch) | -50 to 50 (0) |  |
-| `peg_level_release` | 14 | M3 (pitch) | -50 to 50 (0) |  |
-| `peg_time_attack` | 15 | M3 (pitch) | 0 to 99 (0) |  |
-| `peg_time_decay1` | 16 | M3 (pitch) | 0 to 99 (0) |  |
-| `peg_time_decay2` | 17 | M3 (pitch) | 0 to 99 (0) |  |
-| `peg_time_release` | 18 | M3 (pitch) | 0 to 99 (0) |  |
-| `peg_depth_velocity` | 19 | M3 (pitch) | 0 to 7 (0) |  |
-| `peg_depth` | 20 | M3 (pitch) | 0 to 3 (0) |  |
-| `peg_time_key_follow` | 21 | M3 (pitch) | 0 to 7 (0) |  |
+| `pitch_eg_level_initial` | 10 | M3 (pitch) | -50 to 50 (0) |  |
+| `pitch_eg_level_attack` | 11 | M3 (pitch) | -50 to 50 (0) |  |
+| `pitch_eg_level_decay1` | 12 | M3 (pitch) | -50 to 50 (0) |  |
+| `pitch_eg_level_decay2` | 13 | M3 (pitch) | -50 to 50 (0) |  |
+| `pitch_eg_level_release` | 14 | M3 (pitch) | -50 to 50 (0) |  |
+| `pitch_eg_time_attack` | 15 | M3 (pitch) | 0 to 99 (0) |  |
+| `pitch_eg_time_decay1` | 16 | M3 (pitch) | 0 to 99 (0) |  |
+| `pitch_eg_time_decay2` | 17 | M3 (pitch) | 0 to 99 (0) |  |
+| `pitch_eg_time_release` | 18 | M3 (pitch) | 0 to 99 (0) |  |
+| `pitch_eg_depth_velocity` | 19 | M3 (pitch) | 0 to 7 (0) |  |
+| `pitch_eg_depth` | 20 | M3 (pitch) | 0 to 3 (0) |  |
+| `pitch_eg_time_key_follow` | 21 | M3 (pitch) | 0 to 7 (0) |  |
 | `lfo_wave` | 22 | M4 (modulators) | 0 to 5 (0) |  |
 | `lfo_speed` | 23 | M4 (modulators) | 0 to 99 (30) |  |
 | `lfo_phase` | 24 | M4 (modulators) | 0 to 3 (0) |  |
@@ -65,23 +65,23 @@ At M1: every operator is a sine; the laws below are played on every routing; not
 | `hpf_cutoff` | 105 | M5 (filter and output) | 0 to 1023 (0) |  |
 | `distance` | 106 | M5 (filter and output) | -128 to 127 (0) |  |
 | `filter_gain` | 107 | M5 (filter and output) | 0 to 255 (255) |  |
-| `feg_time_hold` | 108 | M5 (filter and output) | 0 to 127 (0) |  |
-| `feg_time_attack` | 109 | M5 (filter and output) | 0 to 127 (0) |  |
-| `feg_time_decay1` | 110 | M5 (filter and output) | 0 to 127 (0) |  |
-| `feg_time_decay2` | 111 | M5 (filter and output) | 0 to 127 (0) |  |
-| `feg_time_release` | 112 | M5 (filter and output) | 0 to 127 (0) |  |
-| `feg_level_hold` | 113 | M5 (filter and output) | -128 to 127 (0) |  |
-| `feg_level_attack` | 114 | M5 (filter and output) | -128 to 127 (0) |  |
-| `feg_level_decay1` | 115 | M5 (filter and output) | -128 to 127 (0) |  |
-| `feg_level_decay2` | 116 | M5 (filter and output) | -128 to 127 (0) |  |
-| `feg_level_release` | 117 | M5 (filter and output) | -128 to 127 (0) |  |
-| `feg_depth` | 118 | M5 (filter and output) | -64 to 63 (40) |  |
-| `feg_time_velocity_segment` | 119 | M5 (filter and output) | 0 to 4 (4) |  |
-| `feg_time_velocity` | 120 | M5 (filter and output) | -64 to 63 (0) |  |
-| `feg_depth_velocity` | 121 | M5 (filter and output) | -64 to 63 (0) |  |
-| `feg_depth_velocity_curve` | 122 | M5 (filter and output) | 0 to 4 (2) |  |
-| `feg_time_key_follow` | 123 | M5 (filter and output) | -64 to 63 (0) |  |
-| `feg_time_key_centre` | 124 | M5 (filter and output) | 0 to 127 (24) |  |
+| `filter_eg_time_hold` | 108 | M5 (filter and output) | 0 to 127 (0) |  |
+| `filter_eg_time_attack` | 109 | M5 (filter and output) | 0 to 127 (0) |  |
+| `filter_eg_time_decay1` | 110 | M5 (filter and output) | 0 to 127 (0) |  |
+| `filter_eg_time_decay2` | 111 | M5 (filter and output) | 0 to 127 (0) |  |
+| `filter_eg_time_release` | 112 | M5 (filter and output) | 0 to 127 (0) |  |
+| `filter_eg_level_hold` | 113 | M5 (filter and output) | -128 to 127 (0) |  |
+| `filter_eg_level_attack` | 114 | M5 (filter and output) | -128 to 127 (0) |  |
+| `filter_eg_level_decay1` | 115 | M5 (filter and output) | -128 to 127 (0) |  |
+| `filter_eg_level_decay2` | 116 | M5 (filter and output) | -128 to 127 (0) |  |
+| `filter_eg_level_release` | 117 | M5 (filter and output) | -128 to 127 (0) |  |
+| `filter_eg_depth` | 118 | M5 (filter and output) | -64 to 63 (40) |  |
+| `filter_eg_time_velocity_segment` | 119 | M5 (filter and output) | 0 to 4 (4) |  |
+| `filter_eg_time_velocity` | 120 | M5 (filter and output) | -64 to 63 (0) |  |
+| `filter_eg_depth_velocity` | 121 | M5 (filter and output) | -64 to 63 (0) |  |
+| `filter_eg_depth_velocity_curve` | 122 | M5 (filter and output) | 0 to 4 (2) |  |
+| `filter_eg_time_key_follow` | 123 | M5 (filter and output) | -64 to 63 (0) |  |
+| `filter_eg_time_key_centre` | 124 | M5 (filter and output) | 0 to 127 (24) |  |
 | `cutoff_key_follow` | 125 | M5 (filter and output) | -64 to 63 (10) |  |
 | `cutoff_break1` | 126 | M5 (filter and output) | 0 to 124 (36) |  |
 | `cutoff_break2` | 127 | M5 (filter and output) | 1 to 125 (48) |  |
@@ -141,11 +141,11 @@ At M1: every operator is a sine; the laws below are played on every routing; not
 | `slfo_step15` | 246 | M4 (modulators) | -64 to 63 (0) |  |
 | `slfo_step16` | 247 | M4 (modulators) | -64 to 63 (0) |  |
 | `slfo_random_speed` | 248 | M4 (modulators) | 0 to 127 (0) |  |
-| `aeg_attack_offset` | 249 | M4 (modulators) | -64 to 63 (0) |  |
-| `aeg_decay_offset` | 250 | M4 (modulators) | -64 to 63 (0) |  |
-| `aeg_sustain_offset` | 251 | M4 (modulators) | -64 to 63 (0) |  |
-| `aeg_release_offset` | 252 | M4 (modulators) | -64 to 63 (0) |  |
-| `feg_depth_offset` | 253 | M5 (filter and output) | -64 to 63 (0) |  |
+| `amp_eg_attack_offset` | 249 | M4 (modulators) | -64 to 63 (0) |  |
+| `amp_eg_decay_offset` | 250 | M4 (modulators) | -64 to 63 (0) |  |
+| `amp_eg_sustain_offset` | 251 | M4 (modulators) | -64 to 63 (0) |  |
+| `amp_eg_release_offset` | 252 | M4 (modulators) | -64 to 63 (0) |  |
+| `filter_eg_depth_offset` | 253 | M5 (filter and output) | -64 to 63 (0) |  |
 | `cutoff_offset` | 254 | M5 (filter and output) | -64 to 63 (0) |  |
 | `resonance_offset` | 255 | M5 (filter and output) | -64 to 63 (0) |  |
 | `opN.ctrl_set1` | 1000 + 100 op + 0 | M7 (controllers, tuning) | 0 to 1 (1) |  |
@@ -197,10 +197,10 @@ At M1: every operator is a sine; the laws below are played on every routing; not
 | `opN.form` | 1000 + 100 op + 47 | M2 (waves) | 0 to 6 (0) |  |
 | `opN.spread` | 1000 + 100 op + 48 | M2 (waves) | 0 to 7 (0) |  |
 | `opN.formant` | 1000 + 100 op + 49 | M2 (waves) | 0 to 99 (0) |  |
-| `opN.peg_level_initial` | 1000 + 100 op + 50 | M3 (pitch) | -50 to 50 (0) |  |
-| `opN.peg_level_attack` | 1000 + 100 op + 51 | M3 (pitch) | -50 to 50 (0) |  |
-| `opN.peg_time_attack` | 1000 + 100 op + 52 | M3 (pitch) | 0 to 99 (0) |  |
-| `opN.peg_time_decay` | 1000 + 100 op + 53 | M3 (pitch) | 0 to 99 (0) |  |
+| `opN.pitch_eg_level_initial` | 1000 + 100 op + 50 | M3 (pitch) | -50 to 50 (0) |  |
+| `opN.pitch_eg_level_attack` | 1000 + 100 op + 51 | M3 (pitch) | -50 to 50 (0) |  |
+| `opN.pitch_eg_time_attack` | 1000 + 100 op + 52 | M3 (pitch) | 0 to 99 (0) |  |
+| `opN.pitch_eg_time_decay` | 1000 + 100 op + 53 | M3 (pitch) | 0 to 99 (0) |  |
 | `opN.eg_level_attack` | 1000 + 100 op + 54 | played | 0 to 99 (99) | carrier curve (from 20 up in steps of two) and modulator curve (0.75 dB a step, in steps of two); the carrier table checked only against the renders it was fitted to |
 | `opN.eg_level_decay1` | 1000 + 100 op + 55 | played | 0 to 99 (99) | as eg_level_attack |
 | `opN.eg_level_decay2` | 1000 + 100 op + 56 | played | 0 to 99 (99) | as eg_level_attack |
