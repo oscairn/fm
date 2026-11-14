@@ -2,6 +2,8 @@
 //! Single-cycle tables, computed at compile time (read-only data, shared by every instance and
 //! process through the page cache). `LEN` is one cycle plus a guard point for interpolation.
 
+use crate::simd::{F4, U4};
+
 /// Index bits of a table: 1024 points a cycle.
 pub const BITS: u32 = 10;
 /// Points a cycle.
@@ -80,6 +82,24 @@ const fn window(t: f64) -> f64 {
 pub static SINE: Table = build(Form::Sine);
 pub static SAW16: Table = build(Form::Saw16);
 pub static WINDOW: Table = build(Form::Window);
+
+/// Linear interpolation in `t` at 32-bit phase `p`: the top `BITS` bits index, the next 16 are the
+/// fraction.
+#[inline(always)]
+pub fn read<V: F4>(t: &Table, p: V::U) -> V {
+    let f = p.shr::<{ 16 - BITS as i32 }>().and(V::U::splat(0xffff)).small_to_f32() * V::splat(1.0 / 65536.0);
+    let (a, b) = V::gather2(t, p.shr::<{ 32 - BITS as i32 }>());
+    (b - a).mul_add(f, a)
+}
+
+/// A modulation input in cycles as a 32-bit phase offset (2^-24 cycle resolution; inputs clamped to
+/// +-127 cycles so the conversion is exact on every back end).
+#[inline(always)]
+pub fn offset<V: F4>(m: V) -> V::U {
+    (m.min(V::splat(127.0)).max(V::splat(-127.0)) * V::splat(16_777_216.0))
+        .to_i32()
+        .shl::<8>()
+}
 
 #[cfg(test)]
 mod tests {

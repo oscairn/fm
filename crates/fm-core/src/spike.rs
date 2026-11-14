@@ -4,7 +4,7 @@
 //! two layouts so their cost can be measured. It decides the architecture; it is not the engine.
 
 use crate::simd::{F4, U4, W};
-use crate::tables::{Table, BITS, SAW16, SINE, WINDOW};
+use crate::tables::{offset, read, Table, SAW16, SINE, WINDOW};
 
 pub use crate::params::OPS;
 /// Frames per control step.
@@ -273,24 +273,6 @@ fn envelopes<V: F4>(lane: &mut Lane, sound: &Sound) -> [[f32; W]; OPS] {
         }
     }
     dg
-}
-
-/// Linear interpolation in `t` at 32-bit phase `p`: the top `BITS` bits index, the next 16 are the
-/// fraction.
-#[inline(always)]
-fn read<V: F4>(t: &Table, p: V::U) -> V {
-    let f = p.shr::<{ 16 - BITS as i32 }>().and(V::U::splat(0xffff)).small_to_f32() * V::splat(1.0 / 65536.0);
-    let (a, b) = V::gather2(t, p.shr::<{ 32 - BITS as i32 }>());
-    (b - a).mul_add(f, a)
-}
-
-/// A modulation input in cycles as a 32-bit phase offset (2^-24 cycle resolution; inputs clamped to
-/// +-127 cycles so the conversion is exact on every back end).
-#[inline(always)]
-fn offset<V: F4>(m: V) -> V::U {
-    (m.min(V::splat(127.0)).max(V::splat(-127.0)) * V::splat(16_777_216.0))
-        .to_i32()
-        .shl::<8>()
 }
 
 #[inline(always)]
