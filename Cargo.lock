@@ -7,6 +7,13 @@ name = "fm-core"
 version = "0.0.1"
 
 [[package]]
+name = "fm-nopanic"
+version = "0.0.1"
+dependencies = [
+ "fm-core",
+]
+
+[[package]]
 name = "fmbench"
 version = "0.0.1"
 dependencies = [

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fm-core", "tools/fmbench"]
+members = ["crates/fm-core", "tools/fmbench", "tools/nopanic"]
 
 [workspace.package]
 version = "0.0.1"

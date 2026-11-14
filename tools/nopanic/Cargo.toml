@@ -1,0 +1,22 @@
+[package]
+name = "fm-nopanic"
+description = "Link-time proof that the core's block path has no reachable panic (tools/check-no-panic.sh)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+test = false
+doctest = false
+
+[features]
+link-fail-on-panic = []
+
+[dependencies]
+fm-core = { path = "../../crates/fm-core" }
+
+[lints]
+workspace = true
