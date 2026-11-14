@@ -25,8 +25,8 @@ run() {  # name voices then fmbench's arguments after VOICES BLOCKS (the engine'
   valgrind --tool=callgrind --cache-sim=yes --toggle-collect='fmbench_render*' --callgrind-out-file="$OUT/$n.cg" \
     "$B" "$@" > "$OUT/$n.txt" 2> "$OUT/$n.err"
   # events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw
-  awk -v n="$n" -v v="$v" -v b=$BLOCKS '/^summary:/ {
-      d = (v > 0 ? v : 1) * b
+  awk -v n="$n" -v v="$v" -v t="${TOTAL:-0}" -v b=$BLOCKS '/^summary:/ {
+      d = (t > 0 ? t : (v > 0 ? v : 1)) * b
       printf "%-22s voices %2d  Ir/voice-block %8.0f  Drw/voice-block %7.0f  D1miss/block %6.0f\n", n, v, $2 / d, ($3 + $4) / d, ($6 + $7) / b }' "$OUT/$n.cg"
   rm -f "$OUT/$n.cg"
 }
@@ -48,16 +48,24 @@ for r in 12 14 80 8 1; do run "fm-r$r-8" 32 e $r 8; done
 run fm-r12-8-v8 8 e 12 8
 run fm-r1-1 32 e 1 1
 run fm-r12-8-scalar 32 e 12 8 scalar
+for f in all odd res mixed; do run "fm-r12-8-$f" 32 e 12 8 native $f; done
+run fm-r80-8-res 32 e 80 8 native res
+run fm-r1-8-res 32 e 1 8 native res
+run fm-r12-8-mixed-v8 8 e 12 8 native mixed
+# voices few a sound: 1 and 2 voices in each of 1, 5 and 8 sounds (a voice-block: by all the voices)
+for s in 1 5 8; do for v in 1 2; do TOTAL=$((s * v)); run "fm-s$s-v$v" "$v" e 12 8 native sine $s; done; done; TOTAL=
 for f in table window; do echo "footprint $f: $("$B" footprint 0 x x $f)"; done
 } | tee "$OUT/summary.txt"
-cache() {  # voices: the device's caches, the engine's worst case
+cache() {  # name voices forms: the device's caches, routing 12 with eight operators
   valgrind --tool=callgrind --cache-sim=yes --D1=32768,4,64 --LL=524288,16,64 --toggle-collect='fmbench_render*' \
-    --callgrind-out-file="$OUT/c$1.cg" "$B" engine "$1" $BLOCKS 12 8 > /dev/null 2> "$OUT/c$1.err"
-  awk -v v="$1" -v b=$BLOCKS '/^summary:/ { d = v * b
-      printf "cache-%d voices %2d  D1miss/voice-block %7.1f  LLmiss/voice-block %6.1f\n", v, v, ($6 + $7) / d, ($9 + $10) / d }' "$OUT/c$1.cg"
+    --callgrind-out-file="$OUT/c$1.cg" "$B" engine "$2" $BLOCKS 12 8 native "$3" > /dev/null 2> "$OUT/c$1.err"
+  awk -v n="$1" -v v="$2" -v b=$BLOCKS '/^summary:/ { d = v * b
+      printf "%-18s voices %2d  D1miss/voice-block %7.1f  LLmiss/voice-block %6.1f\n", n, v, ($6 + $7) / d, ($9 + $10) / d }' "$OUT/c$1.cg"
   rm -f "$OUT/c$1.cg"
 }
-for v in 1 8 25 64; do cache $v; done | tee "$OUT/cache.txt"
+# sines, and eight operators on eight different form tables and pitches (the worst case for locality)
+{ for v in 1 8 25 64; do cache "cache-$v" $v sine; done
+  for v in 1 8 25 64; do cache "cache-mixed-$v" $v mixed; done; } | tee "$OUT/cache.txt"
 if [ "$MODE" = check ]; then
   fail=0
   rest=$(awk '$1=="rest" || $1=="fm-rest" {if ($5 > m) m = $5} END {print m}' "$OUT/summary.txt")

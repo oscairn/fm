@@ -33,6 +33,10 @@ pub struct Plan {
     pub feedback: Feedback,
     /// Per operator, how its form is played (a sine where not live).
     pub waves: [Wave; OPS],
+    /// A live operator is not a sine.
+    pub forms: bool,
+    /// A feedback loop through operators of which one is not a sine.
+    pub loop_forms: bool,
 }
 
 /// Instructions a voice-block (callgrind, aarch64, Cortex-A53): the fixed part and each rendered
@@ -40,8 +44,8 @@ pub struct Plan {
 const VOICE_COST: u32 = 600;
 const OP_COST: u32 = 2300;
 const LOOP_OP_COST: u32 = 900;
-const TABLE_COST: u32 = 0;
-const TWO_READ_COST: u32 = 0;
+const TABLE_COST: u32 = 300;
+const TWO_READ_COST: u32 = 1100;
 
 impl Plan {
     /// `audible`: operators whose level and envelope levels are not all silent.
@@ -67,18 +71,29 @@ impl Plan {
                 from: r.fb_from,
             },
         };
+        let waves: [Wave; OPS] = core::array::from_fn(|i| {
+            if on(i as u8) {
+                waves.get(i).copied().unwrap_or(Wave::Sine)
+            } else {
+                Wave::Sine
+            }
+        });
+        let loop_forms = match feedback {
+            Feedback::Loop { to, from } => waves
+                .iter()
+                .skip(usize::from(to))
+                .take(usize::from(from.saturating_sub(to)) + 1)
+                .any(|&w| w != Wave::Sine),
+            _ => false,
+        };
         Plan {
             live,
             carriers: r.carriers & live,
             mods: r.mods.map(|m| m & live),
             feedback,
-            waves: core::array::from_fn(|i| {
-                if on(i as u8) {
-                    waves.get(i).copied().unwrap_or(Wave::Sine)
-                } else {
-                    Wave::Sine
-                }
-            }),
+            forms: waves.iter().any(|&w| w != Wave::Sine),
+            waves,
+            loop_forms,
         }
     }
 

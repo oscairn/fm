@@ -649,7 +649,12 @@ impl Engine {
                     break;
                 }
                 let (g0, dg) = envelopes::<V>(lane, p, shed_step, end);
-                ops::<V>(lane, p, &g0, &dg, chunk);
+                // a sound with sines only runs the kernels without the forms' branches
+                if p.plan.forms {
+                    ops::<V, true>(lane, p, &g0, &dg, chunk);
+                } else {
+                    ops::<V, false>(lane, p, &g0, &dg, chunk);
+                }
             }
             for (o, v) in out.iter_mut().zip(vout.iter()) {
                 *o += (v[0] + v[1]) + (v[2] + v[3]);
@@ -741,26 +746,26 @@ fn envelopes<V: F4>(
 /// One control step of a lane's operators, in ascending order (every modulation edge runs
 /// upwards), each a whole step at a time, except a feedback loop through several operators,
 /// whose operators are interleaved sample by sample; carriers summed into `vout`.
-fn ops<V: F4>(lane: &mut Lane, p: &Prepared, g0: &[[f32; W]; OPS], dg: &[[f32; W]; OPS], vout: &mut [[f32; W]; STEP]) {
+fn ops<V: F4, const FORMS: bool>(
+    lane: &mut Lane,
+    p: &Prepared,
+    g0: &[[f32; W]; OPS],
+    dg: &[[f32; W]; OPS],
+    vout: &mut [[f32; W]; STEP],
+) {
     let plan = &p.plan;
     let mut y = [[[0.0f32; W]; STEP]; OPS];
     let (lo, hi) = match plan.feedback {
         Feedback::Loop { to, from } => (usize::from(to), usize::from(from)),
         _ => (OPS, OPS),
     };
-    let mixed = plan
-        .waves
-        .iter()
-        .skip(lo)
-        .take(hi.saturating_sub(lo) + 1)
-        .any(|&w| w != Wave::Sine);
     for i in (0..OPS).filter(|&i| has(u32::from(plan.live), i)) {
-        if i == lo && mixed {
-            interleaved::<V, true>(lane, p, g0, dg, &mut y, lo, hi);
+        if FORMS && i == lo && plan.loop_forms {
+            interleaved_forms::<V>(lane, p, g0, dg, &mut y, lo, hi);
         } else if i == lo {
             interleaved::<V, false>(lane, p, g0, dg, &mut y, lo, hi);
         } else if i < lo || i > hi {
-            single::<V>(lane, p, g0, dg, &mut y, i);
+            single::<V, FORMS>(lane, p, g0, dg, &mut y, i);
         }
         if has(u32::from(plan.carriers), i) {
             if let Some(out) = y.get(i) {
@@ -773,7 +778,7 @@ fn ops<V: F4>(lane: &mut Lane, p: &Prepared, g0: &[[f32; W]; OPS], dg: &[[f32; W
 }
 
 /// Operator `i` over a whole step: its modulation input summed first, then its samples.
-fn single<V: F4>(
+fn single<V: F4, const FORMS: bool>(
     lane: &mut Lane,
     p: &Prepared,
     g0: &[[f32; W]; OPS],
@@ -803,18 +808,54 @@ fn single<V: F4>(
         }
     }
     let (inc, d) = (V::U::load(inc), V::load(d));
+    let (mut ph_v, mut g) = (V::U::load(*ph), V::load(g));
     let wave = p.plan.waves.get(i).copied().unwrap_or(Wave::Sine);
-    let (g, d) = nyquist::<V>(wave, inc, V::load(g), d);
-    let mut ph_v = V::U::load(*ph);
-    let own = (p.plan.feedback == Feedback::Own(i as u8)).then_some((&mut lane.fb, p.fbk));
-    // one loop for each form, the match outside it
-    match wave {
-        Wave::Sine => run::<V>(|q, o| read(&SINE, q.add(o)), own, cur, &input, inc, g, d, &mut ph_v),
-        Wave::Table(t) => run::<V>(|q, o| read16(t, q.add(o)), own, cur, &input, inc, g, d, &mut ph_v),
-        Wave::Odd(t) => run::<V>(|q, o| odd(t, q, o), own, cur, &input, inc, g, d, &mut ph_v),
-        Wave::Resonant(t, c) => run::<V>(|q, o| resonant(t, c, q, o), own, cur, &input, inc, g, d, &mut ph_v),
+    if FORMS && wave != Wave::Sine {
+        let own = (p.plan.feedback == Feedback::Own(i as u8)).then_some((&mut lane.fb, p.fbk));
+        form_step::<V>(wave, own, cur, &input, inc, g, d, &mut ph_v);
+    } else if p.plan.feedback == Feedback::Own(i as u8) {
+        // self-feedback: sample by sample within this operator
+        let fbk = V::splat(p.fbk);
+        let (mut y1, mut y2) = (V::load(lane.fb[0]), V::load(lane.fb[1]));
+        for (out, m) in cur.iter_mut().zip(input.iter()) {
+            let v = read::<V>(&SINE, ph_v.add(offset((y1 + y2).mul_add(fbk, V::load(*m))))) * g;
+            *out = v.store();
+            (y2, y1) = (y1, v);
+            g = g + d;
+            ph_v = ph_v.add(inc);
+        }
+        lane.fb = [y1.store(), y2.store()];
+    } else {
+        for (out, m) in cur.iter_mut().zip(input.iter()) {
+            *out = (read::<V>(&SINE, ph_v.add(offset(V::load(*m)))) * g).store();
+            g = g + d;
+            ph_v = ph_v.add(inc);
+        }
     }
     *ph = ph_v.store();
+}
+
+/// A non-sine operator's step, kept out of line so the sine kernels compile as they do alone.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn form_step<V: F4>(
+    wave: Wave,
+    own: Option<(&mut [[f32; W]; 2], f32)>,
+    cur: &mut [[f32; W]; STEP],
+    input: &[[f32; W]; STEP],
+    inc: V::U,
+    g: V,
+    d: V,
+    ph: &mut V::U,
+) {
+    let (g, d) = nyquist::<V>(wave, inc, g, d);
+    // one loop for each form, the match outside it
+    match wave {
+        Wave::Table(t) => run::<V>(|q, o| read16(t, q.add(o)), own, cur, input, inc, g, d, ph),
+        Wave::Odd(t) => run::<V>(|q, o| odd(t, q, o), own, cur, input, inc, g, d, ph),
+        Wave::Resonant(t, c) => run::<V>(|q, o| resonant(t, c, q, o), own, cur, input, inc, g, d, ph),
+        Wave::Sine => run::<V>(|q, o| read(&SINE, q.add(o)), own, cur, input, inc, g, d, ph),
+    }
 }
 
 /// An odd form: E(2t + m) sin(t + m).
@@ -887,6 +928,20 @@ fn run<V: F4>(
         }
     }
     *ph = ph_v;
+}
+
+/// [`interleaved`] with non-sine forms, out of line (as [`form_step`]).
+#[inline(never)]
+fn interleaved_forms<V: F4>(
+    lane: &mut Lane,
+    p: &Prepared,
+    g0: &[[f32; W]; OPS],
+    dg: &[[f32; W]; OPS],
+    y: &mut [[[f32; W]; STEP]; OPS],
+    lo: usize,
+    hi: usize,
+) {
+    interleaved::<V, true>(lane, p, g0, dg, y, lo, hi);
 }
 
 /// Operators `lo..=hi` (the live ones) sample by sample: each sample's input reads the outputs
@@ -1615,7 +1670,8 @@ mod tests {
     }
 
     /// The first-level data cache is 32 KB: a lane at work (its state, the step's scratch and the
-    /// sine table) must leave half of it for the rest of the block path.
+    /// sine table) must leave half of it for the rest of the block path, and fit with eight form
+    /// tables.
     #[test]
     fn hot_set_fits_half_the_l1() {
         use core::mem::size_of;
@@ -1625,6 +1681,10 @@ mod tests {
             + size_of::<[[f32; W]; BLOCK]>(); // the lane's output
         let hot = size_of::<Lane>() + scratch + size_of::<crate::tables::Table>();
         assert!(hot <= 16 * 1024, "{hot} B");
+        // eight operators on eight different form tables: within the first-level cache by size
+        // (conflicts measured by tools/cost/cg.sh, cache-mixed-N)
+        let forms = hot + 8 * size_of::<crate::tables::Table16>();
+        assert!(forms <= 28 * 1024, "{forms} B with eight form tables");
         assert!(size_of::<Lane>() <= 2048, "{} B a lane", size_of::<Lane>());
     }
 

@@ -4,8 +4,10 @@
 //!   fmbench time [BLOCKS]        time a block on this machine: the engine's cases at 0-64 voices
 //!   fmbench check                random notes for a while: fails on a non-finite or subnormal sample
 //!   fmbench coverage SOUND       the sound's parameters the engine does not play (text or binary form)
-//!   fmbench engine VOICES BLOCKS ROUTING [OPS] [native|scalar]
+//!   fmbench engine VOICES BLOCKS ROUTING [OPS] [native|scalar] [FORMS] [SOUNDS]
 //!                                VOICES held notes of a sound on ROUTING with OPS operators (default 8)
+//!                                on FORMS (sine, all, odd, res, mixed: eight different tables), in
+//!                                each of SOUNDS sounds (default 1)
 //!   fmbench VOICES BLOCKS [om|sm] [edges|loop|chain] [sine|table|window] [native|scalar]
 //!                                the voice-kernel spike (docs/design.md, "The spike")
 //!   fmbench footprint 0 x x FORM the spike's bytes a lane touches a block
@@ -41,25 +43,44 @@ pub extern "C" fn fmbench_render_engine(e: &mut Engine, out: &mut [f32; BLOCK], 
     }
 }
 
-/// The cost case: the top `ops` operators at full level, feedback 7, a slow decay 1 (so every
-/// envelope is in a segment that can change: the costlier path), held notes.
-fn case_sound(routing: u32, ops: u32) -> Prepared {
+/// Operator `o`'s (1-8) form, spread and formant in a cost case: `mixed` puts the eight on eight
+/// different tables (the worst case for the cache); `res` is the costliest kernel.
+fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
+    const MIXED: [(usize, usize); 8] = [(1, 0), (2, 3), (3, 5), (4, 7), (5, 2), (6, 6), (1, 7), (4, 1)];
+    match forms {
+        "all" => (1, 3, 0),
+        "odd" => (3, 3, 0),
+        "res" => (5, 7, 3),
+        "mixed" => (MIXED[o - 1].0, MIXED[o - 1].1, 4 + 3 * o),
+        _ => (0, 0, 0),
+    }
+}
+
+/// The cost case: the top `ops` operators at full level on `forms`, feedback 7, a slow decay 1 (so
+/// every envelope is in a segment that can change: the costlier path), held notes.
+fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
     let mut t = format!("fm-sound/1\nalgorithm={routing} feedback=7\n");
     for o in 1..=8 {
         let level = if o > 8 - ops { 99 } else { 0 };
+        let (f, s, r) = case_form(forms, o as usize);
         t += &format!(
-            "op{o}.level={level} op{o}.coarse={} op{o}.eg_time_decay1=60 op{o}.eg_level_decay1=0\n",
+            "op{o}.level={level} op{o}.coarse={} op{o}.eg_time_decay1=60 op{o}.eg_level_decay1=0 \
+             op{o}.form={f} op{o}.spread={s} op{o}.formant={r}\n",
             o % 4
         );
     }
     Prepared::new(&Sound::from_text(&t).expect("case sound"))
 }
 
-fn engine(routing: u32, ops: u32, voices: usize) -> Box<Engine> {
+/// `voices` held notes in each of `sounds` sounds (all the same case).
+fn engine(routing: u32, ops: u32, voices: usize, forms: &str, sounds: usize) -> Box<Engine> {
     let mut e = Box::new(Engine::new(RATE));
-    e.set_sound(0, &case_sound(routing, ops));
-    for v in 0..voices.min(VOICES) {
-        e.note_on(0, v as u32, 36 + (v % 60) as u8, 100.0, &mut |_| {});
+    let p = case_sound(routing, ops, forms);
+    for s in 0..sounds.min(fm_core::engine::SOUNDS) {
+        e.set_sound(s, &p);
+        for v in 0..voices.min(VOICES / sounds) {
+            e.note_on(s, v as u32, 36 + ((v + 7 * s) % 60) as u8, 100.0, &mut |_| {});
+        }
     }
     e
 }
@@ -71,13 +92,15 @@ fn time(blocks: usize) {
         "case", "voices", "mean", "median", "p99", "max", "mean/voice"
     );
     let cases = [
-        ("eight operators, routing 12", 12, 8),
-        ("eight operators, routing 80", 80, 8),
-        ("one operator, routing 1", 1, 1),
+        ("eight operators, routing 12", 12, 8, "sine"),
+        ("eight operators, routing 80", 80, 8, "sine"),
+        ("one operator, routing 1", 1, 1, "sine"),
+        ("eight resonant, routing 12", 12, 8, "res"),
+        ("eight mixed forms, routing 12", 12, 8, "mixed"),
     ];
-    for (name, routing, ops) in cases {
+    for (name, routing, ops, forms) in cases {
         for voices in [0usize, 1, 8, 16, 25, 32, 64] {
-            let mut e = engine(routing, ops, voices);
+            let mut e = engine(routing, ops, voices, forms, 1);
             let mut out = [0.0f32; BLOCK];
             let mut t = Vec::with_capacity(blocks);
             for _ in 0..blocks {
@@ -109,8 +132,11 @@ fn check() -> bool {
         seed
     };
     let mut e = Box::new(Engine::new(RATE));
-    for (s, (routing, ops)) in [(12, 8), (80, 5), (5, 2)].into_iter().enumerate() {
-        e.set_sound(s, &case_sound(routing, ops));
+    for (s, (routing, ops, forms)) in [(12, 8, "mixed"), (80, 5, "sine"), (5, 2, "res")]
+        .into_iter()
+        .enumerate()
+    {
+        e.set_sound(s, &case_sound(routing, ops, forms));
     }
     let (mut notes, mut ended, mut bad) = (0u32, 0u32, 0usize);
     for _ in 0..20_000 {
@@ -180,8 +206,10 @@ fn main() {
         "coverage" => std::process::exit(if coverage(&arg(1, "")) { 0 } else { 1 }),
         "engine" => {
             let (voices, blocks) = (num(1, 8), num(2, 100));
-            let mut e = engine(num(3, 12) as u32, num(4, 8) as u32, voices);
+            let sounds = num(7, 1).clamp(1, fm_core::engine::SOUNDS);
+            let mut e = engine(num(3, 12) as u32, num(4, 8) as u32, voices, &arg(6, "sine"), sounds);
             let scalar = arg(5, "native") == "scalar";
+            let voices = voices * sounds;
             let mut out = [0.0f32; BLOCK];
             let mut sum = 0.0f64;
             let t = Instant::now();
