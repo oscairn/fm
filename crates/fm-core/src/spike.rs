@@ -6,7 +6,7 @@
 use crate::simd::{F4, U4, W};
 use crate::tables::{Table, BITS, SAW16, SINE, WINDOW};
 
-pub const OPS: usize = 8;
+pub use crate::params::OPS;
 /// Frames per control step.
 pub const STEP: usize = 16;
 /// Frames per block.
@@ -32,16 +32,7 @@ pub enum Form {
     },
 }
 
-/// Which operator modulates which. Operators are numbered from 0; `mods[i]` has bit `j` set when
-/// operator `j` modulates operator `i` (only `j < i`, as in every routing of the model). Feedback runs
-/// from `fb_from`'s output into `fb_to`'s input, one sample late.
-#[derive(Clone, Copy, Debug)]
-pub struct Routing {
-    pub mods: [u8; OPS],
-    pub carriers: u8,
-    pub fb_from: u8,
-    pub fb_to: u8,
-}
+pub use crate::routing::Routing;
 
 impl Routing {
     /// The routing with the most modulation edges in the model's table: operators 1 and 2 (here 0

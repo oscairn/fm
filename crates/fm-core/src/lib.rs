@@ -9,6 +9,7 @@
 )]
 
 pub mod params;
+pub mod routing;
 pub mod simd;
 pub mod sound;
 pub mod spike;
