@@ -1,0 +1,11 @@
+[package]
+name = "fmbench"
+description = "Renders N voices of the voice-kernel spike for cost measurement (callgrind, timing)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+fm-core = { path = "../../crates/fm-core" }

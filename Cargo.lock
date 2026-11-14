@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "fm-core"
 version = "0.0.1"
+
+[[package]]
+name = "fmbench"
+version = "0.0.1"
+dependencies = [
+ "fm-core",
+]

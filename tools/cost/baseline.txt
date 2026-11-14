@@ -1,0 +1,8 @@
+# Instructions a voice-block (rest: a block) under callgrind, aarch64, -C target-cpu=cortex-a53, the
+# pinned toolchain; tools/cost/cg.sh check fails a case more than 10 % over its figure here.
+rest 622
+om-edges-table 15243
+om-edges-window 21899
+om-chain-table 14613
+om-loop-table 18379
+om-loop-window 25131
