@@ -221,24 +221,27 @@ read with linear interpolation from the top 10 bits of the phase and a 16-bit fr
 compile time (`const fn`), so they are read-only data that every instance and process shares through
 the page cache, and nothing is built at run time.
 
-For the real forms:
+The operator forms (M2, `crates/fm-core/src/forms.rs`), decided and measured:
 
-- **Harmonic forms** (two all-harmonic, two odd-harmonic; spread 0–7): one table per form, spread
-  and band limit. The existing profile kept every harmonic up to the 16th exactly when it is below
-  Nyquist, which needs 16 band-limit versions: 4 forms × 8 spreads × 16 versions × 4.1 KB = 2.1 MB of
-  read-only data, of which a voice touches one table an operator. The existing profile's 940
-  tables of 2,048 points (7.7 MB, 10.6 MB with the envelope tables) are not needed: with 1024 points and
-  linear interpolation the 16th harmonic loses under 0.01 dB and its interpolation images sit about
-  58 dB under it (computed, to check against the 0.5 dB gate at M2); the measured amplitudes and phases are data of a few kilobytes from which the
-  tables are computed at compile time.
-- **Resonant forms**: a window table per spread (8 × 4.1 KB) times a sine read at the centre harmonic
-  (formant + 1) times the phase, the modulation added to both phases (the existing law); no table per
-  formant value. Silence when the centre is above Nyquist (a gain of zero chosen at control rate).
-- **Odd forms under modulation** have the same two-read structure (an envelope table of twice the
-  phase times a sine).
-- **The worst case for the first-level cache** is eight operators on eight different tables: 33 KB
-  with `f32`, 16 KB with `i16` storage. Whether to store `i16` (two more instructions a read, −96 dB
-  quantisation) is decided at M2 by measurement.
+- **Not band-limited, as the reference.** The existing profile's renders show the reference's
+  harmonic forms with the same spectrum at every note (at the top key an odd form's aliases sit about
+  14 dB under its harmonics) and a non-harmonic tone near Nyquist where a resonant form's centre is
+  above it. The engine plays one table per form and spread at every pitch (the existing profile's 16
+  band-limit versions are not needed), so aliasing is the reference's kind (its level not compared);
+  a resonant form is silent while its centre is at or above Nyquist (checked every control step from
+  the increment; the reference's tone is not known well enough: `docs/known-differences.md`).
+- **Tables**: forms 1-2 one table each spread; forms 3-4 a table of E, the form being E(2t) sin(t),
+  played E(2t + m) sin(t + m) (the measured law of a modulated odd form: two reads); forms 5-6 a
+  window table each spread times a sine at the centre harmonic (formant + 1), window(t + m) sin(centre
+  t + m) (two reads and an integer multiply); no table per formant value. 48 tables of 1025 points,
+  computed by the build script (`forms_build.rs`; as constants they took 30 s a build) from the
+  measured amplitudes and phases (`forms_data.rs`: 2,957 components, 70 KB of source).
+- **Q14 (`i16`) rather than `f32`**: the forms peak near 1.01; Q14 puts every form and spread within
+  0.005 dB of the measured levels of its first 16 harmonics (0.02 dB for those 40-60 dB down) and
+  0.0015 rad of the phases (a test), and halves the bytes: 98,400 bytes of shared read-only data
+  (196,800 as `f32`). Eight operators on eight different tables touch 16.4 KB of form tables and the
+  4.1 KB sine table (37 KB with `f32`, more than the first-level cache). A read costs four
+  instructions more than an `f32` read (shift and convert, twice), exact on every back end.
 
 ### 2.5 Plans
 
@@ -254,7 +257,8 @@ and envelope levels not all silent; and a carrier, or modulating an operator tha
 their modulators among those, the feedback path's kind (none, an operator into itself, a loop
 through several) and a cost estimate; the block path renders only the operators in it, so a sound
 with one carrier costs about a sixth of one with eight (3,131 against 16,214 instructions a
-voice-block, measured). Every operator is a sine; the wave kinds join the plan at M2.
+voice-block, measured). Since M2 each operator's form (`forms::Wave`) is in the plan, and a plan
+with sines only runs kernels compiled without the forms' branches (so it costs what it cost at M1).
 
 ### 2.6 Sound format and state
 
@@ -437,6 +441,43 @@ releases, pedals, limits and sound changes (finite, bounded, native and scalar b
 every note ended exactly once); a golden render hash the same on every back end; the 88 routings
 against the documented chart; every single-byte corruption and truncation of a sound blob refused.
 
+### 3.2 The forms at M2 (measured)
+
+Same tool and settings as 3.1. Cases: eight operators at level 99 on routing 12 (the worst plan),
+32 held voices unless stated.
+
+| Case | Instructions a voice-block |
+|---|---|
+| sines (M1: 20,240) | 18,910 |
+| all harmonics (one Q14 read) | 21,454 |
+| odd harmonics (two reads) | 27,478 |
+| resonant (two reads and a multiply) | **27,636** |
+| eight different forms and tables | 25,288 (8 voices: 25,409) |
+| resonant, routing 80; routing 1 | 22,976; 22,712 |
+| one operator, routing 1 (M1: 3,131) | 2,950 |
+
+The worst plan with all eight operators on the costliest form is 27,636 against the gate of 28,000
+(1.3 % under). Sines got cheaper than at M1 because table reads now form their byte offsets in the
+vector and convert the fraction in one instruction (`simd`; the same bits on every back end).
+
+Data misses with the device's caches, routing 12, eight operators on eight different form tables and
+pitches (`cache-mixed-N`, the worst case for locality) against sines: first level 81.2, 40.6, 67.0
+and 109.8 a voice-block at 1, 8, 25 and 64 voices (sines 2.9, 0.4, 0.9, 2.6); last level 5.2,
+0.6, 0.2 and 0.1 (sines 1.1, 0.1, 0.0, 0.0). The hot set fits by size (about 27 KB; a unit test), but
+not without conflicts: these misses are served by the second-level cache, at most about 110 a
+voice-block, an estimated 1-2 µs a voice-block on the device at its second-level latency (to be
+timed with `fmbench time`, case "eight mixed forms"). Aligning each table to a cache line made it
+worse (91 to 139), and was not kept.
+
+A lane costs the same with one voice as with four (routing 12: one voice alone 72,948 a
+voice-block, two 37,110, against 18,910 a voice at 32), and the device shows it too. A narrow kernel
+for one and two voices (the scalar back end over the first one or two lanes, voices kept in a lane's
+first slots) was measured and not kept: one voice 65,259 (routing 1: 52,299 against 57,109 four-wide),
+two voices 47,311, worse than four-wide. Most of a lane's cost does not scale with its voices: the
+step's operator buffers zeroed and summed four-wide, the carriers' accumulation, the modulation sums
+and the control step. A lane whose cost follows its voices needs buffers and state the width of the
+kernel (or voices of several sounds sharing one lane), not a narrower arithmetic type.
+
 ## 4. Audio-thread safety, and how it is proven
 
 - **No allocation**, by construction: the core is `#![no_std]` and does not link the `alloc` crate;
@@ -508,7 +549,7 @@ Sizes are rough, in working sessions of the size of this round.
 |---|---|---|---|
 | M0 | this round | design, scaffold, vector type, spike, cost and panic gates | done |
 | M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | done (section 3.1), except frame-exact note starts (a block is not yet split at events) |
-| M2 | waves | the six forms with spread and formant, band-limit versions, tables from the measured amplitudes and phases, `f32` or `i16` decided, cost re-measured | 2 |
+| M2 | waves | the six forms with spread and formant, tables from the measured amplitudes and phases, `i16` (Q14) storage, cost re-measured | done (section 3.2), except a lane's cost following its voice count |
 | M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | 2 |
 | M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | 2–3 |
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | 2–3 |

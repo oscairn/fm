@@ -12,7 +12,7 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 | Output clipping | not measured whether the part's output clips | no clip (the platform's mixer clips) | the existing profile's choice, unmeasured either way |
 | Envelope resolution | per sample (as far as measured) | every 16 frames (0.33 ms at 48 kHz), exact at the steps, gains ramped linearly between; a segment shorter than a step becomes one ramp; the hold in whole steps | the design's control rate; the fastest decay (time 0) moves 5.2 dB a step, the fastest attack about 18 dB |
 | Key-on phase reset off | a free-running phase | the voice slot's phase runs on from its previous note | the reference's free-running phase is not modelled (as the existing profile) |
-| Note start | frame-exact | at the start of the block the note-on precedes (up to 2.7 ms late at 128 frames, 48 kHz) | splitting a block at events is not built yet (the shell's milestone) |
+| Note start | frame-exact | at the start of the block the note-on precedes (up to 2.7 ms late at 128 frames, 48 kHz) | not small in the current structure: it needs a render that takes timed events and control steps shorter than 16 frames where an event falls, with the envelope's per-step rise, fall and hold counts scaled to the step's length (the shell's milestone) |
 | Voice stealing | not measured | a 3 ms linear fade, then the voice ends; the platform's voice-budget order | the platform's convention |
 | Polyphony | not measured per part | 128 voices an instance, shared by its sounds | provisional decision |
 | Coarse 31 with fine 101-127 | not stable | the documented fixed ratio (6.66) | as the existing profile |

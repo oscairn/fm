@@ -3,8 +3,9 @@
 An eight-operator FM synthesis engine for the Oscairn platform, in Rust: a platform-free DSP core
 and a CLAP shell. Licence: AGPL-3.0-or-later.
 
-**State: milestone M1, "the voice": the engine plays sine operators on every routing with the
-measured level, envelope, feedback and pitch laws, in the core only. It does not make sound in a
+**State: milestone M2, "waves": the engine plays the seven operator forms (sine, all harmonics,
+odd harmonics, resonant, with spread and formant) on every routing with the measured level,
+envelope, feedback and pitch laws, in the core only. It does not make sound in a
 host yet.**
 
 What exists:
@@ -19,8 +20,8 @@ What exists:
   format (`params`, `sound`), the coverage report (`coverage`), the measured laws (`laws`), the 88
   routings (`routing`), plans (`plan`), the voice engine (`engine`: per-sound lanes of four voices,
   envelopes, the end rule, shedding), the four-lane vector type (`simd`: NEON, SSE2, scalar,
-  bit-identical), tables, and the M0 voice-kernel spike (`spike`), kept as the cost reference of
-  the M2 wave forms.
+  bit-identical), tables, the operator forms (`forms`: Q14 tables written by the build script
+  from the measured data), and the M0 voice-kernel spike (`spike`).
 - `tools/fmbench`: the engine's and the spike's cost cases, `fmbench time` (the device timing
   tool), `fmbench check`, `fmbench coverage SOUND`.
 - `tools/cost/cg.sh`: instructions a voice-block on aarch64 under callgrind, and data misses with
@@ -28,7 +29,7 @@ What exists:
 - `tools/check-no-panic.sh`: the link-time proof that the block path has no panic path.
 - `crates/fm-clap`: the plugin's identity only. The shell is not built.
 
-What does not exist yet: the operator waves other than the sine, pitch and LFO modulation, the
+What does not exist yet: pitch envelopes and pitch modulation, LFO modulation, the
 macros, level scaling, the filter, pan, the CLAP plugin. See `docs/design.md`, section 7.
 
 ## Build and test
