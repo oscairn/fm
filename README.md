@@ -3,32 +3,42 @@
 An eight-operator FM synthesis engine for the Oscairn platform, in Rust: a platform-free DSP core
 and a CLAP shell. Licence: AGPL-3.0-or-later.
 
-**State: design and a measured spike. It does not make sound in a host yet.**
+**State: milestone M1, "the voice": the engine plays sine operators on every routing with the
+measured level, envelope, feedback and pitch laws, in the core only. It does not make sound in a
+host yet.**
 
 What exists:
 
-- `docs/design.md`: the model (every parameter of the reference's eight-operator FM part engine,
-  with the state of the project's earlier implementation for each), the architecture, the spike's
-  measurements, how audio-thread safety is proven, the test and gate plan, milestones.
-- `crates/fm-core`: the `no_std` core, without an allocator. The four-lane vector type
-  (`simd`: NEON, SSE2, scalar, bit-identical to each other), compile-time tables, and the voice-kernel
-  spike (`spike`: eight operators, envelopes at control rate, one feedback path, four voices a lane).
-- `tools/fmbench`: renders N voices of the spike (time a voice-block; the callgrind driver).
-- `tools/cost/cg.sh`: instructions a voice-block on aarch64 under callgrind, gated against
-  `tools/cost/baseline.txt`.
+- `docs/design.md`: the model (every parameter of the reference's eight-operator FM part engine),
+  the architecture, the measurements, how audio-thread safety is proven, the tests and gates,
+  milestones and the provisional decisions.
+- `docs/sound-format.md`, `docs/coverage.md`, `docs/known-differences.md`: the sound format, what
+  the engine plays parameter by parameter (with each law's accuracy), and where it differs from
+  the reference.
+- `crates/fm-core`: the `no_std` core, without an allocator: the parameter table and the sound
+  format (`params`, `sound`), the coverage report (`coverage`), the measured laws (`laws`), the 88
+  routings (`routing`), plans (`plan`), the voice engine (`engine`: per-sound lanes of four voices,
+  envelopes, the end rule, shedding), the four-lane vector type (`simd`: NEON, SSE2, scalar,
+  bit-identical), tables, and the M0 voice-kernel spike (`spike`), kept as the cost reference of
+  the M2 wave forms.
+- `tools/fmbench`: the engine's and the spike's cost cases, `fmbench time` (the device timing
+  tool), `fmbench check`, `fmbench coverage SOUND`.
+- `tools/cost/cg.sh`: instructions a voice-block on aarch64 under callgrind, and data misses with
+  the device's caches, gated against `tools/cost/baseline.txt` and `cache-baseline.txt`.
 - `tools/check-no-panic.sh`: the link-time proof that the block path has no panic path.
 - `crates/fm-clap`: the plugin's identity only. The shell is not built.
 
-What does not exist yet: the engine's laws, the operator waves of the reference, pitch and LFO
-modulation, the filter, the sound format, the CLAP plugin. See `docs/design.md`, section 7.
+What does not exist yet: the operator waves other than the sine, pitch and LFO modulation, the
+macros, level scaling, the filter, pan, the CLAP plugin. See `docs/design.md`, section 7.
 
 ## Build and test
 
 ```sh
-cargo test --workspace            # native back end against scalar, the golden render, the spike's checks
+cargo test --workspace            # laws, format, engine (fuzz, native against scalar, golden render), spike
 cargo test -p fm-core --features scalar
 sh tools/check-no-panic.sh        # unix
-cargo run --release -p fmbench -- 32 1000 om edges window
+cargo run --release -p fmbench -- engine 32 1000 12   # 32 voices, routing 12, eight operators
+cargo run --release -p fmbench -- coverage SOUND
 ```
 
 The toolchain is pinned (`rust-toolchain.toml`, Rust 1.95.0). The cost gate needs aarch64 Linux

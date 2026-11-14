@@ -1,10 +1,11 @@
 # Design
 
 The engine reproduces the reference's eight-operator FM part engine, every parameter, as a
-first-party Rust implementation from laws and measurements. This round holds the design, the
-scaffold and a measured voice-kernel spike (`crates/fm-core/src/spike.rs`); nothing here is the
-engine yet. Figures marked "measured" were seen in this repository's tools; everything else is a
-plan or an estimate and says so.
+first-party Rust implementation from laws and measurements. M0 held the design, the scaffold and a
+measured voice-kernel spike (`crates/fm-core/src/spike.rs`); M1 (section 3.1) is the voice: the
+sound format, the coverage report, plans, the routings, the engine with sine operators and the
+measured level, envelope, feedback and pitch laws. Figures marked "measured" were seen in this
+repository's tools; everything else is a plan or an estimate and says so.
 
 Contents: 1 the model and the gap list; 2 architecture; 3 the spike; 4 audio-thread safety;
 5 toolchain and targets; 6 tests and gates; 7 milestones; 8 open questions.
@@ -114,7 +115,7 @@ Operator (38 a operator, and two read-outs):
 | Sound LFO destination depth ratios 1–3 | 0–127 each | yes | depth × ratio/128 (127 counts as 128); within 0.4 cents |
 | Ratio and frequency read-outs | two words | no (not state) | a display of the result, not a parameter |
 
-### 1.4 Part parameters that act on the engine (55)
+### 1.4 Part parameters that act on the engine (55; 56 ids in the sound format, which adds the sound LFO's random speed)
 
 | Parameter | Range | Ex | Existing law; accuracy |
 |---|---|---|---|
@@ -248,6 +249,13 @@ LFO with zero depth is not in the loop). The block path matches on the wave kind
 per step (outside the sample loop); the kernels are generic over the vector type and monomorphised.
 A plan also gives the voice's static cost (2.8).
 
+At M1 (`crates/fm-core/src/plan.rs`) a plan holds the operators that can be heard (audible: level
+and envelope levels not all silent; and a carrier, or modulating an operator that is heard),
+their modulators among those, the feedback path's kind (none, an operator into itself, a loop
+through several) and a cost estimate; the block path renders only the operators in it, so a sound
+with one carrier costs about a sixth of one with eight (3,131 against 16,214 instructions a
+voice-block, measured). Every operator is a sine; the wave kinds join the plan at M2.
+
 ### 2.6 Sound format and state
 
 A sound is the model's raw parameter values, all of them, in raw units with stable numeric ids
@@ -256,7 +264,9 @@ not reproduce yet is reported by a `not_covered()` function tied to a coverage t
 parameter. The state is append-only and versioned: a version number, then the values as id/value
 pairs; a new parameter takes a new id with a default that plays as before; nothing is renumbered.
 Laws turn raw values into physical ones (Hz, seconds, dB, cents) once per sound when it is
-prepared, never in the block path.
+prepared, never in the block path; what depends on the key and velocity (frequency, levels,
+envelope rates with time key follow) once per note. The format is in `docs/sound-format.md`
+(binary with a CRC, and a text form for tests; 748 ids).
 
 ### 2.7 Sound contexts and sharing
 
@@ -284,6 +294,19 @@ installed by the audio thread by a copy, with no lock.
   amplitude at its peak, the macro and velocity terms as set), with every wave's peak at most 1 (a
   table test). The spike implements the rule on the carriers' target gains; its slot is free in
   the same control step.
+- As built at M1 (`crates/fm-core/src/engine.rs`): 40 lanes an instance (the 128-voice ceiling's 32
+  and a partly filled lane per sound, so a note under the ceiling always finds a slot); a lane takes
+  the sound of its first note. The bound is, per carrier, the gain at the larger of its envelope
+  level and its segment's target (in the release the level moves only towards the target), summed;
+  only released voices (key up and not held by the pedal) end by it; a held note never does. A
+  shed voice fades linearly over 3 ms (to zero on the ninth 16-frame step at 48 kHz) and then ends.
+  The order is the platform's (`voice-budget.h`): never a held voice of a sound at or under its
+  reserve (unless for that sound's own note); released before held; the new note's own sound
+  before others; lower priority before higher; the quietest (the end rule's bound), then the
+  oldest. No mono yet (M3), so its rule has nothing to protect. A note that gets no voice (every
+  candidate protected, or no free slot while fades are under way) ends at once; every note-on is
+  answered by exactly one end (the fuzz test). A sound is installed only while none of its voices
+  sounds (`choke` fades them first).
 
 ### 2.9 Cost and memory reporting
 
@@ -373,6 +396,47 @@ fixed-point conversion (1), the table index scaled in the vector before extracti
 tables (cache, not instructions), skipping operators at zero gain (an operator whose envelope and
 level make it silent costs nothing; most sounds do not use all eight at full level).
 
+### 3.1 The engine at M1 (measured)
+
+Same tool and settings as above (`tools/cost/cg.sh`, callgrind 3.22 in the aarch64 container, Rust
+1.95.0, Cortex-A53 tuning, 64 blocks, only the rendering counted). The engine's cases: sine
+operators, every listed operator at level 99, feedback 7, each envelope in a slow decay 1 so the
+segment checks run on every control step (the costlier envelope path), held notes, 32 voices.
+
+| Case | Instructions a voice-block | Drw a voice-block |
+|---|---|---|
+| at rest (no voice), per block | 1,277 | 331 |
+| routing 12 (feedback loop through 3 > 4 > 5, interleaved), eight operators | **20,240** (8 voices: 20,361) | 4,416 |
+| routing 14 (loop through 3 > 4), eight operators | 18,806 | 4,396 |
+| routing 80 (the most modulation edges), eight operators | 16,554 | 4,512 |
+| routing 8, eight operators | 16,134 | 4,228 |
+| routing 1 (eight carriers), eight operators | 16,214 | 4,264 |
+| routing 1, one operator | 3,131 | 1,137 |
+| routing 12, eight operators, scalar back end | 21,068 | 4,268 |
+
+The worst plan with eight operators is 20,240 against the gate of 28,000; at rest 1,277 against
+2,000. What the real envelopes cost: routing 80 against the spike's same graph on the sine
+(15,115) is 1,439 a voice-block more (10 %), with the measured envelope laws, the segment checks,
+the per-voice fade and the plan's checks; the loop routing costs more than in the spike (20,240
+against 18,379 on its table form) because only its live operators are interleaved, by a filter per
+sample. Rest is higher than the spike's (622) because the pool has 40 lanes to look at.
+
+Data misses a voice-block with the device's caches (callgrind `--D1=32768,4,64
+--LL=524288,16,64`), routing 12 with eight operators: 1 voice 5.9 first-level and 1.1 last-level;
+8 voices 1.0 and 0.1; 25 voices 1.1 and 0.0; 64 voices 2.6 and 0.0
+(`tools/cost/cache-baseline.txt`). A lane's state is under 2 KB (a unit test) and a lane at work
+touches under 11 KB with its scratch and the sine table (the first-level budget test: at most 16 KB).
+
+Correctness, seen pass (macOS arm64, Linux arm64 in the container, x86_64 under translation on
+macOS): the laws against the existing profile's measured numbers (test vectors in `laws` and
+renders in `engine`: a lone carrier within 0.02 dB of −17.64 dBFS, the routing gain, level and
+envelope levels, the modulation index by J1/J0 within 1 %, decay slopes and time key follow within
+2 % of the tables, hold times, frequencies within 0.05 cent of the grid in ratio and fixed mode,
+note shift, the fixed-frequency hold at 22.04 kHz, the feedback amounts); a fuzz of random notes,
+releases, pedals, limits and sound changes (finite, bounded, native and scalar bit-identical,
+every note ended exactly once); a golden render hash the same on every back end; the 88 routings
+against the documented chart; every single-byte corruption and truncation of a sound blob refused.
+
 ## 4. Audio-thread safety, and how it is proven
 
 - **No allocation**, by construction: the core is `#![no_std]` and does not link the `alloc` crate;
@@ -420,22 +484,21 @@ level make it silent costs nothing; most sounds do not use all eight at full lev
 
 | Gate | Where | State |
 |---|---|---|
-| `cargo fmt --check`, `clippy -D warnings` | CI, all targets | seen pass on macOS arm64 |
-| native back end against scalar, bit for bit (vector operations, and the spike on every form, layout and routing) | CI, all targets | seen pass: macOS arm64, Linux arm64, x86_64 under translation |
-| golden render hash (same on every back end) | CI, all targets | as above |
-| scalar back end as the native one | CI | seen pass on macOS arm64 |
-| finite, bounded, every voice ends; silence in, silence out | CI | seen pass |
-| hot set within half of the 32 KB first-level cache | unit test | seen pass |
+| `cargo fmt --check`, `clippy -D warnings` | CI, all targets | seen pass on macOS arm64 (M1); CI on all four targets at M0 |
+| native back end against scalar, bit for bit (vector operations; the spike on every form, layout and routing; the engine in the fuzz) | CI, all targets | seen pass: macOS arm64, Linux arm64, x86_64 under translation |
+| golden render hashes, spike and engine (same on every back end) | CI, all targets | as above, and the scalar back end |
+| scalar back end as the native one | CI | seen pass on macOS arm64 and Linux arm64 |
+| finite, bounded, every note ends exactly once (fuzz); silence in, silence out | CI | seen pass |
+| the laws against the existing profile's measured numbers; the 88 routings against the chart; the coverage table against the code; every corruption and truncation of a sound blob refused | CI | seen pass |
+| hot set within half of the 32 KB first-level cache (spike and engine) | unit test | seen pass |
 | core builds without `std` and without `alloc` | CI (bare-metal target) | seen pass locally |
-| no panic path (symbols, link) | CI (unix) | seen pass on macOS arm64 and Linux arm64 |
-| cost: rest at most 2,000 a block, worst non-sine voice at most 28,000, every case at most 10 % over `tools/cost/baseline.txt` | CI (aarch64, callgrind) | seen pass in the aarch64 container |
+| no panic path (symbols, link), the engine's note on and off, pedal, choke, limits and render included | CI (unix) | seen pass on macOS arm64 and Linux arm64 |
+| cost: rest at most 2,000 a block, the worst eight-operator voice (engine, and the spike's non-sine forms) at most 28,000, every case at most 10 % over `tools/cost/baseline.txt`; data misses with the device's caches at most 10 % and half a miss over `tools/cost/cache-baseline.txt` | CI (aarch64, callgrind) | seen pass in the aarch64 container |
 
-To come with the engine: the coverage table and `not_covered()`; laws against the existing
-profile's measured numbers (as test vectors); ABI-level tests of the shell with the aborting
-allocator; a fuzz test (random events and parameters: output finite and bounded, every note ends
-exactly once, no allocation); a hosted cost gate (the plugin through CLAP against the core alone);
-sample-rate equivalence (48 to 192 kHz against 44.1 kHz behaviour); the device timing per milestone
-(hosted target about 30 µs a voice; the existing profile measured 110–140 µs a voice on the device).
+To come: ABI-level tests of the shell with the aborting allocator; a hosted cost gate (the plugin
+through CLAP against the core alone); sample-rate equivalence (48 to 192 kHz against 44.1 kHz
+behaviour); the device timing per milestone (hosted target about 30 µs a voice; the existing
+profile measured 110–140 µs a voice on the device; the M1 binaries are not yet run there).
 
 ## 7. Milestones
 
@@ -444,7 +507,7 @@ Sizes are rough, in working sessions of the size of this round.
 | | Milestone | Content | Size |
 |---|---|---|---|
 | M0 | this round | design, scaffold, vector type, spike, cost and panic gates | done |
-| M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | 3 |
+| M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | done (section 3.1), except frame-exact note starts (a block is not yet split at events) |
 | M2 | waves | the six forms with spread and formant, band-limit versions, tables from the measured amplitudes and phases, `f32` or `i16` decided, cost re-measured | 2 |
 | M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | 2 |
 | M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | 2–3 |
@@ -463,3 +526,16 @@ Sizes are rough, in working sessions of the size of this round.
 - The deliberate differences of section 1.5 (band-limiting, formant silence above Nyquist, no
   filter overload, no output clip, widened pitch ranges): keep them all?
 - The voice pool size an instance (the existing profile: 128 shared by every sound).
+
+Provisional decisions taken at M1 while the owner was away (conservative defaults, for a ruling):
+
+- The voice pool is 128 voices an instance, a ceiling shared by its sounds; each sound's lanes are
+  taken by use from 40 (2.8).
+- The existing profile's deliberate departures from the reference are not adopted silently: where
+  the reference's behaviour is known and cheap it is played (fixed frequencies held at 22.04 kHz,
+  note shift +-48, fractional part velocities), otherwise the difference is listed in
+  `docs/known-differences.md`.
+- The controller-set switches and the pitch and level controller sensitivities have their ids,
+  ranges and defaults in the sound format now; their behaviour waits for M7.
+- Parameter defaults are the model's initial values, except portamento (off), so that a sound
+  without the parameter plays as before it existed.
