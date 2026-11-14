@@ -629,9 +629,8 @@ impl Engine {
     /// Adds one block of every sounding voice, mono, to `out`; reports the notes that ended.
     pub fn render<V: F4>(&mut self, out: &mut [f32; BLOCK], end: &mut impl FnMut(NoteEnd)) {
         while self.keeping(None) > self.limit && self.shed(None, None) {}
-        for sound in 0..SOUNDS as u8 {
-            let own = usize::from(self.limits.get(usize::from(sound)).map_or(0, |l| l.limit));
-            while own > 0 && self.keeping(Some(sound)) > own && self.shed(None, Some(sound)) {}
+        for (sound, lim) in (0..SOUNDS as u8).zip(self.limits).filter(|(_, l)| l.limit > 0) {
+            while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
         }
         let shed_step = self.shed_step;
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0) {
@@ -1388,6 +1387,20 @@ mod tests {
         assert!(started.len() > 3000, "{} notes", started.len());
         assert!(ended.values().all(|&c| c == 1), "a note ended twice");
         assert_eq!(started, ended, "every note ends exactly once");
+    }
+
+    /// The first-level data cache is 32 KB: a lane at work (its state, the step's scratch and the
+    /// sine table) must leave half of it for the rest of the block path.
+    #[test]
+    fn hot_set_fits_half_the_l1() {
+        use core::mem::size_of;
+        let scratch = size_of::<[[[f32; W]; STEP]; OPS]>() // operator outputs
+            + size_of::<[[f32; W]; STEP]>() // modulation input
+            + 2 * size_of::<[[f32; W]; OPS]>() // gains and ramps
+            + size_of::<[[f32; W]; BLOCK]>(); // the lane's output
+        let hot = size_of::<Lane>() + scratch + size_of::<crate::tables::Table>();
+        assert!(hot <= 16 * 1024, "{hot} B");
+        assert!(size_of::<Lane>() <= 2048, "{} B a lane", size_of::<Lane>());
     }
 
     #[test]
