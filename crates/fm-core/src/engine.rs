@@ -5,13 +5,14 @@
 //! Fixed size; nothing here allocates, and the block path (`note_on`, `note_off`, `pedal`,
 //! `render`) has no panic path (tools/check-no-panic.sh).
 
+use crate::forms::Wave;
 use crate::laws::{self, DOUBLINGS_PER_DB as DPD};
 use crate::params::{op_index, Common, Op, Part, OPS};
 use crate::plan::{Feedback, Plan};
 use crate::routing::routing;
 use crate::simd::{F4, U4, W};
 use crate::sound::Sound;
-use crate::tables::{offset, read, SINE};
+use crate::tables::{offset, read, read16, Table16, SINE};
 
 /// Frames a control step.
 pub const STEP: usize = 16;
@@ -93,7 +94,7 @@ impl Prepared {
         let feedback = i32::from(s.get(Common::Feedback as usize));
         let o = |op: usize, k: Op, i: usize| i32::from(s.get(op_index(op, k, i)));
         let mut p = Prepared {
-            plan: Plan::new(&r, 0, false),
+            plan: Plan::new(&r, 0, false, [Wave::Sine; OPS]),
             fbk: 0.0,
             full: [0.0; OPS],
             level_velocity: [0; OPS],
@@ -176,7 +177,9 @@ impl Prepared {
             p.fixed |= if fixed { bit } else { 0 };
             p.reset |= if o(op, Op::KeyOnReset, 0) != 0 { bit } else { 0 };
         }
-        p.plan = Plan::new(&r, audible, feedback > 0);
+        let waves =
+            core::array::from_fn(|op| Wave::new(o(op, Op::Form, 0), o(op, Op::Spread, 0), o(op, Op::Formant, 0)));
+        p.plan = Plan::new(&r, audible, feedback > 0, waves);
         // a carrier feeds back its measured share of a modulator's amount, of its signal before the
         // routing's output level
         let fb_carrier = has(u32::from(r.carriers), usize::from(r.fb_from));
@@ -745,9 +748,17 @@ fn ops<V: F4>(lane: &mut Lane, p: &Prepared, g0: &[[f32; W]; OPS], dg: &[[f32; W
         Feedback::Loop { to, from } => (usize::from(to), usize::from(from)),
         _ => (OPS, OPS),
     };
+    let mixed = plan
+        .waves
+        .iter()
+        .skip(lo)
+        .take(hi.saturating_sub(lo) + 1)
+        .any(|&w| w != Wave::Sine);
     for i in (0..OPS).filter(|&i| has(u32::from(plan.live), i)) {
-        if i == lo {
-            interleaved::<V>(lane, p, g0, dg, &mut y, lo, hi);
+        if i == lo && mixed {
+            interleaved::<V, true>(lane, p, g0, dg, &mut y, lo, hi);
+        } else if i == lo {
+            interleaved::<V, false>(lane, p, g0, dg, &mut y, lo, hi);
         } else if i < lo || i > hi {
             single::<V>(lane, p, g0, dg, &mut y, i);
         }
@@ -792,32 +803,95 @@ fn single<V: F4>(
         }
     }
     let (inc, d) = (V::U::load(inc), V::load(d));
-    let (mut ph_v, mut g) = (V::U::load(*ph), V::load(g));
-    if p.plan.feedback == Feedback::Own(i as u8) {
-        // self-feedback: sample by sample within this operator
-        let fbk = V::splat(p.fbk);
-        let (mut y1, mut y2) = (V::load(lane.fb[0]), V::load(lane.fb[1]));
+    let wave = p.plan.waves.get(i).copied().unwrap_or(Wave::Sine);
+    let (g, d) = nyquist::<V>(wave, inc, V::load(g), d);
+    let mut ph_v = V::U::load(*ph);
+    let own = (p.plan.feedback == Feedback::Own(i as u8)).then_some((&mut lane.fb, p.fbk));
+    // one loop for each form, the match outside it
+    match wave {
+        Wave::Sine => run::<V>(|q, o| read(&SINE, q.add(o)), own, cur, &input, inc, g, d, &mut ph_v),
+        Wave::Table(t) => run::<V>(|q, o| read16(t, q.add(o)), own, cur, &input, inc, g, d, &mut ph_v),
+        Wave::Odd(t) => run::<V>(|q, o| odd(t, q, o), own, cur, &input, inc, g, d, &mut ph_v),
+        Wave::Resonant(t, c) => run::<V>(|q, o| resonant(t, c, q, o), own, cur, &input, inc, g, d, &mut ph_v),
+    }
+    *ph = ph_v.store();
+}
+
+/// An odd form: E(2t + m) sin(t + m).
+#[inline(always)]
+fn odd<V: F4>(t: &Table16, ph: V::U, off: V::U) -> V {
+    read16::<V>(t, ph.add(ph).add(off)) * read::<V>(&SINE, ph.add(off))
+}
+
+/// A resonant form: window(t + m) sin(centre t + m).
+#[inline(always)]
+fn resonant<V: F4>(t: &Table16, centre: u32, ph: V::U, off: V::U) -> V {
+    read16::<V>(t, ph.add(off)) * read::<V>(&SINE, ph.mul(V::U::splat(centre)).add(off))
+}
+
+/// An operator's output at phase `ph` and modulation offset `off`.
+#[inline(always)]
+fn wave<V: F4>(w: Wave, ph: V::U, off: V::U) -> V {
+    match w {
+        Wave::Sine => read(&SINE, ph.add(off)),
+        Wave::Table(t) => read16(t, ph.add(off)),
+        Wave::Odd(t) => odd(t, ph, off),
+        Wave::Resonant(t, c) => resonant(t, c, ph, off),
+    }
+}
+
+/// A resonant form is silent while its centre is at or above Nyquist (its gain and ramp zero for
+/// the step); the other forms as they are.
+#[inline(always)]
+fn nyquist<V: F4>(w: Wave, inc: V::U, g: V, d: V) -> (V, V) {
+    let Wave::Resonant(_, c) = w else { return (g, d) };
+    // centre x increment >= 2^31, in units of 2^8 (exact below 2^24)
+    let above = inc
+        .shr::<8>()
+        .small_to_f32()
+        .ge(V::splat(8_388_608.0 / c.max(1) as f32));
+    (V::select(above, V::splat(0.0), g), V::select(above, V::splat(0.0), d))
+}
+
+/// One operator's step: `r` reads its form at a phase and modulation offset; with `own`, it
+/// feeds back on itself sample by sample (the history and the amount).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn run<V: F4>(
+    r: impl Fn(V::U, V::U) -> V,
+    own: Option<(&mut [[f32; W]; 2], f32)>,
+    cur: &mut [[f32; W]; STEP],
+    input: &[[f32; W]; STEP],
+    inc: V::U,
+    mut g: V,
+    d: V,
+    ph: &mut V::U,
+) {
+    let mut ph_v = *ph;
+    if let Some((fb, k)) = own {
+        let fbk = V::splat(k);
+        let (mut y1, mut y2) = (V::load(fb[0]), V::load(fb[1]));
         for (out, m) in cur.iter_mut().zip(input.iter()) {
-            let v = read::<V>(&SINE, ph_v.add(offset((y1 + y2).mul_add(fbk, V::load(*m))))) * g;
+            let v = r(ph_v, offset((y1 + y2).mul_add(fbk, V::load(*m)))) * g;
             *out = v.store();
             (y2, y1) = (y1, v);
             g = g + d;
             ph_v = ph_v.add(inc);
         }
-        lane.fb = [y1.store(), y2.store()];
+        *fb = [y1.store(), y2.store()];
     } else {
         for (out, m) in cur.iter_mut().zip(input.iter()) {
-            *out = (read::<V>(&SINE, ph_v.add(offset(V::load(*m)))) * g).store();
+            *out = (r(ph_v, offset(V::load(*m))) * g).store();
             g = g + d;
             ph_v = ph_v.add(inc);
         }
     }
-    *ph = ph_v.store();
+    *ph = ph_v;
 }
 
 /// Operators `lo..=hi` (the live ones) sample by sample: each sample's input reads the outputs
 /// already written for that sample (sources below `lo` were written for the whole step before).
-fn interleaved<V: F4>(
+fn interleaved<V: F4, const MIXED: bool>(
     lane: &mut Lane,
     p: &Prepared,
     g0: &[[f32; W]; OPS],
@@ -830,7 +904,12 @@ fn interleaved<V: F4>(
     let mut ph = lane.ph.map(V::U::load);
     let inc = lane.inc.map(V::U::load);
     let mut g = g0.map(V::load);
-    let dg = dg.map(V::load);
+    let mut dg = dg.map(V::load);
+    if MIXED {
+        for ((gk, dk), (&w, &i)) in g.iter_mut().zip(dg.iter_mut()).zip(plan.waves.iter().zip(inc.iter())) {
+            (*gk, *dk) = nyquist::<V>(w, i, *gk, *dk);
+        }
+    }
     let fbk = V::splat(p.fbk);
     let (mut y1, mut y2) = (V::load(lane.fb[0]), V::load(lane.fb[1]));
     for s in 0..STEP {
@@ -849,7 +928,11 @@ fn interleaved<V: F4>(
             else {
                 continue;
             };
-            let v = read::<V>(&SINE, pk.add(offset(m))) * *gk;
+            let v = if MIXED {
+                wave::<V>(plan.waves.get(k).copied().unwrap_or(Wave::Sine), *pk, offset(m))
+            } else {
+                read::<V>(&SINE, pk.add(offset(m)))
+            } * *gk;
             *gk = *gk + dgk;
             *pk = pk.add(inck);
             if k == hi {
@@ -1288,7 +1371,8 @@ mod tests {
         let played = [30u16, 31, 209, 212, 213];
         for p in PARAMS.iter() {
             let k = p.id % 100;
-            let op_played = p.op.is_some() && ((40..=44).contains(&k) || (54..=64).contains(&k) || k == 70);
+            let op_played = p.op.is_some()
+                && ((40..=44).contains(&k) || (47..=49).contains(&k) || (54..=64).contains(&k) || k == 70);
             if played.contains(&p.id) || op_played {
                 let span = (i32::from(p.max) - i32::from(p.min) + 1) as u32;
                 s.set(p.id, (i32::from(p.min) + (r() % span) as i32) as i16).unwrap();
@@ -1389,6 +1473,147 @@ mod tests {
         assert_eq!(started, ended, "every note ends exactly once");
     }
 
+    /// Hann-windowed magnitudes of harmonics 1..=n of `x` at `f0`.
+    fn harmonics(x: &[f32], f0: f64, n: usize) -> Vec<f64> {
+        (1..=n).map(|h| magnitude(x, f0 * h as f64)).collect()
+    }
+
+    /// A lone carrier's held part at key 48 (operator 1 on routing 1), and its frequency.
+    fn held(extra: &str) -> (Vec<f32>, f64) {
+        let x = play::<Native>(&carrier(1, extra), 48, 100.0, 1000, 170);
+        (x[BLOCK * 20..].to_vec(), laws::steps_hz(laws::key_steps(48)))
+    }
+
+    /// Every harmonic form at every spread as a carrier: its first 16 harmonics against the measured
+    /// amplitudes relative to a sine at the same level, and its loudness (rms) against the sine's
+    /// by the measured difference: the level law holds across forms.
+    #[test]
+    fn forms_against_a_sine() {
+        use crate::forms_data::{DC, HARMONIC, WINDOW};
+        let (sine, f0) = held("");
+        let unit = magnitude(&sine, f0);
+        let rms = |x: &[f32]| (x.iter().map(|&v| f64::from(v) * f64::from(v)).sum::<f64>() / x.len() as f64).sqrt();
+        let (mut worst, mut worst_rms) = (0.0f64, 0.0f64);
+        for form in 1..=6 {
+            for spread in 0..8 {
+                let set = (form - 1) * 8 + spread;
+                let (x, _) = held(&format!("op1.form={form} op1.spread={spread} op1.formant=49"));
+                let got = harmonics(&x, f0, 66);
+                // (harmonic, measured amplitude) and the power the data says the form has
+                let (want, power): (Vec<(usize, f64)>, f64) = if form <= 4 {
+                    let h = HARMONIC[set];
+                    let dc = if form <= 2 { f64::from(DC[set]) } else { 0.0 };
+                    let w = h
+                        .iter()
+                        .filter(|c| c.0 <= 16)
+                        .map(|c| (usize::from(c.0), f64::from(c.1)))
+                        .collect();
+                    (w, dc * dc + h.iter().map(|c| f64::from(c.1).powi(2) / 2.0).sum::<f64>())
+                } else {
+                    // the window times a sine at harmonic 50: a cos(d t + p) sin(50 t) is
+                    // a/2 (sin((50 + d) t + p) + sin((50 - d) t - p)), folded below harmonic 1
+                    let w = WINDOW[set - 32];
+                    let mut z = [(0.0f64, 0.0f64); 160];
+                    let mut put = |n: i32, a: f64, p: f64| {
+                        let (a, p) = if n < 0 { (-a, -p) } else { (a, p) };
+                        let e = &mut z[n.unsigned_abs() as usize];
+                        *e = (e.0 + a * p.cos(), e.1 + a * p.sin());
+                    };
+                    for &(d, a, p) in w {
+                        let (d, a, p) = (i32::from(d), f64::from(a), f64::from(p));
+                        if d == 0 {
+                            put(50, a, p);
+                        } else {
+                            put(50 + d, a / 2.0, p);
+                            put(50 - d, a / 2.0, -p);
+                        }
+                    }
+                    let v = (35..=65).map(|h| (h, z[h].0.hypot(z[h].1))).collect();
+                    let p = (1..160).map(|h| z[h].0.hypot(z[h].1).powi(2) / 2.0).sum();
+                    (v, p)
+                };
+                let top = want.iter().fold(0.0f64, |m, w| m.max(w.1));
+                for &(h, a) in want.iter().filter(|w| w.1 >= top * 0.01) {
+                    let db = 20.0 * (got[h - 1] / unit / a).log10();
+                    assert!(db.abs() < 0.06, "form {form} spread {spread} harmonic {h}: {db:.3} dB");
+                    worst = worst.max(db.abs());
+                }
+                let db = 20.0 * (rms(&x) / rms(&sine) / (2.0 * power).sqrt()).log10();
+                assert!(
+                    db.abs() < 0.05,
+                    "form {form} spread {spread}: loudness {db:.3} dB from the measured"
+                );
+                worst_rms = worst_rms.max(db.abs());
+            }
+        }
+        println!("forms against a sine: harmonics within {worst:.3} dB, loudness within {worst_rms:.3} dB");
+    }
+
+    /// The resonant forms' centre is harmonic formant + 1 at formants 9-99 at spreads 0 and 3, 18-99
+    /// at spread 7 (lower, the window folds back below harmonic 1: `resonant_fold_back`),
+    /// and their sidebands give the window's width (`forms_against_a_sine`).
+    #[test]
+    fn resonant_centre_follows_the_formant() {
+        for form in [5, 6] {
+            for spread in [0, 3, 7] {
+                for formant in (if spread == 7 { 18 } else { 9 }..=99).step_by(9) {
+                    let (x, f0) = held(&format!("op1.form={form} op1.spread={spread} op1.formant={formant}"));
+                    let got = harmonics(&x, f0, 110);
+                    let strongest = (0..got.len()).fold(0, |m, i| if got[i] > got[m] { i } else { m }) + 1;
+                    assert_eq!(strongest, formant + 1, "form {form} spread {spread} formant {formant}");
+                }
+            }
+        }
+    }
+
+    /// The reference's renders: resonant 2 at spread 5, formant 0: harmonic 15, where the window's
+    /// components below harmonic 1 fold back, -75.75 dB against a sine (the existing profile 1.5 dB).
+    #[test]
+    fn resonant_fold_back() {
+        let (sine, f0) = held("");
+        let (x, _) = held("op1.form=6 op1.spread=5");
+        let db = 20.0 * (magnitude(&x, 15.0 * f0) / magnitude(&sine, f0)).log10();
+        assert!((db + 75.75).abs() < 1.5, "{db:.2} dB");
+    }
+
+    /// A resonant form whose centre is at or above Nyquist is silent (a known difference: the
+    /// reference plays a tone near Nyquist there).
+    #[test]
+    fn resonant_above_nyquist_is_silent() {
+        let below = play::<Native>(&carrier(1, "op1.form=5 op1.formant=99"), 48, 100.0, 1000, 20);
+        let above = play::<Native>(&carrier(1, "op1.form=5 op1.formant=99"), 60, 100.0, 1000, 20);
+        assert!(peak_db(&below) > -30.0 && above.iter().all(|&v| v == 0.0));
+    }
+
+    /// Non-sine carriers modulated by a sine, against the reference's renders (note 48, operator 1
+    /// a sine at ratio 1 and level 65 modulating operator 2): harmonics 1-8 relative to the
+    /// strongest within 1 dB where the reference's are within 40 dB (the existing profile's gate).
+    #[test]
+    fn modulated_forms_against_the_reference() {
+        let cases = [
+            (2, 4, 0, [0.0, -5.2, -16.5, -30.9, -28.1, -42.3, -47.0, -55.2]),
+            (4, 2, 0, [0.0, -6.4, -6.2, -6.1, -31.0, -13.5, -21.7, -32.7]),
+            (5, 0, 5, [-89.3, -67.1, -45.6, -26.4, -2.7, 0.0, -24.6, -15.2]),
+        ];
+        for (form, spread, formant, reference) in cases {
+            let p = sound(&format!(
+                "algorithm=7\nop1.level=65\nop2.level=99 op2.form={form} op2.spread={spread} op2.formant={formant}\nop8.level=0"
+            ));
+            assert_eq!(p.plan.live, 3);
+            let x = play::<Native>(&p, 48, 100.0, 1000, 170);
+            let h = harmonics(&x[BLOCK * 20..], laws::steps_hz(laws::key_steps(48)), 8);
+            let top = h.iter().fold(0.0f64, |m, &v| m.max(v));
+            for (k, &r) in reference.iter().enumerate().filter(|(_, &r)| r > -40.0) {
+                let db = 20.0 * (h[k] / top).log10();
+                assert!(
+                    (db - r).abs() < 1.0,
+                    "form {form} harmonic {}: {db:.2} dB, the reference {r}",
+                    k + 1
+                );
+            }
+        }
+    }
+
     /// The first-level data cache is 32 KB: a lane at work (its state, the step's scratch and the
     /// sine table) must leave half of it for the rest of the block path.
     #[test]
@@ -1403,14 +1628,20 @@ mod tests {
         assert!(size_of::<Lane>() <= 2048, "{} B a lane", size_of::<Lane>());
     }
 
-    /// The same bits on every target and back end (checked on every CI target): routings 12 and
-    /// 80 with feedback, every operator, notes released halfway.
-    #[test]
-    fn golden_render() {
+    /// A hash of the output of six notes on routings 12 and 80 with feedback, every operator,
+    /// released halfway; `forms` adds each operator's form, spread and formant line.
+    fn golden(forms: impl Fn(i32) -> String) -> u64 {
         let mut h = 0u64;
         for r in [12, 80] {
             let text: String = (1..=8)
-                .map(|o| format!("op{o}.level={} op{o}.coarse={o} op{o}.detune={}\n", 60 + 4 * o, o - 4))
+                .map(|o| {
+                    format!(
+                        "op{o}.level={} op{o}.coarse={o} op{o}.detune={} {}\n",
+                        60 + 4 * o,
+                        o - 4,
+                        forms(o)
+                    )
+                })
                 .collect();
             let p = sound(&format!("algorithm={r} feedback=6\n{text}"));
             let mut e = engine(&p);
@@ -1426,10 +1657,20 @@ mod tests {
                 h = out.iter().fold(h, |h, x| h.rotate_left(5) ^ u64::from(x.to_bits()));
             }
         }
+        h
+    }
+
+    /// The same bits on every target and back end (checked on every CI target), sines and forms.
+    #[test]
+    fn golden_render() {
+        let h = golden(|_| String::new());
         assert_eq!(h, GOLDEN, "render hash {h:#x}");
+        let h = golden(|o| format!("op{o}.form={} op{o}.spread={} op{o}.formant={}", o % 7, o % 8, 5 * o));
+        assert_eq!(h, GOLDEN_FORMS, "render hash with forms {h:#x}");
     }
 
     const GOLDEN: u64 = 0xee81_582b_c559_a5fe;
+    const GOLDEN_FORMS: u64 = 0x6308_0b08_ff84_df29;
 
     #[test]
     fn silence_in_silence_out() {

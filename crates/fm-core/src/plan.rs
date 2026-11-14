@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! A sound's plan (docs/design.md, "Plans"): which operators can be heard at all, which modulate
 //! which among those, and the feedback path's kind, decided once per sound so the block path renders
-//! only what can be heard and a sound that uses less costs less. Every operator is a sine at M1;
-//! the forms join the plan at M2.
+//! only what can be heard and a sound that uses less costs less; each operator's form is in the
+//! plan, so a sound pays only for the forms it uses.
 
+use crate::forms::Wave;
 use crate::params::OPS;
 use crate::routing::Routing;
 
@@ -30,6 +31,8 @@ pub struct Plan {
     /// Per operator, its live modulators.
     pub mods: [u8; OPS],
     pub feedback: Feedback,
+    /// Per operator, how its form is played (a sine where not live).
+    pub waves: [Wave; OPS],
 }
 
 /// Instructions a voice-block (callgrind, aarch64, Cortex-A53): the fixed part and each rendered
@@ -37,10 +40,12 @@ pub struct Plan {
 const VOICE_COST: u32 = 600;
 const OP_COST: u32 = 2300;
 const LOOP_OP_COST: u32 = 900;
+const TABLE_COST: u32 = 0;
+const TWO_READ_COST: u32 = 0;
 
 impl Plan {
     /// `audible`: operators whose level and envelope levels are not all silent.
-    pub fn new(r: &Routing, audible: u8, feedback: bool) -> Plan {
+    pub fn new(r: &Routing, audible: u8, feedback: bool, waves: [Wave; OPS]) -> Plan {
         let mut live = 0u8;
         for i in (0..OPS).rev() {
             let bit = 1u8 << i;
@@ -67,6 +72,13 @@ impl Plan {
             carriers: r.carriers & live,
             mods: r.mods.map(|m| m & live),
             feedback,
+            waves: core::array::from_fn(|i| {
+                if on(i as u8) {
+                    waves.get(i).copied().unwrap_or(Wave::Sine)
+                } else {
+                    Wave::Sine
+                }
+            }),
         }
     }
 
@@ -76,7 +88,12 @@ impl Plan {
             Feedback::Loop { to, from } => u32::from(from.saturating_sub(to)) + 1,
             _ => 0,
         };
-        VOICE_COST + OP_COST * self.live.count_ones() + LOOP_OP_COST * loop_ops
+        let forms = self.waves.iter().fold(0, |c, w| match w {
+            Wave::Sine => c,
+            Wave::Table(_) => c + TABLE_COST,
+            _ => c + TWO_READ_COST,
+        });
+        VOICE_COST + OP_COST * self.live.count_ones() + LOOP_OP_COST * loop_ops + forms
     }
 }
 
@@ -85,22 +102,24 @@ mod tests {
     use super::*;
     use crate::routing::{routing, ROUTINGS};
 
+    const SINES: [Wave; OPS] = [Wave::Sine; OPS];
+
     #[test]
     fn only_what_can_be_heard_is_rendered() {
         // routing 2: 1 > 2 > 3 > 4, carriers 4-8; operator 1 feeds back on itself
         let r = routing(2);
-        let all = Plan::new(&r, 0xff, true);
+        let all = Plan::new(&r, 0xff, true, SINES);
         assert_eq!((all.live, all.carriers, all.feedback), (0xff, 0xf8, Feedback::Own(0)));
         // operator 3 silent: 1 and 2 are not heard either
-        let p = Plan::new(&r, !4, true);
+        let p = Plan::new(&r, !4, true, SINES);
         assert_eq!((p.live, p.mods[3], p.feedback), (0xf8, 0, Feedback::None));
         // only operator 8 (the model's init sound)
-        let p = Plan::new(&routing(69), 0x80, true);
+        let p = Plan::new(&routing(69), 0x80, true, SINES);
         assert_eq!((p.live, p.carriers), (0x80, 0x80));
         assert!(p.cost() < all.cost());
-        assert_eq!(Plan::new(&r, 0xff, false).feedback, Feedback::None);
+        assert_eq!(Plan::new(&r, 0xff, false, SINES).feedback, Feedback::None);
         assert_eq!(
-            Plan::new(&routing(12), 0xff, true).feedback,
+            Plan::new(&routing(12), 0xff, true, SINES).feedback,
             Feedback::Loop { to: 2, from: 4 }
         );
     }

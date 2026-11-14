@@ -12,7 +12,7 @@ FM plugin profile's measured accuracy against the reference (docs/design.md, sec
 the laws here reuse; "the engine" figures are this repository's tests. Known differences from the
 reference: docs/known-differences.md.
 
-At M1: every operator is a sine; the laws below are played on every routing; nothing else.
+At M2: the laws below are played on every routing, the operator forms included; nothing else.
 
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|
@@ -194,9 +194,9 @@ At M1: every operator is a sine; the laws below are played on every routing; not
 | `opN.detune` | 1000 + 100 op + 44 | played | -15 to 15 (0) | measured table by key (cents), on 1/1024-octave steps; fixed-mode operators too; existing profile: 5 of 20 one grid step off, up to 1.18 cents |
 | `opN.fixed_key_follow` | 1000 + 100 op + 45 | M3 (pitch) | 0 to 99 (0) |  |
 | `opN.pitch_velocity` | 1000 + 100 op + 46 | M3 (pitch) | -7 to 7 (0) |  |
-| `opN.form` | 1000 + 100 op + 47 | M2 (waves) | 0 to 6 (0) |  |
-| `opN.spread` | 1000 + 100 op + 48 | M2 (waves) | 0 to 7 (0) |  |
-| `opN.formant` | 1000 + 100 op + 49 | M2 (waves) | 0 to 99 (0) |  |
+| `opN.form` | 1000 + 100 op + 47 | played | 0 to 6 (0) | sine; all harmonics 1 and 2 (one table); odd harmonics 1 and 2 (E(2t + m) sin(t + m)); resonant 1 and 2 (window(t + m) sin(centre t + m)); tables from the existing profile's measured amplitudes and phases, not band-limited (as the reference); the engine: every form and spread within 0.06 dB of the measured levels of its first 16 harmonics relative to a sine and its loudness within 0.05 dB of the measured (worst 0.009 and 0.034 dB), the tables' phases within 0.002 rad; modulated forms within 1 dB of three of the reference's renders (tests); existing profile: the four harmonic forms within 0.06 dB of the reference (first 16 harmonics), as modulators 100 of 111 cases within 1 dB; a resonant form whose centre is at or above Nyquist is silent (the reference plays a tone near Nyquist: docs/known-differences.md); a non-sine modulator's spectrum is not checked against the reference here |
+| `opN.spread` | 1000 + 100 op + 48 | played | 0 to 7 (0) | a table per form and spread; as form; existing profile, resonant forms: spread 7 meets 10 of 24 formant cases (3 to over 100 dB off), resonant 2 at formant 0 off by 2-7 dB at spreads 4-5, low centres at spreads 4-7 off by up to 13 dB (inherited) |
+| `opN.formant` | 1000 + 100 op + 49 | played | 0 to 99 (0) | the centre harmonic formant + 1; the engine: the strongest harmonic is the centre at formants 9-99 (spreads 0 and 3) and 18-99 (spread 7), and resonant 2 at spread 5, formant 0 plays harmonic 15 within 1.5 dB of the reference's -75.75 dB (tests); existing profile: spreads 0-3 48 of 48 (worst 0.58 dB), spread 7 as spread |
 | `opN.pitch_eg_level_initial` | 1000 + 100 op + 50 | M3 (pitch) | -50 to 50 (0) |  |
 | `opN.pitch_eg_level_attack` | 1000 + 100 op + 51 | M3 (pitch) | -50 to 50 (0) |  |
 | `opN.pitch_eg_time_attack` | 1000 + 100 op + 52 | M3 (pitch) | 0 to 99 (0) |  |

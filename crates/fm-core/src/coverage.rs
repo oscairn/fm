@@ -19,6 +19,9 @@ pub fn status(p: &Param) -> &'static str {
         "coarse",
         "fine",
         "detune",
+        "form",
+        "spread",
+        "formant",
         "eg_level_attack",
         "eg_level_decay1",
         "eg_level_decay2",
@@ -44,8 +47,6 @@ pub fn status(p: &Param) -> &'static str {
         PLAYED
     } else if starts(&["ctrl_set", "key_ctrl_set", "tuning_"]) || n.ends_with("_ctrl_sens") {
         "M7 (controllers, tuning)"
-    } else if op && starts(&["form", "spread", "formant"]) {
-        "M2 (waves)"
     } else if starts(&[
         "pitch_",
         "random_pitch",
@@ -125,10 +126,10 @@ mod tests {
 
     #[test]
     fn report() {
-        let s = Sound::from_text("fm-sound/1\nalgorithm=5 random_pan=3\nop2.level=50 op2.form=3\n").unwrap();
+        let s = Sound::from_text("fm-sound/1\nalgorithm=5 random_pan=3\nop2.level=50 op2.pitch_velocity=3\n").unwrap();
         let mut got = Vec::new();
         not_covered(&s, |p, v, why| got.push((p.id, v, why)));
-        assert_eq!(got, vec![(0, 3, "M5 (filter and output)"), (1147, 3, "M2 (waves)")]);
+        assert_eq!(got, vec![(0, 3, "M5 (filter and output)"), (1146, 3, "M3 (pitch)")]);
         let mut n = 0;
         not_covered(&Sound::default(), |_, _, _| n += 1);
         assert_eq!(n, 0);

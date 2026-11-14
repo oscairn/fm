@@ -361,6 +361,8 @@ pub enum Op {
     Fine = 3,
     Detune = 4,
     Form = 7,
+    Spread = 8,
+    Formant = 9,
     EgLevel = 14, // four levels from here: attack, decay 1, decay 2, release (hold)
     EgTime = 18,  // four times from here, then the hold time
     EgHold = 22,

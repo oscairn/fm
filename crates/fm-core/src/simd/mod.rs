@@ -8,7 +8,7 @@
 //! State lives in memory as plain `[f32; 4]` / `[u32; 4]` arrays, whatever the back end, so a voice
 //! layout does not depend on the target.
 
-use crate::tables::{Table, N};
+use crate::tables::{Table, Table16, N};
 use core::ops::{Add, Mul, Sub};
 
 pub mod scalar;
@@ -45,6 +45,8 @@ pub trait F4: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self
     fn to_bits(self) -> Self::U;
     /// `t[k]` and `t[k + 1]` for each lane's `k = i & (N - 1)`: a table read and its neighbour.
     fn gather2(t: &Table, i: Self::U) -> (Self, Self);
+    /// [`F4::gather2`] of a Q14 table, as values (`t[k] / 16384`, exact).
+    fn gather2_q14(t: &Table16, i: Self::U) -> (Self, Self);
 
     /// `self * b + c`, rounded twice (identical on every back end).
     #[inline(always)]
@@ -104,7 +106,7 @@ pub type Native = scalar::F;
 mod tests {
     use super::*;
 
-    fn probe<V: F4>() -> [[u32; W]; 10] {
+    fn probe<V: F4>() -> [[u32; W]; 11] {
         let a = V::load([0.25, -1.5, 3.0e-7, 1000.0]);
         let b = V::load([-0.75, 2.0, 0.333, -0.001]);
         let u = <V::U as U4>::load([0xdead_beef, 7, 0x8000_0001, u32::MAX]);
@@ -125,6 +127,10 @@ mod tests {
             {
                 // indices past the table are masked into it
                 let (lo, hi) = V::gather2(&crate::tables::SINE, u);
+                (lo * V::splat(3.0) + hi).to_bits().store()
+            },
+            {
+                let (lo, hi) = V::gather2_q14(&crate::forms::FORMS[37], u);
                 (lo * V::splat(3.0) + hi).to_bits().store()
             },
         ]

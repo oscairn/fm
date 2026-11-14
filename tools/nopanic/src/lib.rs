@@ -59,7 +59,7 @@ pub extern "C" fn fm_nopanic_play(pick: u32, centre: u32, voice: usize, hz: f32,
 }
 
 /// Plays the engine: a sound on routing and feedback chosen by `pick`, every operator at full
-/// level, six notes from `key`, a voice limit, the pedal, a release and a choke halfway; `blocks`
+/// level on a form chosen by `pick`, six notes from `key`, a voice limit, the pedal, a release and a choke halfway; `blocks`
 /// blocks into `out`. Returns the notes that ended.
 #[no_mangle]
 pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u32, out: &mut [f32; BLOCK]) -> u32 {
@@ -68,6 +68,13 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
     let _ = s.set(31, (pick / 88 % 8) as i16);
     for op in 0..8 {
         let _ = s.set(1064 + 100 * op, 99);
+        // every form, spread and formant over the picks
+        let _ = s.set(1047 + 100 * op, ((pick / 3).wrapping_add(u32::from(op)) % 7) as i16);
+        let _ = s.set(1048 + 100 * op, ((pick / 5).wrapping_add(u32::from(op)) % 8) as i16);
+        let _ = s.set(
+            1049 + 100 * op,
+            (pick.wrapping_mul(7).wrapping_add(u32::from(op) * 13) % 100) as i16,
+        );
     }
     let mut e = Engine::new(48000.0);
     e.set_sound(0, &Prepared::new(&s));

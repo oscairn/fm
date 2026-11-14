@@ -2,7 +2,7 @@
 //! Scalar back end: four lanes as plain arrays. The definition the SIMD back ends must match.
 
 use super::{F4, MASK, U4, W};
-use crate::tables::Table;
+use crate::tables::{Table, Table16};
 use core::ops::{Add, Mul, Sub};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -110,6 +110,11 @@ impl F4 for F {
     #[inline(always)]
     fn gather2(t: &Table, i: U) -> (F, F) {
         let at = |k: u32| t.get(k as usize).copied().unwrap_or(0.0);
+        (F(i.0.map(|k| at(k & MASK))), F(i.0.map(|k| at((k & MASK) + 1))))
+    }
+    #[inline(always)]
+    fn gather2_q14(t: &Table16, i: U) -> (F, F) {
+        let at = |k: u32| f32::from(t.get(k as usize).copied().unwrap_or(0)) * (1.0 / 16384.0);
         (F(i.0.map(|k| at(k & MASK))), F(i.0.map(|k| at((k & MASK) + 1))))
     }
 }

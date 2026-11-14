@@ -2,7 +2,7 @@
 //! SSE2 back end (x86_64, where SSE2 is always present).
 
 use super::{F4, MASK, U4, W};
-use crate::tables::Table;
+use crate::tables::{Table, Table16};
 use core::arch::x86_64::*;
 use core::ops::{Add, Mul, Sub};
 
@@ -106,6 +106,26 @@ impl F4 for F {
             (
                 F(_mm_shuffle_ps::<0b10_00_10_00>(ab, cd)),
                 F(_mm_shuffle_ps::<0b11_01_11_01>(ab, cd)),
+            )
+        }
+    }
+    #[inline(always)]
+    fn gather2_q14(t: &Table16, i: U) -> (F, F) {
+        let p = t.as_ptr();
+        let mut k = [0u32; W];
+        // SAFETY: each index is masked below N, and the table holds N + 1 values, so every 4-byte
+        // load (t[k], t[k + 1]) is inside it. t[k] is the low half; the conversions are exact.
+        unsafe {
+            _mm_storeu_si128(k.as_mut_ptr().cast(), _mm_and_si128(i.0, _mm_set1_epi32(MASK as i32)));
+            let pair = |n: u32| core::ptr::read_unaligned(p.add(n as usize).cast::<i32>());
+            let v = _mm_set_epi32(pair(k[3]), pair(k[2]), pair(k[1]), pair(k[0]));
+            let scale = _mm_set1_ps(1.0 / 16384.0);
+            (
+                F(_mm_mul_ps(
+                    _mm_cvtepi32_ps(_mm_srai_epi32::<16>(_mm_slli_epi32::<16>(v))),
+                    scale,
+                )),
+                F(_mm_mul_ps(_mm_cvtepi32_ps(_mm_srai_epi32::<16>(v)), scale)),
             )
         }
     }

@@ -3,6 +3,7 @@
 //! process through the page cache). `LEN` is one cycle plus a guard point for interpolation.
 
 use crate::simd::{F4, U4};
+use crate::turns::sin_turns;
 
 /// Index bits of a table: 1024 points a cycle.
 pub const BITS: u32 = 10;
@@ -13,30 +14,8 @@ pub const LEN: usize = N + 1;
 
 pub type Table = [f32; LEN];
 
-/// sin(2 pi t) for t >= 0, in f64 (compile time only).
-const fn sin_turns(t: f64) -> f64 {
-    let mut r = t - (t as u64) as f64;
-    let mut sign = 1.0;
-    if r >= 0.5 {
-        r -= 0.5;
-        sign = -1.0;
-    }
-    if r > 0.25 {
-        r = 0.5 - r;
-    }
-    let x = 2.0 * core::f64::consts::PI * r;
-    let x2 = x * x;
-    // Taylor series to x^19 on [0, pi/2]: error below 1e-15
-    let mut term = x;
-    let mut sum = x;
-    let mut k = 1;
-    while k < 10 {
-        term = -term * x2 / ((2 * k) as f64 * (2 * k + 1) as f64);
-        sum += term;
-        k += 1;
-    }
-    sign * sum
-}
+/// A table stored as Q14 (`i16`, value / 16384): half the bytes, for the operator forms.
+pub type Table16 = [i16; LEN];
 
 #[allow(clippy::indexing_slicing)] // compile-time evaluation: an out-of-range index fails the build
 const fn build(form: Form) -> Table {
@@ -89,6 +68,14 @@ pub static WINDOW: Table = build(Form::Window);
 pub fn read<V: F4>(t: &Table, p: V::U) -> V {
     let f = p.shr::<{ 16 - BITS as i32 }>().and(V::U::splat(0xffff)).small_to_f32() * V::splat(1.0 / 65536.0);
     let (a, b) = V::gather2(t, p.shr::<{ 32 - BITS as i32 }>());
+    (b - a).mul_add(f, a)
+}
+
+/// [`read`] of a Q14 table.
+#[inline(always)]
+pub fn read16<V: F4>(t: &Table16, p: V::U) -> V {
+    let f = p.shr::<{ 16 - BITS as i32 }>().and(V::U::splat(0xffff)).small_to_f32() * V::splat(1.0 / 65536.0);
+    let (a, b) = V::gather2_q14(t, p.shr::<{ 32 - BITS as i32 }>());
     (b - a).mul_add(f, a)
 }
 

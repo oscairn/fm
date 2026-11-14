@@ -2,7 +2,7 @@
 //! NEON back end (aarch64, where NEON is always present).
 
 use super::{F4, MASK, U4, W};
-use crate::tables::Table;
+use crate::tables::{Table, Table16};
 use core::arch::aarch64::*;
 use core::ops::{Add, Mul, Sub};
 
@@ -102,6 +102,26 @@ impl F4 for F {
             let d = vld1_f32(p.add(vgetq_lane_u32::<3>(k) as usize));
             let u = vuzpq_f32(vcombine_f32(a, b), vcombine_f32(c, d));
             (F(u.0), F(u.1))
+        }
+    }
+    #[inline(always)]
+    fn gather2_q14(t: &Table16, i: U) -> (F, F) {
+        let p = t.as_ptr();
+        // SAFETY: each index is masked below N, and the table holds N + 1 values, so every 4-byte
+        // load (t[k], t[k + 1]) is inside it; unaligned loads are allowed. Little-endian: t[k] is
+        // the low half. The conversions are exact (16 significant bits, power-of-two scales).
+        unsafe {
+            let k = vandq_u32(i.0, vdupq_n_u32(MASK));
+            let pair = |n: u32| core::ptr::read_unaligned(p.add(n as usize).cast::<u32>());
+            let mut v = vdupq_n_u32(pair(vgetq_lane_u32::<0>(k)));
+            v = vsetq_lane_u32::<1>(pair(vgetq_lane_u32::<1>(k)), v);
+            v = vsetq_lane_u32::<2>(pair(vgetq_lane_u32::<2>(k)), v);
+            v = vsetq_lane_u32::<3>(pair(vgetq_lane_u32::<3>(k)), v);
+            let v = vreinterpretq_s32_u32(v);
+            (
+                F(vcvtq_n_f32_s32::<30>(vshlq_n_s32::<16>(v))),
+                F(vcvtq_n_f32_s32::<14>(vshrq_n_s32::<16>(v))),
+            )
         }
     }
 }
