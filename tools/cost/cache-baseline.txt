@@ -1,0 +1,6 @@
+# First-level and last-level data misses a voice-block, the engine's worst case (fmbench engine N 64 12 8)
+# under callgrind with the device's caches (tools/cost/cg.sh); check allows 10 % and half a miss.
+cache-1 5.9 1.1
+cache-8 1.0 0.1
+cache-25 1.1 0.0
+cache-64 2.6 0.0

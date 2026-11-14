@@ -6,3 +6,12 @@ om-edges-window 21899
 om-chain-table 14613
 om-loop-table 18379
 om-loop-window 25131
+fm-rest 1278
+fm-r12-8 20240
+fm-r14-8 18806
+fm-r80-8 16554
+fm-r8-8 16134
+fm-r1-8 16214
+fm-r12-8-v8 20361
+fm-r1-1 3130
+fm-r12-8-scalar 21068
