@@ -14,6 +14,13 @@ pub const fn exp2(x: f64) -> f64 {
         x
     };
     let mut k = x as i64; // towards 0
+    k = if k < -1000 {
+        -1000
+    } else if k > 1000 {
+        1000
+    } else {
+        k
+    };
     if (k as f64) > x {
         k -= 1;
     }
@@ -30,6 +37,13 @@ pub const fn exp2(x: f64) -> f64 {
 }
 
 const fn pow2i(k: i64) -> f64 {
+    let k = if k < -1022 {
+        -1022
+    } else if k > 1023 {
+        1023
+    } else {
+        k
+    };
     f64::from_bits(((k + 1023) as u64) << 52)
 }
 
@@ -184,20 +198,20 @@ pub const ATTACK_START_DB: f64 = 56.3;
 
 /// A time's place on the envelope's rate scale: eight steps a doubling of the rate, the decay
 /// table's times on it; time 0 is step 119, 93-99 step 0.
-fn rate_step(t: i32) -> i32 {
+pub fn rate_step(t: i32) -> i32 {
     let v = at(&DECAY_MS_PER_DB, 99) * 8.0 / eg_ms_per_db(t);
-    let e = log2(v / 8.0 + 1e-9).max(0.0) as i32; // floor of a non-negative number
-    (8 * e + (v / pow2i(i64::from(e)) + 0.5) as i32 - 8).min(127)
+    let e = (log2(v / 8.0 + 1e-9) as i32).clamp(0, 20); // floor (of a non-negative number)
+    (8 * e + ((v / pow2i(i64::from(e)) + 0.5) as i32).clamp(0, 64) - 8).min(127)
 }
 
-fn rate(step: i32) -> f64 {
+pub fn rate(step: i32) -> f64 {
     f64::from(8 + (step & 7)) * pow2i(i64::from(step >> 3))
 }
 
 /// Time key follow 0-7 at a key: rate steps (keys in groups of three counted from key 1; keys
 /// 64-69 do not move; at most 15 groups either way; truncated towards 0).
 pub fn time_key_follow_steps(sens: i32, key: i32) -> i32 {
-    let group = (key + 2).div_euclid(3) - 1;
+    let group = (key.clamp(-256, 383) + 2).div_euclid(3) - 1;
     let keys = if group <= 21 {
         -(21 - group).min(15)
     } else {
@@ -219,7 +233,7 @@ pub const A4_STEPS: i32 = 13012;
 
 /// A key's pitch in steps (equal temperament, rounded up to the 1/1024-octave grid from A).
 pub fn key_steps(key: i32) -> i32 {
-    let num = (key - 69) * 1024;
+    let num = (key.clamp(-256, 383) - 69) * 1024;
     A4_STEPS + 2 * num.div_euclid(12) + if num.rem_euclid(12) != 0 { 2 } else { 0 }
 }
 
@@ -267,12 +281,9 @@ pub fn fixed_steps(coarse: i32, fine: i32) -> i32 {
 /// The highest frequency a fixed-mode operator plays: higher values hold here.
 pub const FIXED_MAX_HZ: f64 = 22_040.0;
 
+/// To the nearest integer, held within +-2^24 (so callers' integer arithmetic cannot overflow).
 fn round(x: f64) -> i32 {
-    if x < 0.0 {
-        -((-x + 0.5) as i32)
-    } else {
-        (x + 0.5) as i32
-    }
+    ((if x < 0.0 { x - 0.5 } else { x + 0.5 }) as i32).clamp(-1 << 24, 1 << 24)
 }
 
 // ---- feedback ----

@@ -20,12 +20,16 @@ cat > "$T/m.c" <<'EOC'
 #include <stdio.h>
 #include <stdlib.h>
 void fm_nopanic_play(uint32_t pick, uint32_t centre, size_t voice, float hz, uint32_t blocks, float *out);
+uint32_t fm_nopanic_engine(uint32_t pick, uint8_t key, float velocity, uint32_t blocks, float *out);
 int main(int argc, char **argv) {
     static float out[128];
     uint32_t a = argc > 1 ? (uint32_t)atoi(argv[1]) : 0;
     for (uint32_t pick = 0; pick < 32; pick++)
         fm_nopanic_play(pick + a, 7 + a, (size_t)argc * 5, 440.0f * (float)argc, 4, out);
-    printf("%g\n", out[0]);
+    uint32_t ended = 0;
+    for (uint32_t pick = 0; pick < 8 * 88; pick += 13)
+        ended += fm_nopanic_engine(pick + a, (uint8_t)(40 + a), 100.0f / (float)argc, 6, out);
+    printf("%g %u\n", out[0], ended);
     return 0;
 }
 EOC
