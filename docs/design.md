@@ -461,13 +461,15 @@ The worst plan with all eight operators on the costliest form is 27,636 against 
 vector and convert the fraction in one instruction (`simd`; the same bits on every back end).
 
 Data misses with the device's caches, routing 12, eight operators on eight different form tables and
-pitches (`cache-mixed-N`, the worst case for locality) against sines: first level 81.2, 40.6, 67.0
-and 109.8 a voice-block at 1, 8, 25 and 64 voices (sines 2.9, 0.4, 0.9, 2.6); last level 5.2,
-0.6, 0.2 and 0.1 (sines 1.1, 0.1, 0.0, 0.0). The hot set fits by size (about 27 KB; a unit test), but
-not without conflicts: these misses are served by the second-level cache, at most about 110 a
-voice-block, an estimated 1-2 µs a voice-block on the device at its second-level latency (to be
-timed with `fmbench time`, case "eight mixed forms"). Aligning each table to a cache line made it
-worse (91 to 139), and was not kept.
+pitches (`cache-mixed-N`, the worst case for locality) against sines: first level 129.4, 90.4, 98.2
+and 143.6 a voice-block at 1, 8, 25 and 64 voices (sines 7.9, 1.2, 1.6, 2.7); last level 5.2, 0.7,
+0.2 and 0.1 (sines 1.1, 0.1, 0.0, 0.0). The hot set fits by size (about 27 KB; a unit test), but not
+without conflicts: the nine tables alone (eight forms and the sine) put five lines on some of the
+first-level cache's 4-way sets wherever they are placed (computed), so these misses are structural
+for this case; the second-level cache serves them, an estimated 2-3 µs a voice-block on the device at
+its second-level latency (to be timed: `fmbench time`, case "eight mixed forms"). The counts move
+with the binary's layout (an unrelated change to fmbench moved them from 81, 41, 67, 110); aligning
+each table to a cache line made them worse, and was not kept.
 
 A lane costs the same with one voice as with four (routing 12: one voice alone 72,948 a
 voice-block, two 37,110, against 18,910 a voice at 32), and the device shows it too. A narrow kernel

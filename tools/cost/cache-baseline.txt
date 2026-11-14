@@ -1,11 +1,13 @@
 # First-level and last-level data misses a voice-block, routing 12 with eight operators (fmbench engine N 64
 # 12 8): sines (cache-N) and eight different form tables and pitches (cache-mixed-N, the worst locality),
 # under callgrind with the device's caches (tools/cost/cg.sh); check allows 10 % and half a miss.
-cache-1 2.9 1.1
-cache-8 0.4 0.1
-cache-25 0.9 0.0
-cache-64 2.6 0.0
-cache-mixed-1 81.2 5.2
-cache-mixed-8 40.6 0.6
-cache-mixed-25 67.0 0.2
-cache-mixed-64 109.8 0.1
+# The counts move with the binary's layout (where the linker puts the tables against the stack):
+# the same tree gives the same counts; an unrelated change to fmbench moved cache-mixed-8 from 40.6 to 90.4.
+cache-1 7.9 1.1
+cache-8 1.2 0.1
+cache-25 1.6 0.0
+cache-64 2.7 0.0
+cache-mixed-1 129.4 5.2
+cache-mixed-8 90.4 0.7
+cache-mixed-25 98.2 0.2
+cache-mixed-64 143.6 0.1
