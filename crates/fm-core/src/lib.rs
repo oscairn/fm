@@ -8,6 +8,7 @@
     allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod coverage;
 pub mod engine;
 pub mod laws;
 pub mod params;
