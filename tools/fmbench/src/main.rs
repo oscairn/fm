@@ -88,7 +88,7 @@ fn engine(routing: u32, ops: u32, voices: usize, forms: &str, sounds: usize) -> 
 fn time(blocks: usize) {
     println!("time a 128-frame block at 48 kHz (wall clock, microseconds), {blocks} blocks a case");
     println!(
-        "{:<28} {:>6} {:>9} {:>9} {:>9} {:>9} {:>11}",
+        "{:<30} {:>6} {:>9} {:>9} {:>9} {:>9} {:>11}",
         "case", "voices", "mean", "median", "p99", "max", "mean/voice"
     );
     let cases = [
@@ -98,28 +98,38 @@ fn time(blocks: usize) {
         ("eight resonant, routing 12", 12, 8, "res"),
         ("eight mixed forms, routing 12", 12, 8, "mixed"),
     ];
+    let mut rows: Vec<(String, Box<Engine>, usize)> = Vec::new();
     for (name, routing, ops, forms) in cases {
         for voices in [0usize, 1, 8, 16, 25, 32, 64] {
-            let mut e = engine(routing, ops, voices, forms, 1);
-            let mut out = [0.0f32; BLOCK];
-            let mut t = Vec::with_capacity(blocks);
-            for _ in 0..blocks {
-                out.fill(0.0);
-                let s = Instant::now();
-                fmbench_render_engine(&mut e, &mut out, false);
-                t.push(s.elapsed().as_secs_f64() * 1e6);
-            }
-            t.sort_by(f64::total_cmp);
-            let mean = t.iter().sum::<f64>() / blocks as f64;
-            let at = |q: f64| t[((blocks as f64 - 1.0) * q) as usize];
-            println!(
-                "{name:<28} {voices:>6} {mean:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>11.2}",
-                at(0.5),
-                at(0.99),
-                t[blocks - 1],
-                mean / voices.max(1) as f64
-            );
+            rows.push((name.to_string(), engine(routing, ops, voices, forms, 1), voices));
         }
+    }
+    // few voices a sound: a lane costs the same with one voice in it as with four
+    for sounds in [1usize, 5, 8] {
+        for voices in [1usize, 2] {
+            let name = format!("routing 12, {sounds} sounds");
+            rows.push((name, engine(12, 8, voices, "sine", sounds), voices * sounds));
+        }
+    }
+    for (name, mut e, voices) in rows {
+        let mut out = [0.0f32; BLOCK];
+        let mut t = Vec::with_capacity(blocks);
+        for _ in 0..blocks {
+            out.fill(0.0);
+            let s = Instant::now();
+            fmbench_render_engine(&mut e, &mut out, false);
+            t.push(s.elapsed().as_secs_f64() * 1e6);
+        }
+        t.sort_by(f64::total_cmp);
+        let mean = t.iter().sum::<f64>() / blocks as f64;
+        let at = |q: f64| t[((blocks as f64 - 1.0) * q) as usize];
+        println!(
+            "{name:<30} {voices:>6} {mean:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>11.2}",
+            at(0.5),
+            at(0.99),
+            t[blocks - 1],
+            mean / voices.max(1) as f64
+        );
     }
 }
 
