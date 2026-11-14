@@ -1403,6 +1403,34 @@ mod tests {
         assert!(size_of::<Lane>() <= 2048, "{} B a lane", size_of::<Lane>());
     }
 
+    /// The same bits on every target and back end (checked on every CI target): routings 12 and
+    /// 80 with feedback, every operator, notes released halfway.
+    #[test]
+    fn golden_render() {
+        let mut h = 0u64;
+        for r in [12, 80] {
+            let text: String = (1..=8)
+                .map(|o| format!("op{o}.level={} op{o}.coarse={o} op{o}.detune={}\n", 60 + 4 * o, o - 4))
+                .collect();
+            let p = sound(&format!("algorithm={r} feedback=6\n{text}"));
+            let mut e = engine(&p);
+            for v in 0..6 {
+                e.note_on(0, v, 40 + 7 * v as u8, 30.0 + 15.0 * v as f32, &mut |_| {});
+            }
+            for b in 0..24 {
+                if b == 12 {
+                    (0..6).for_each(|v| e.note_off(0, v));
+                }
+                let mut out = [0.0; BLOCK];
+                e.render::<Native>(&mut out, &mut |_| {});
+                h = out.iter().fold(h, |h, x| h.rotate_left(5) ^ u64::from(x.to_bits()));
+            }
+        }
+        assert_eq!(h, GOLDEN, "render hash {h:#x}");
+    }
+
+    const GOLDEN: u64 = 0xee81_582b_c559_a5fe;
+
     #[test]
     fn silence_in_silence_out() {
         let mut e = Engine::new(RATE);
