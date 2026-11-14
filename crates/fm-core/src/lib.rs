@@ -4,4 +4,5 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod simd;
+pub mod spike;
 pub mod tables;
