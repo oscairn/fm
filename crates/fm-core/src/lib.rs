@@ -10,6 +10,7 @@
 
 pub mod laws;
 pub mod params;
+pub mod plan;
 pub mod routing;
 pub mod simd;
 pub mod sound;
