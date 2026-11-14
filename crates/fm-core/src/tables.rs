@@ -1,0 +1,100 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Single-cycle tables, computed at compile time (read-only data, shared by every instance and
+//! process through the page cache). `LEN` is one cycle plus a guard point for interpolation.
+
+/// Index bits of a table: 1024 points a cycle.
+pub const BITS: u32 = 10;
+/// Points a cycle.
+pub const N: usize = 1 << BITS;
+/// Stored points: a cycle and the guard point (equal to the first).
+pub const LEN: usize = N + 1;
+
+pub type Table = [f32; LEN];
+
+/// sin(2 pi t) for t >= 0, in f64 (compile time only).
+const fn sin_turns(t: f64) -> f64 {
+    let mut r = t - (t as u64) as f64;
+    let mut sign = 1.0;
+    if r >= 0.5 {
+        r -= 0.5;
+        sign = -1.0;
+    }
+    if r > 0.25 {
+        r = 0.5 - r;
+    }
+    let x = 2.0 * core::f64::consts::PI * r;
+    let x2 = x * x;
+    // Taylor series to x^19 on [0, pi/2]: error below 1e-15
+    let mut term = x;
+    let mut sum = x;
+    let mut k = 1;
+    while k < 10 {
+        term = -term * x2 / ((2 * k) as f64 * (2 * k + 1) as f64);
+        sum += term;
+        k += 1;
+    }
+    sign * sum
+}
+
+#[allow(clippy::indexing_slicing)] // compile-time evaluation: an out-of-range index fails the build
+const fn build(form: Form) -> Table {
+    let mut t = [0.0f32; LEN];
+    let mut i = 0;
+    while i < LEN {
+        let x = (i % N) as f64 / N as f64;
+        t[i] = match form {
+            Form::Sine => sin_turns(x),
+            Form::Saw16 => saw16(x),
+            Form::Window => window(x),
+        } as f32;
+        i += 1;
+    }
+    t
+}
+
+// const fn cannot call through a function pointer, so the table kinds are named here
+enum Form {
+    Sine,
+    Saw16,
+    Window,
+}
+
+/// Placeholder spectral form for the spike: harmonics 1-16 at 1/k (a band-limited saw), scaled to a
+/// peak of about 1. Not the reference's law: it has the cost of any single-table form.
+const fn saw16(t: f64) -> f64 {
+    let mut s = 0.0;
+    let mut k = 1;
+    while k <= 16 {
+        s += sin_turns(t * k as f64) / k as f64;
+        k += 1;
+    }
+    s * 0.55
+}
+
+/// A raised-cosine window peaking half a cycle in, the shape the resonant forms multiply a sine by.
+/// Placeholder width (the real window depends on the skirt).
+const fn window(t: f64) -> f64 {
+    0.5 - 0.5 * sin_turns(t + 0.25)
+}
+
+pub static SINE: Table = build(Form::Sine);
+pub static SAW16: Table = build(Form::Saw16);
+pub static WINDOW: Table = build(Form::Window);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tables_are_what_they_say() {
+        for (i, &v) in SINE.iter().enumerate() {
+            let want = (2.0 * std::f64::consts::PI * (i % N) as f64 / N as f64).sin();
+            assert!((v as f64 - want).abs() < 1e-7, "sine {i}");
+        }
+        assert_eq!(SINE[N], SINE[0]);
+        assert_eq!(SAW16[N], SAW16[0]);
+        let peak = SAW16.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.9 && peak < 1.05, "saw peak {peak}");
+        assert!(WINDOW[0].abs() < 1e-7 && (WINDOW[N / 2] - 1.0).abs() < 1e-7);
+    }
+}

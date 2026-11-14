@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/fm-core"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+# an integer overflow check left in the block path is a panic path, which the link check rejects:
+# integer arithmetic there must be explicitly wrapping or provably in range
+overflow-checks = true
+
+[profile.dev]
+panic = "abort"
+
