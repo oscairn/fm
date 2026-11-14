@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! SSE2 back end (x86_64, where SSE2 is always present).
 
-use super::{F4, MASK, U4, W};
+use super::{F4, MASK, SHIFT, U4, W};
 use crate::tables::{Table, Table16};
 use core::arch::x86_64::*;
 use core::ops::{Add, Mul, Sub};
@@ -92,13 +92,16 @@ impl F4 for F {
         unsafe { U(_mm_castps_si128(self.0)) }
     }
     #[inline(always)]
-    fn gather2(t: &Table, i: U) -> (F, F) {
+    fn gather2(t: &Table, ph: U) -> (F, F) {
         let p = t.as_ptr();
         let mut k = [0u32; W];
         // SAFETY: each index is masked below N, and the table holds N + 1 floats, so every 8-byte
         // load (t[k], t[k + 1]) is inside it.
         unsafe {
-            _mm_storeu_si128(k.as_mut_ptr().cast(), _mm_and_si128(i.0, _mm_set1_epi32(MASK as i32)));
+            _mm_storeu_si128(
+                k.as_mut_ptr().cast(),
+                _mm_and_si128(_mm_srli_epi32::<SHIFT>(ph.0), _mm_set1_epi32(MASK as i32)),
+            );
             // one unaligned 8-byte load a lane: (t[k], t[k + 1])
             let pair = |n: u32| _mm_loadl_epi64(p.add(n as usize).cast::<__m128i>());
             let ab = _mm_castsi128_ps(_mm_unpacklo_epi64(pair(k[0]), pair(k[1])));
@@ -110,13 +113,16 @@ impl F4 for F {
         }
     }
     #[inline(always)]
-    fn gather2_q14(t: &Table16, i: U) -> (F, F) {
+    fn gather2_q14(t: &Table16, ph: U) -> (F, F) {
         let p = t.as_ptr();
         let mut k = [0u32; W];
         // SAFETY: each index is masked below N, and the table holds N + 1 values, so every 4-byte
         // load (t[k], t[k + 1]) is inside it. t[k] is the low half; the conversions are exact.
         unsafe {
-            _mm_storeu_si128(k.as_mut_ptr().cast(), _mm_and_si128(i.0, _mm_set1_epi32(MASK as i32)));
+            _mm_storeu_si128(
+                k.as_mut_ptr().cast(),
+                _mm_and_si128(_mm_srli_epi32::<SHIFT>(ph.0), _mm_set1_epi32(MASK as i32)),
+            );
             let pair = |n: u32| core::ptr::read_unaligned(p.add(n as usize).cast::<i32>());
             let v = _mm_set_epi32(pair(k[3]), pair(k[2]), pair(k[1]), pair(k[0]));
             let scale = _mm_set1_ps(1.0 / 16384.0);

@@ -8,7 +8,7 @@
 //! State lives in memory as plain `[f32; 4]` / `[u32; 4]` arrays, whatever the back end, so a voice
 //! layout does not depend on the target.
 
-use crate::tables::{Table, Table16, N};
+use crate::tables::{Table, Table16, BITS, N};
 use core::ops::{Add, Mul, Sub};
 
 pub mod scalar;
@@ -24,6 +24,8 @@ pub const W: usize = 4;
 
 /// The table index mask: every gather reads within the table whatever the lanes hold.
 const MASK: u32 = (N as u32).wrapping_sub(1);
+/// A 32-bit phase's table index is its top `BITS` bits.
+const SHIFT: i32 = 32 - BITS as i32;
 
 /// Four `f32` lanes.
 pub trait F4: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> {
@@ -43,10 +45,11 @@ pub trait F4: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self
     fn to_i32(self) -> Self::U;
     /// The bit pattern as `u32` lanes.
     fn to_bits(self) -> Self::U;
-    /// `t[k]` and `t[k + 1]` for each lane's `k = i & (N - 1)`: a table read and its neighbour.
-    fn gather2(t: &Table, i: Self::U) -> (Self, Self);
+    /// `t[k]` and `t[k + 1]` for each lane's phase, `k` its top `BITS` bits: a table read and its
+    /// neighbour.
+    fn gather2(t: &Table, ph: Self::U) -> (Self, Self);
     /// [`F4::gather2`] of a Q14 table, as values (`t[k] / 16384`, exact).
-    fn gather2_q14(t: &Table16, i: Self::U) -> (Self, Self);
+    fn gather2_q14(t: &Table16, ph: Self::U) -> (Self, Self);
 
     /// `self * b + c`, rounded twice (identical on every back end).
     #[inline(always)]
@@ -88,6 +91,11 @@ pub trait U4: Copy {
     fn shl<const N: i32>(self) -> Self;
     /// Exact for lanes below 2^24 (the callers' range).
     fn small_to_f32(self) -> Self::F;
+    /// The low 16 bits as a fraction of 2^16 (exact).
+    #[inline(always)]
+    fn fraction16(self) -> Self::F {
+        self.and(Self::splat(0xffff)).small_to_f32() * Self::F::splat(1.0 / 65536.0)
+    }
     /// The lanes read as `i32`, converted (exact below 2^24 in magnitude).
     fn i32_to_f32(self) -> Self::F;
     fn bits_to_f32(self) -> Self::F;
@@ -106,7 +114,7 @@ pub type Native = scalar::F;
 mod tests {
     use super::*;
 
-    fn probe<V: F4>() -> [[u32; W]; 11] {
+    fn probe<V: F4>() -> [[u32; W]; 12] {
         let a = V::load([0.25, -1.5, 3.0e-7, 1000.0]);
         let b = V::load([-0.75, 2.0, 0.333, -0.001]);
         let u = <V::U as U4>::load([0xdead_beef, 7, 0x8000_0001, u32::MAX]);
@@ -120,12 +128,13 @@ mod tests {
             u.add(w).mul(w).store(),
             u.shr::<9>().and(w).shl::<3>().store(),
             u.shr::<16>().small_to_f32().to_bits().store(),
+            u.fraction16().to_bits().store(),
             <V::U as U4>::load([5, (-9i32) as u32, 0, (-123456i32) as u32])
                 .i32_to_f32()
                 .to_bits()
                 .store(),
             {
-                // indices past the table are masked into it
+                // every phase reads inside the table
                 let (lo, hi) = V::gather2(&crate::tables::SINE, u);
                 (lo * V::splat(3.0) + hi).to_bits().store()
             },

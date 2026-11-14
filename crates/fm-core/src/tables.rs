@@ -66,16 +66,16 @@ pub static WINDOW: Table = build(Form::Window);
 /// fraction.
 #[inline(always)]
 pub fn read<V: F4>(t: &Table, p: V::U) -> V {
-    let f = p.shr::<{ 16 - BITS as i32 }>().and(V::U::splat(0xffff)).small_to_f32() * V::splat(1.0 / 65536.0);
-    let (a, b) = V::gather2(t, p.shr::<{ 32 - BITS as i32 }>());
+    let f = p.shr::<{ 16 - BITS as i32 }>().fraction16();
+    let (a, b) = V::gather2(t, p);
     (b - a).mul_add(f, a)
 }
 
 /// [`read`] of a Q14 table.
 #[inline(always)]
 pub fn read16<V: F4>(t: &Table16, p: V::U) -> V {
-    let f = p.shr::<{ 16 - BITS as i32 }>().and(V::U::splat(0xffff)).small_to_f32() * V::splat(1.0 / 65536.0);
-    let (a, b) = V::gather2_q14(t, p.shr::<{ 32 - BITS as i32 }>());
+    let f = p.shr::<{ 16 - BITS as i32 }>().fraction16();
+    let (a, b) = V::gather2_q14(t, p);
     (b - a).mul_add(f, a)
 }
 

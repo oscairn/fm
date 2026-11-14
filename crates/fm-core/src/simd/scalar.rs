@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Scalar back end: four lanes as plain arrays. The definition the SIMD back ends must match.
 
-use super::{F4, MASK, U4, W};
+use super::{F4, MASK, SHIFT, U4, W};
 use crate::tables::{Table, Table16};
 use core::ops::{Add, Mul, Sub};
 
@@ -108,14 +108,16 @@ impl F4 for F {
         U(self.0.map(f32::to_bits))
     }
     #[inline(always)]
-    fn gather2(t: &Table, i: U) -> (F, F) {
+    fn gather2(t: &Table, ph: U) -> (F, F) {
         let at = |k: u32| t.get(k as usize).copied().unwrap_or(0.0);
-        (F(i.0.map(|k| at(k & MASK))), F(i.0.map(|k| at((k & MASK) + 1))))
+        let i = ph.0.map(|p| (p >> SHIFT) & MASK);
+        (F(i.map(at)), F(i.map(|k| at(k + 1))))
     }
     #[inline(always)]
-    fn gather2_q14(t: &Table16, i: U) -> (F, F) {
+    fn gather2_q14(t: &Table16, ph: U) -> (F, F) {
         let at = |k: u32| f32::from(t.get(k as usize).copied().unwrap_or(0)) * (1.0 / 16384.0);
-        (F(i.0.map(|k| at(k & MASK))), F(i.0.map(|k| at((k & MASK) + 1))))
+        let i = ph.0.map(|p| (p >> SHIFT) & MASK);
+        (F(i.map(at)), F(i.map(|k| at(k + 1))))
     }
 }
 

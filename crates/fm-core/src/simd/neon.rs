@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! NEON back end (aarch64, where NEON is always present).
 
-use super::{F4, MASK, U4, W};
+use super::{F4, MASK, SHIFT, U4, W};
 use crate::tables::{Table, Table16};
 use core::arch::aarch64::*;
 use core::ops::{Add, Mul, Sub};
@@ -90,29 +90,31 @@ impl F4 for F {
         unsafe { U(vreinterpretq_u32_f32(self.0)) }
     }
     #[inline(always)]
-    fn gather2(t: &Table, i: U) -> (F, F) {
-        let p = t.as_ptr();
+    fn gather2(t: &Table, ph: U) -> (F, F) {
+        let p = t.as_ptr().cast::<u8>();
         // SAFETY: each index is masked below N, and the table holds N + 1 floats, so every 8-byte
-        // load (t[k], t[k + 1]) is inside it.
+        // load (t[k], t[k + 1]) is inside it. The byte offsets are formed in the vector, so each
+        // lane's load takes its offset as it is extracted.
         unsafe {
-            let k = vandq_u32(i.0, vdupq_n_u32(MASK));
-            let a = vld1_f32(p.add(vgetq_lane_u32::<0>(k) as usize));
-            let b = vld1_f32(p.add(vgetq_lane_u32::<1>(k) as usize));
-            let c = vld1_f32(p.add(vgetq_lane_u32::<2>(k) as usize));
-            let d = vld1_f32(p.add(vgetq_lane_u32::<3>(k) as usize));
+            let k = vandq_u32(vshrq_n_u32::<{ SHIFT - 2 }>(ph.0), vdupq_n_u32(MASK << 2));
+            let at = |o: u32| vld1_f32(p.add(o as usize).cast::<f32>());
+            let a = at(vgetq_lane_u32::<0>(k));
+            let b = at(vgetq_lane_u32::<1>(k));
+            let c = at(vgetq_lane_u32::<2>(k));
+            let d = at(vgetq_lane_u32::<3>(k));
             let u = vuzpq_f32(vcombine_f32(a, b), vcombine_f32(c, d));
             (F(u.0), F(u.1))
         }
     }
     #[inline(always)]
-    fn gather2_q14(t: &Table16, i: U) -> (F, F) {
-        let p = t.as_ptr();
+    fn gather2_q14(t: &Table16, ph: U) -> (F, F) {
+        let p = t.as_ptr().cast::<u8>();
         // SAFETY: each index is masked below N, and the table holds N + 1 values, so every 4-byte
         // load (t[k], t[k + 1]) is inside it; unaligned loads are allowed. Little-endian: t[k] is
         // the low half. The conversions are exact (16 significant bits, power-of-two scales).
         unsafe {
-            let k = vandq_u32(i.0, vdupq_n_u32(MASK));
-            let pair = |n: u32| core::ptr::read_unaligned(p.add(n as usize).cast::<u32>());
+            let k = vandq_u32(vshrq_n_u32::<{ SHIFT - 1 }>(ph.0), vdupq_n_u32(MASK << 1));
+            let pair = |o: u32| core::ptr::read_unaligned(p.add(o as usize).cast::<u32>());
             let mut v = vdupq_n_u32(pair(vgetq_lane_u32::<0>(k)));
             v = vsetq_lane_u32::<1>(pair(vgetq_lane_u32::<1>(k)), v);
             v = vsetq_lane_u32::<2>(pair(vgetq_lane_u32::<2>(k)), v);
@@ -174,6 +176,11 @@ impl U4 for U {
     fn small_to_f32(self) -> F {
         // SAFETY: a register-only intrinsic; NEON is part of the target's baseline.
         unsafe { F(vcvtq_f32_u32(self.0)) }
+    }
+    #[inline(always)]
+    fn fraction16(self) -> F {
+        // SAFETY: as above; exact, as the scalar definition
+        unsafe { F(vcvtq_n_f32_u32::<16>(vandq_u32(self.0, vdupq_n_u32(0xffff)))) }
     }
     #[inline(always)]
     fn i32_to_f32(self) -> F {
