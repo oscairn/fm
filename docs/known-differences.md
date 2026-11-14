@@ -1,6 +1,6 @@
 # Known differences from the reference
 
-Where the engine plays differently from the reference, on purpose or for now, for the owner to
+Where the engine plays differently from the reference, on purpose or for now, each to be
 rule on. "Existing profile" is the project's earlier FM plugin profile, whose measured laws this
 engine reuses; its deliberate departures are not adopted silently: each is either replaced by the
 reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.md`.

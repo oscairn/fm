@@ -527,7 +527,7 @@ Sizes are rough, in working sessions of the size of this round.
   filter overload, no output clip, widened pitch ranges): keep them all?
 - The voice pool size an instance (the existing profile: 128 shared by every sound).
 
-Provisional decisions taken at M1 while the owner was away (conservative defaults, for a ruling):
+Provisional decisions taken at M1 (conservative defaults, each open to a later ruling):
 
 - The voice pool is 128 voices an instance, a ceiling shared by its sounds; each sound's lanes are
   taken by use from 40 (2.8).
