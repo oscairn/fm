@@ -450,7 +450,7 @@ Sizes are rough, in working sessions of the size of this round.
 | M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | 2–3 |
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | 2–3 |
 | M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | 3 |
-| | **the owner's 24 sounds play** | after M6, with the converter writing this engine's format | |
+| | **the first converted sound set plays** | after M6, with the converter writing this engine's format | |
 | M7 | everything | controller-set switches and sensitivities (as decided), micro tuning, the partial items of section 1.5 re-measured, the known-differences register | 2–3 |
 
 ## 8. Open questions
