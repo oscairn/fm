@@ -58,7 +58,20 @@ const fn window(t: f64) -> f64 {
     0.5 - 0.5 * sin_turns(t + 0.25)
 }
 
-pub static SINE: Table = build(Form::Sine);
+/// The tables the engine reads at audio rate, the sine and the operator forms, in one block
+/// aligned to the first-level cache's way (8 KB of the device's 32 KB 4-way cache): the sets
+/// their lines fall in do not depend on where the linker places them (tools/cost/cg.sh).
+#[repr(C, align(8192))]
+pub struct Block {
+    pub sine: Table,
+    pub forms: [Table16; 48],
+}
+
+pub static BLOCK: Block = Block {
+    sine: build(Form::Sine),
+    forms: crate::forms::FORMS_DATA,
+};
+pub static SINE: &Table = &BLOCK.sine;
 pub static SAW16: Table = build(Form::Saw16);
 pub static WINDOW: Table = build(Form::Window);
 

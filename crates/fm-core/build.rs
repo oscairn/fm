@@ -16,7 +16,11 @@ fn main() {
     for f in ["build.rs", "src/forms_build.rs", "src/forms_data.rs", "src/turns.rs"] {
         println!("cargo:rerun-if-changed={f}");
     }
-    let mut s = format!("pub static FORMS: [Table16; {}] = [\n", forms_build::COUNT);
+    // (a const, so it can initialise the aligned block of tables::BLOCK, its one use)
+    let mut s = format!(
+        "#[allow(clippy::large_const_arrays)]\npub(crate) const FORMS_DATA: [Table16; {}] = [\n",
+        forms_build::COUNT
+    );
     for t in forms_build::build() {
         s += "[";
         for v in t {

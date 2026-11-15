@@ -13,10 +13,12 @@
 
 use crate::tables::Table16;
 
-// `pub static FORMS: [Table16; 48]`, written by the build script (`forms_build`): forms 1-2, then
-// the E of forms 3-4, then the windows of forms 5-6, eight spreads each, so form f at spread s is
-// table (f - 1) * 8 + s; 48 × 1025 × 2 = 98,400 bytes of read-only data.
+// `FORMS_DATA: [Table16; 48]`, written by the build script (`forms_build`): forms 1-2, then the E
+// of forms 3-4, then the windows of forms 5-6, eight spreads each, so form f at spread s is table
+// (f - 1) * 8 + s; 48 × 1025 × 2 = 98,400 bytes of read-only data, kept in `tables::BLOCK`.
 include!(concat!(env!("OUT_DIR"), "/forms.rs"));
+
+pub static FORMS: &[Table16; 48] = &crate::tables::BLOCK.forms;
 
 /// How an operator's form is played (a plan's choice, per operator).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +182,7 @@ mod tests {
             (crate::forms_build::N, crate::forms_build::LEN),
             (N, crate::tables::LEN)
         );
-        assert!(crate::forms_build::build() == FORMS);
+        assert!(crate::forms_build::build() == *FORMS);
+        assert_eq!(core::ptr::addr_of!(crate::tables::BLOCK) as usize % 8192, 0);
     }
 }

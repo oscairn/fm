@@ -166,7 +166,7 @@ mod tests {
                 .store(),
             {
                 // every phase reads inside the table
-                let (lo, hi) = V::gather2(&crate::tables::SINE, u);
+                let (lo, hi) = V::gather2(crate::tables::SINE, u);
                 (lo * V::splat(3.0) + hi).to_bits().store()
             },
             {

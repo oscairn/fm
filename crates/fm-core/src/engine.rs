@@ -335,6 +335,12 @@ struct Lane {
     count: [[u32; W]; OPS],
     /// Envelopes that can change segment, bit 4 op + slot.
     watch: u32,
+    /// Read every step (beside `watch`, so a lane whose pitch stands still touches nothing of
+    /// `pt`): voices whose pitch moves; the bend (octaves) the increments hold; whether the
+    /// increments are to be made again at the next step's start (something jumped).
+    moving: u8,
+    bend: f32,
+    jump: bool,
     sound: u8,
     /// Slots in use; keys down; released keys the pedal holds; voices being shed; those fading as
     /// a retrigger (13.3 ms, the square of the share left); those whose note lives on without
@@ -376,11 +382,6 @@ struct Pitch {
     /// pitch), and the step a tick of the glide clock moves it.
     glide: [f32; W],
     glide_step: [f32; W],
-    /// Voices whose pitch moves; the bend (octaves) the increments hold; whether the increments
-    /// are to be made again at the next step's start (something jumped).
-    moving: u8,
-    bend: f32,
-    jump: bool,
 }
 
 const LANE0: Lane = Lane {
@@ -421,10 +422,10 @@ const LANE0: Lane = Lane {
         c_rate: [0.0; W],
         glide: [0.0; W],
         glide_step: [0.0; W],
-        moving: 0,
-        bend: 0.0,
-        jump: false,
     },
+    moving: 0,
+    bend: 0.0,
+    jump: false,
 };
 
 /// Bit `i` of `m` (false past the end; no shift can overflow).
@@ -535,7 +536,7 @@ impl Lane {
         let ops = !slot_ops(s);
         (self.watch, self.pt.op_attack, self.pt.op_decay) =
             (self.watch & ops, self.pt.op_attack & ops, self.pt.op_decay & ops);
-        self.pt.moving &= !b;
+        self.moving &= !b;
         if let (Some(c), Some(g)) = (self.pt.c_seg.get_mut(s), self.pt.glide.get_mut(s)) {
             (*c, *g) = (DONE, 0.0);
         }
@@ -605,7 +606,7 @@ impl Lane {
             &mut self.ending,
             &mut self.retrig,
             &mut self.orphan,
-            &mut pt.moving,
+            &mut self.moving,
         ] {
             *m = if *m & f != 0 { *m | t } else { *m & !t };
         }
@@ -626,7 +627,7 @@ impl Lane {
             if let Some(c) = self.pt.c_seg.get_mut(s) {
                 *c = RELEASE;
             }
-            self.pt.moving |= bit(s);
+            self.moving |= bit(s);
         }
     }
 
@@ -703,12 +704,12 @@ impl Lane {
         let moves =
             pt.op_attack & ops != 0 || glide.0 != 0.0 || pt.c_seg.get(s).is_some_and(|&c| c != HOLD && c != DONE);
         if moves {
-            pt.moving |= bit(s);
+            self.moving |= bit(s);
         } else {
-            pt.moving &= !bit(s);
+            self.moving &= !bit(s);
         }
         // the increments hold what moves from the next step on
-        pt.jump |= moves || pt.bend != 0.0;
+        self.jump |= moves || self.bend != 0.0;
     }
 
     fn end(&mut self, s: usize, end: &mut impl FnMut(NoteEnd)) {
@@ -1061,7 +1062,7 @@ impl Engine {
         let key = i32::from(key) + i32::from(p.note_shift);
         let r = next_random(self.rng.get_mut(sound));
         if lane.used == b {
-            lane.pt.bend = 0.0; // (a lane's first voice: its increments hold no bend)
+            lane.bend = 0.0; // (a lane's first voice: its increments hold no bend)
         }
         lane.tune(&p, s, key, v, r, rate, true, glide);
         if let Some(l) = self.last.get_mut(sound) {
@@ -1356,8 +1357,7 @@ fn step<const L: usize, V: F4<L>>(
     let n = out.len().clamp(1, STEP);
     let (g0, dg) = envelopes::<L, V>(lane, p, c, n, end);
     // a lane whose pitch does not move skips this
-    let pt = &lane.pt;
-    let ramp = if pt.moving != 0 || pt.jump || pt.bend != c.bend {
+    let ramp = if lane.moving != 0 || lane.jump || lane.bend != c.bend {
         pitch::<L, V>(lane, p, c, t, n)
     } else {
         None
@@ -1452,21 +1452,21 @@ fn pitch<const L: usize, V: F4<L>>(
             };
             gliding |= if *g != 0.0 { bit(s) } else { 0 };
         }
-        pt.jump = true;
+        lane.jump = true;
     } else {
         gliding = (0..L)
             .zip(pt.glide.iter())
             .fold(0, |m, (s, &g)| if g != 0.0 { m | bit(s) } else { m });
     }
-    if pt.jump || pt.bend != c.bend {
-        (pt.jump, pt.bend) = (false, c.bend);
+    if lane.jump || lane.bend != c.bend {
+        (lane.jump, lane.bend) = (false, c.bend);
         for (inc, to) in lane.inc.iter_mut().zip(incs::<L, V>(pt, p, c).iter()) {
             V::U::load(*to).store4(inc);
         }
     }
     let moves = |seg: u8| matches!(seg, ATTACK | DECAY1 | DECAY2 | RELEASE);
     if pt.op_attack | pt.op_decay == 0 && !pt.c_seg.iter().take(L).any(|&s| moves(s)) {
-        pt.moving = gliding;
+        lane.moving = gliding;
         return None;
     }
     // the envelopes move straight in octaves for the step's milliseconds; a segment that ends
@@ -1521,7 +1521,7 @@ fn pitch<const L: usize, V: F4<L>>(
             moving |= bit(s);
         }
     }
-    pt.moving = moving | gliding;
+    lane.moving = moving | gliding;
     let to = incs::<L, V>(pt, p, c);
     let mut d = [[0u32; L]; OPS];
     for ((d, to), from) in d.iter_mut().zip(to.iter()).zip(lane.inc.iter()) {
@@ -1741,7 +1741,7 @@ fn single<const L: usize, V: F4<L>, const FORMS: bool, const RAMP: bool>(
         let [f1, f2] = &mut lane.fb;
         let (mut y1, mut y2) = (V::load4(f1), V::load4(f2));
         for (out, m) in cur.iter_mut().zip(input.iter()) {
-            let v = read::<L, V>(&SINE, ph_v.add(offset((y1 + y2).mul_add(fbk, V::load(*m))))) * g;
+            let v = read::<L, V>(SINE, ph_v.add(offset((y1 + y2).mul_add(fbk, V::load(*m))))) * g;
             *out = v.store();
             (y2, y1) = (y1, v);
             g = g + d;
@@ -1754,7 +1754,7 @@ fn single<const L: usize, V: F4<L>, const FORMS: bool, const RAMP: bool>(
         y2.store4(f2);
     } else {
         for (out, m) in cur.iter_mut().zip(input.iter()) {
-            *out = (read::<L, V>(&SINE, ph_v.add(offset(V::load(*m)))) * g).store();
+            *out = (read::<L, V>(SINE, ph_v.add(offset(V::load(*m)))) * g).store();
             g = g + d;
             ph_v = ph_v.add(inc);
             if RAMP {
@@ -1784,27 +1784,27 @@ fn form_step<const L: usize, V: F4<L>, const RAMP: bool>(
         Wave::Table(t) => run::<L, V, RAMP>(|q, o| read16(t, q.add(o)), own, cur, input, inc, g, d, ph),
         Wave::Odd(t) => run::<L, V, RAMP>(|q, o| odd(t, q, o), own, cur, input, inc, g, d, ph),
         Wave::Resonant(t, c) => run::<L, V, RAMP>(|q, o| resonant(t, c, q, o), own, cur, input, inc, g, d, ph),
-        Wave::Sine => run::<L, V, RAMP>(|q, o| read(&SINE, q.add(o)), own, cur, input, inc, g, d, ph),
+        Wave::Sine => run::<L, V, RAMP>(|q, o| read(SINE, q.add(o)), own, cur, input, inc, g, d, ph),
     }
 }
 
 /// An odd form: E(2t + m) sin(t + m).
 #[inline(always)]
 fn odd<const L: usize, V: F4<L>>(t: &Table16, ph: V::U, off: V::U) -> V {
-    read16::<L, V>(t, ph.add(ph).add(off)) * read::<L, V>(&SINE, ph.add(off))
+    read16::<L, V>(t, ph.add(ph).add(off)) * read::<L, V>(SINE, ph.add(off))
 }
 
 /// A resonant form: window(t + m) sin(centre t + m).
 #[inline(always)]
 fn resonant<const L: usize, V: F4<L>>(t: &Table16, centre: u32, ph: V::U, off: V::U) -> V {
-    read16::<L, V>(t, ph.add(off)) * read::<L, V>(&SINE, ph.mul(V::U::splat(centre)).add(off))
+    read16::<L, V>(t, ph.add(off)) * read::<L, V>(SINE, ph.mul(V::U::splat(centre)).add(off))
 }
 
 /// An operator's output at phase `ph` and modulation offset `off`.
 #[inline(always)]
 fn wave<const L: usize, V: F4<L>>(w: Wave, ph: V::U, off: V::U) -> V {
     match w {
-        Wave::Sine => read(&SINE, ph.add(off)),
+        Wave::Sine => read(SINE, ph.add(off)),
         Wave::Table(t) => read16(t, ph.add(off)),
         Wave::Odd(t) => odd(t, ph, off),
         Wave::Resonant(t, c) => resonant(t, c, ph, off),
@@ -1959,7 +1959,7 @@ fn interleaved<const L: usize, V: F4<L>, const MIXED: bool, const RAMP: bool>(
             let out = if MIXED {
                 wave::<L, V>(w, *pa, offset(m))
             } else {
-                read::<L, V>(&SINE, pa.add(offset(m)))
+                read::<L, V>(SINE, pa.add(offset(m)))
             } * *ga;
             *ga = *ga + da;
             *pa = pa.add(*ia);
