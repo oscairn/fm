@@ -18,8 +18,14 @@ fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
 pub fn case_text(routing: u32, ops: u32, forms: &str) -> String {
     // FORMS+fT: filter type T (the stored value) on the case, its envelope moving; FORMS+fx: the
     // dual band-stop with the envelope, the voice LFO on the cutoff and the sound LFO on cutoff,
-    // resonance and pan (the costliest filter); FORMS+pan: alternate and random pan
+    // resonance and pan (the costliest filter); FORMS+pan: alternate and random pan; a last +ctl:
+    // every controller box active (30 on the operators' levels, one on the cutoff, one on the
+    // resonance, from the mod wheel, foot controller 1 and knob 1)
     let (forms, post) = forms.split_once('+').unwrap_or((forms, ""));
+    let (post, ctl) = match post.strip_suffix("ctl") {
+        Some(p) => (p.trim_end_matches('+'), true),
+        None => (post, false),
+    };
     let pitch = forms == "pitch";
     let mut t = format!(
         "fm-sound/1\nalgorithm={routing} feedback=7 portamento={}\n",
@@ -61,6 +67,21 @@ pub fn case_text(routing: u32, ops: u32, forms: &str) -> String {
     }
     if post == "pan" {
         t += "random_pan=64 alternate_pan=32\n";
+    }
+    if ctl {
+        for n in 1..=32 {
+            let dst = match n {
+                31 => 102,
+                32 => 103,
+                _ => 106,
+            };
+            let (src, ratio) = ([1, 3, 8][n % 3], if n % 2 == 0 { 6 } else { -6 });
+            t += &format!(
+                "box{n}_src={src} box{n}_dst={dst} box{n}_ratio={ratio} box{n}_pol={}\n",
+                n % 4 / 3
+            );
+        }
+        t += "knob1=700\n";
     }
     for o in 1..=8 {
         let level = if o > 8 - ops { 99 } else { 0 };

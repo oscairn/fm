@@ -51,6 +51,9 @@ fm-s1-v1-pan 39768
 fm-s1-v1 36693
 fm-s1-v2 28613
 fm-s5-v1 35746
+# every controller box at work, a controller every block (M7)
+fm-r12-8-odd-fx-ctl 28351
+fm-s1-v1-ctl 47712
 fm-s5-v2 28139
 fm-s8-v1 35665
 fm-s8-v2 28099

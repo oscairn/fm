@@ -79,6 +79,10 @@ run fm-r12-8-odd-fx 32 e 12 8 native odd+fx
 run fm-s1-v1-fx 1 e 12 8 native sine+fx 1
 run fm-r12-8-pan 32 e 12 8 native sine+pan
 run fm-s1-v1-pan 1 e 12 8 native sine+pan 1
+# every controller box at work (30 on the operators' levels, the cutoff, the resonance) and expression,
+# foot controller 1 moving every block: on the costliest plan with the costliest filter, and one voice
+run fm-r12-8-odd-fx-ctl 32 e 12 8 native odd+fx+ctl 1 ctl
+run fm-s1-v1-ctl 1 e 12 8 native sine+ctl 1 ctl
 # a parameter event every block (the sound prepared again) on one voice: less fm-s1-v1, an event's cost
 run fm-s1-v1-param 1 e 12 8 native sine 1 param
 # voices few a sound: 1 and 2 voices in each of 1, 5 and 8 sounds (a voice-block: by all the voices)

@@ -1024,20 +1024,16 @@ impl Lane {
 
     /// The output of a step of `n` frames times each voice's gain (its note's volume times
     /// `want`), ramped linearly from the last step's.
-    fn out_gain<const L: usize>(&mut self, want: f32, n: usize, y: &mut [[f32; L]; STEP]) {
-        let mut on = false;
-        for ((v, g), s) in self.vol.iter().zip(self.og.iter_mut()).zip(0..L) {
-            let (g0, to) = (*g, want * v);
-            let d = (to - g0) / n as f32;
-            for (x, k) in y.iter_mut().zip(1..=n) {
-                if let Some(x) = x.get_mut(s) {
-                    *x *= g0 + d * k as f32;
-                }
-            }
-            *g = to;
-            on |= to != 1.0;
+    fn out_gain<const L: usize, V: F4<L>>(&mut self, want: f32, n: usize, y: &mut [[f32; L]; STEP]) {
+        let to = V::load4(&self.vol) * V::splat(want);
+        let mut g = V::load4(&self.og);
+        let d = (to - g) * V::splat(1.0 / n as f32);
+        for x in y.iter_mut().take(n) {
+            g = g + d;
+            *x = (V::load(*x) * g).store();
         }
-        self.vol_on = on || self.vol.iter().any(|&v| v != 1.0);
+        to.store4(&mut self.og);
+        self.vol_on = want != 1.0 || self.vol.iter().any(|&v| v != 1.0);
     }
 
     fn release(&mut self, p: &Prepared, s: usize, rate: f64) {
@@ -1964,7 +1960,7 @@ impl Engine {
             let t = boxes::steps(&p.sound, &src);
             let carriers = u32::from(p.plan.carriers);
             for (op, ((&(level, top), st), l)) in p.levels.iter().zip(t.level).zip(m.lvl.iter_mut()).enumerate() {
-                if level == top && st == 0 {
+                if (level == top && st == 0) || !has(u32::from(p.plan.live), op) {
                     continue;
                 }
                 let db = |l: i32| {
@@ -2518,7 +2514,7 @@ fn step<const L: usize, V: F4<L>>(
     // expression and the notes' volumes (a lane without either skips this)
     let want = m.map_or(1.0, |m| m.gain);
     if want != 1.0 || lane.vol_on {
-        lane.out_gain(want, n, &mut vout);
+        lane.out_gain::<L, V>(want, n, &mut vout);
     }
     match out {
         Out::Pan(l, r) => lane.post.mix::<L, V>(&p.filter, sv, &vout, l, r),

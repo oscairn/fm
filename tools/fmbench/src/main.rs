@@ -10,7 +10,8 @@
 //!                                mod, slfo: sines with modulators; a suffix +fT, +fx, +pan adds
 //!                                a filter or pan, see `case_sound`), in
 //!                                each of SOUNDS sounds (default 1); a last argument `param` sends a
-//!                                parameter event every block
+//!                                parameter event every block, `ctl` a controller (CC 11); a
+//!                                suffix +ctl puts every controller box to work
 //!   fmbench VOICES BLOCKS [om|sm] [edges|loop|chain] [sine|table|window] [native|scalar]
 //!                                the voice-kernel spike (docs/design.md, "The spike")
 //!   fmbench footprint 0 x x FORM the spike's bytes a lane touches a block
@@ -83,6 +84,12 @@ fn engine(routing: u32, ops: u32, voices: usize, forms: &str, sounds: usize) -> 
     let p = case_sound(routing, ops, forms);
     for s in 0..sounds.min(fm_core::engine::SOUNDS) {
         e.set_sound(s, &p);
+        if forms.ends_with("ctl") {
+            // the boxes' sources away from rest, and expression
+            for (cc, v) in [(1, 90), (11, 100)] {
+                e.control(s, cc, v);
+            }
+        }
         for v in 0..voices.min(VOICES / sounds) {
             e.note_on(s, v as u32, 36 + ((v + 7 * s) % 60) as u8, 100.0, &mut |_| {});
         }
@@ -108,6 +115,7 @@ fn time(blocks: usize) {
         ("filter, low-pass 24 dB", 12, 8, "sine+f0"),
         ("filter, every modulator", 12, 8, "odd+fx"),
         ("pan", 12, 8, "sine+pan"),
+        ("controllers, every box", 12, 8, "odd+fx+ctl"),
     ];
     let mut rows: Vec<(String, Box<Engine>, usize)> = Vec::new();
     for (name, routing, ops, forms) in cases {
@@ -151,7 +159,7 @@ fn check() -> bool {
         seed
     };
     let mut e = Box::new(Engine::new(RATE));
-    for (s, (routing, ops, forms)) in [(12, 8, "mixed"), (80, 5, "sine"), (5, 2, "res")]
+    for (s, (routing, ops, forms)) in [(12, 8, "mixed"), (80, 5, "sine+f0+ctl"), (5, 2, "res")]
         .into_iter()
         .enumerate()
     {
@@ -172,6 +180,11 @@ fn check() -> bool {
                     &mut |_| ended += 1,
                 );
             }
+        }
+        // the controllers, the sostenuto pedal among them, at any value
+        if r() % 4 == 0 {
+            let cc = [1, 2, 4, 11, 66, fm_core::engine::PRESSURE][r() as usize % 6];
+            e.control((r() % 3) as usize, cc, (r() % 128) as u8);
         }
         let mut out = [[0.0f32; BLOCK]; 2];
         e.render::<Native>(&mut out, &mut |_| ended += 1);
@@ -234,13 +247,21 @@ fn main() {
             let t = Instant::now();
             // "param": a parameter event every block (the voice LFO's speed, so the sound is prepared
             // again and its plan stays)
-            let param = arg(8, "") == "param";
+            // "ctl": foot controller 1 and expression moving every block (the boxes evaluated again)
+            let (param, ctl) = (arg(8, "") == "param", arg(8, "") == "ctl");
             for b in 0..blocks {
                 let mut out = [[0.0f32; BLOCK]; 2];
-                if param {
-                    let kind = Kind::Param {
-                        id: 23,
-                        value: 30 + (b % 2) as i16,
+                if param || ctl {
+                    let kind = if ctl {
+                        Kind::Control {
+                            cc: 11,
+                            value: 100 + (b % 2) as u8,
+                        }
+                    } else {
+                        Kind::Param {
+                            id: 23,
+                            value: 30 + (b % 2) as i16,
+                        }
                     };
                     fmbench_render_event(
                         &mut e,
