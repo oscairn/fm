@@ -625,7 +625,7 @@ against 55.5 to 105.8); the device's own placement is not known either way.
 
 Same tool and settings. Built: the voice LFO (pitch and amplitude routes, per-operator offsets),
 the seven macros, level scaling, the part's four envelope offsets, timed parameter events, and the
-sound LFO (section 3.6). Not built: the voice LFO's filter route (M5, with the filter).
+sound LFO (section 3.6). The voice LFO's filter route came with the filter (M5, section 3.7).
 
 - **Per sound, once** (`Prepared::new`): the macros and the part's offsets move the operators' raw
   values before the laws (depth on modulators' levels, divided by 1 + feedback on the operator that
@@ -711,6 +711,75 @@ detune of every voice: 17,785 at 32 voices and 49,321 for one voice alone (the f
 detune made every step, was 42,003). Data misses with the device's caches: sines 1.8, 0.3, 0.5,
 2.9 first-level a voice-block at 1, 8, 25 and 64 voices; mixed forms 72.4, 72.3, 77.0, 111.2.
 
+### 3.7 Filter, pan and key-on delay at M5 (measured)
+
+Same tool and settings. Laws from the existing profile's measurements (`crates/fm-core/src/filter.rs`;
+each row's accuracy in `docs/coverage.md`): the cutoff table (193 measured points, straight in Hz
+between), the least Q near the top, Q 0.5 × 2^(r / 16), key follow, velocity, scaling, distance,
+gain, the wide band-pass's edges, the envelope's level, time and hold tables with its depth,
+velocity and key follow, the voice LFO's filter depth, the sound LFO's pan, cutoff and resonance
+depths, the pan law, scaling and random pan, and the key-on delay table.
+
+- **Structure**: every type is two sections the measurements fit with no free shape parameter, a
+  state-variable section (`lp += F bp; hp = x - lp - d bp; bp += F hp`; F = 2 sin(pi fc / rate), d
+  = 1 / Q) and a one-pole low-pass with the same F, in series or summed per type (the 24 dB types two
+  sections in series, the 18 dB types a section and the one-pole, the low-pass and high-pass types a
+  section or the one-pole then a Q-1 high-pass at the high-pass cutoff, the dual types two sections
+  summed, the dual band-stop two notches in series, the second section at F × 2^(distance / 16) up
+  to 1.75). Stored values 9, 18 and 20 are no type (thru, reported). Thru at gain 255 runs nothing.
+- **Per voice, across the lane**: after the operators, before the mix. At each step's end (16
+  frames) every voice's envelope (scalar, a segment's frames exact inside a step) and LFO moves give
+  its coefficient targets, computed for the lane's voices at once with the vector type (`exp2`, a
+  degree-7 sine, the least Q's table and the dual types' limit lane by lane only where they act);
+  F, damping and the one-pole's coefficient ramp linearly a frame from the last step's, a voice's
+  first step starting at its own. The sections run four voices a vector (one wide for a lane holding
+  one voice), bit-identical on every back end (tests: the fuzz compares NEON or SSE2 with scalar).
+  Against the sections' transfer functions every type's kernel is within 0.01 dB (test); the 12 dB
+  high-pass through the engine is within 0.3 dB of the second-order law (test).
+- **Stability**: the damping is held to the least Q at the cutoff, and below 44.1 kHz under the
+  section's edge (2 / F - F / 2); the second section to F 1.75 with its damping under 0.9 of the edge;
+  every state is held within +-8 (18 dB over full scale) each frame, so no output can run away or go
+  non-finite (the reference's overload is not modelled). Test: 400 random filters (half at cutoff
+  1023, resonance 127, distance +127), every voice of a lane on a noise of +-4 with the sound LFO and
+  the LFO random each step and steps of 1-16 frames: every output finite and within +-64. The fuzz
+  (random sounds with the filter, pan, key-on delay and the sound LFO, both back ends) and the
+  no-panic driver cover them too.
+- **At rest**: a state below 1e-15 at a step's end is set to 0, so a decaying filter never reaches
+  subnormals (test: an impulse at resonance 100, then 20,000 steps of silence: no subnormal output,
+  the states exactly 0; the fuzz fails on any subnormal sample).
+- **Pan and output**: `render` writes left and right. A sound without pan adds to the left channel,
+  which is copied to the right at the block's end: its bits are the mono output's in both channels
+  (the golden hashes unchanged; every test checks the two channels equal). A sound with pan adds to a
+  pair of its own, mixed in at the end; each voice's position (alternate, scaling, random, held
+  within -64..+63) through the pan law, the sound LFO's pan at each step's end, the gains ramped a
+  frame. A centred voice through the pan path gives the mono bits (test).
+- **Key-on delay**: a note waits in a list of 32 (an instance's) and starts at its frame as an event
+  of its sound (released before then, it never sounds and ends at once); tempo sync is reported (no
+  tempo input). Test: the delayed note plays the bits of the same note started at that frame.
+- **Hot state**: a lane's filter and pan state (`filter::Voices`, 364 bytes: five states, five
+  coefficients, the envelope, what a note keeps, the position and gains), read only when its sound
+  uses them; the lane is 2,232 bytes, the hot set with it 9,916 bytes (computed from the field
+  sizes; the first-level budget test passes). The engine holds the pan pair (1 KB, touched only
+  when a sound has pan) and the delayed notes (640 bytes). `Prepared` about 140 bytes more (from the
+fields).
+
+Cost, instructions a voice-block (40a0617 / c984ce2): routing 12 sines at 32 voices 14,767 / 14,872
+(+0.7 %); one voice alone 37,457 / 38,282 (+2.2 %); five sounds of one voice 36,461 / 36,889 (+1.2 %);
+the worst plan without a filter 22,809 / 22,914; at rest 1,216 / 1,276 a block. Sounds not using M5
+render the same bits; their cost rise is the right channel's copy and a few tests a step (the
+target was under 1 %: met at 32 voices, not for a voice alone). The lane gate's one-voice ratio is
+2.574 against 2.509 + 2 % (not met; the other two 1.978 and 1.892, met). The filter at 32 voices /
+one voice, its envelope moving on every voice: 24 dB low-pass 17,089 / 45,040, 18 dB low-pass
+16,815 / 43,927, 12 dB high-pass 16,687 / 43,407, 12 dB band-pass 17,087 / 45,024, 12 dB band-stop
+16,685 / 43,407, dual band-stop 17,249 / 45,536 (the costliest type: +2,377 at 32 voices), low-pass
+12 + band-pass 6 17,167 / 45,328, thru with a gain 15,110 / 39,163; pan alone 16,000 / 39,768. The
+worst plan with the costliest filter and every modulator on it (the dual band-stop, its envelope,
+the voice LFO on the cutoff, the sound LFO on cutoff, resonance and pan) is 26,943 (gate 28,000;
+the first version was 28,041): the plan 22,914, and by subtraction of the separate cases the filter
+about 2,400, pan about 1,100, the LFOs' moves about 500. The gate's worst case includes the filter cases (every `fm-r*-8`
+case). Data misses with the device's caches: sines 19.6, 3.4, 2.5, 3.7 first-level a voice-block
+at 1, 8, 25, 64 voices (the right channel's 8 lines a block); mixed forms 102.8, 43.7, 48.2, 69.8.
+
 ## 4. Audio-thread safety, and how it is proven
 
 - **No allocation**, by construction: the core is `#![no_std]` and does not link the `alloc` crate;
@@ -785,8 +854,8 @@ Sizes are rough, in working sessions of the size of this round.
 | M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | done (section 3.1); frame-exact note starts since (section 2.3) |
 | M2 | waves | the six forms with spread and formant, tables from the measured amplitudes and phases, `i16` (Q14) storage, cost re-measured | done (section 3.2); a lane's cost follows its voice count in part (one voice one lane wide), the lane gate's targets open (section 3.3) |
 | M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | done (section 3.4) |
-| M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | done (sections 3.5 and 3.6; the sound LFO's pan and filter destinations with M5, tempo sync not covered) |
-| M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | 2–3 |
+| M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | done (sections 3.5 and 3.6; the sound LFO's pan and filter destinations at M5, tempo sync not covered) |
+| M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | done (section 3.7) but the output high-pass (it would change every sound's bits: section 8) |
 | M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | 3 |
 | | **the first converted sound set plays** | after M6, with the converter writing this engine's format | |
 | M7 | everything | controller-set switches and sensitivities (as decided), micro tuning, the partial items of section 1.5 re-measured, the known-differences register | 2–3 |
@@ -801,6 +870,10 @@ Sizes are rough, in working sessions of the size of this round.
 - The deliberate differences of section 1.5 (band-limiting, formant silence above Nyquist, no
   filter overload, no output clip, widened pitch ranges): keep them all?
 - The voice pool size an instance (the existing profile: 128 shared by every sound).
+- The 10.3 Hz first-order output high-pass (section 1.5, the reference's): not built at M5, as it
+  changes every sound's output (the golden hashes); in the engine, or the platform's mixer?
+- The lane gate's one-voice ratio after M5 (2.574 against 2.509 + 2 %): the right channel's copy
+  and the filter and pan tests a step cost a voice alone 2.2 % (section 3.7).
 
 Provisional decisions taken at M1 (conservative defaults, each open to a later ruling):
 

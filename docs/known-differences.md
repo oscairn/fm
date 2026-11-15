@@ -7,7 +7,7 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 
 ## Open: for a ruling
 
-| What | The reference | The engine (M4) | Why |
+| What | The reference | The engine (M5) | Why |
 |---|---|---|---|
 | Output clipping | not measured whether the part's output clips | no clip (the platform's mixer clips) | the existing profile's choice, unmeasured either way |
 | Envelope resolution | per sample (as far as measured) | every 16 frames (0.33 ms at 48 kHz; a step is cut short where an event of the voice's sound falls), exact at the steps, gains ramped linearly between; a segment shorter than a step becomes one ramp; the hold in whole steps | the design's control rate; the fastest decay (time 0) moves 5.2 dB a step, the fastest attack about 18 dB |
@@ -39,7 +39,22 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 | Sound LFO envelope below about 100 ms | the fades and hold measured from 48 up | the fades and hold take the delay's times below that | as the existing profile, unmeasured |
 | Sound LFO between its top and bottom | every destination measured with a square wave only | values between the top and bottom straight (in cents, dB, steps cut towards 0); the depth ratio rule on level, detune and form unmeasured; frequency and detune do not reach fixed-mode operators (unmeasured) | as the existing profile |
 | Sound LFO level at depth 127 | silent at the bottom | 74.8 dB down at the bottom | the measured 0.589 dB a step, straight |
-| Sound LFO pan, cutoff and resonance destinations | played | parsed and reported as not covered | M5 (pan and the filter) |
+| Sound LFO pan, cutoff and resonance destinations | played; measured with a square wave at a few depths | played at the LFO's value at each step's end, ramped; the wide band-pass's width does not move with the resonance destination | as the existing profile (the width unmeasured) |
+| Filter overload | the 24 dB low-pass, 24 dB high-pass and 12 dB band-pass overload at resonance 96-127 (8-51 dB of the existing profile's cases, harmonics added) | not modelled: the sections' states are held within +-8 (18 dB over full scale), so every output stays bounded; below that the sections are linear | the existing profile's choice (deliberate); the overload's law is not measured |
+| Filter resolution | per sample (as far as measured; the reference's envelope segments arrive about 2 ms after the existing profile's) | the envelope, the LFOs' moves and the coefficients every 16 frames, F, damping and the one-pole's coefficient ramped linearly a frame; an instant segment becomes one step's ramp | the design's control rate (the existing profile: every 64 samples) |
+| Filter at other rates | a 44.1 kHz filter: the section's shape near a sixth of its rate is part of the measured response | the same cutoffs in Hz at the engine's rate, so above about 3 kHz the section's shape follows the rate (at 48 kHz F at the top is 0.94, not 1); below 44.1 kHz the top is a sixth of the rate and the damping is held where the section turns unstable | a filter's shape near its rate cannot match at every rate; not compared at 48 kHz |
+| Filter envelope segments | bend slightly (a 1200-cent decay a quarter of the way at 0.19 of its time, half at 0.51, three quarters at 0.78) | straight in cents | as the existing profile (up to about 90 cents off mid-segment) |
+| Filter types 9, 18, 20 | no type of the model's documented list | played as thru, reported as not covered | no law |
+| Low-pass 12 + band-pass 6 | its exact structure not resolved | a low-pass section plus a band-pass section with 1.13 times its Q (fitted, 13 of 21 cases within 1 dB) | as the existing profile |
+| Dual types' second section above F = 1 | measured only at the 18 dB "s" type, resonance 64 | up to F = 1.75, damping limited only where it would turn unstable | as the existing profile (the dual band-pass at distance +127 is 8.1 dB off) |
+| Filter envelope time velocity | positive measured from +8 to +63; negative instant from velocity 16 | the same; negative instant from velocity 2 (2-15 unmeasured); decay 2 and the release by the segment value's names | as the existing profile |
+| Filter envelope time key follow below 0 | shorter for -64 too | the positive rule mirrored (longer) | as the existing profile, unmeasured |
+| Voice LFO filter depth | measured at depth 25 only (its modulation shrank by about 15 % a second in that render, unexplained) | 68 cents a depth step at the peak, straight in depth, at each step's end | as the existing profile |
+| Pan resolution | the existing profile moved the sound LFO's pan once per 64 samples | every 16 frames, the gains ramped a frame; a note's own position is fixed for its life | the design's control rate |
+| Alternate pan's alternation | could not be measured (one note per performance load) | the side changes with every note of the sound (its first note at the set side), counted from the sound's install | as the existing profile, unmeasured |
+| Pan of a mono legato note | not measured | the voice keeps its pan | unmeasured |
+| Key-on delay | whole 64-sample blocks at 44.1 kHz | the same time, to the frame at every rate; at most 32 notes an instance waiting (more end at once); in mono and legato playing the note is handled when it starts | finer than the reference's blocks; mono and legato with a delay unmeasured |
+| Key-on delay tempo sync | 1/16 to 8 beats at the host's tempo | not played: the delay plays its time (reported as not covered) | the core has no tempo input |
 | Sound LFO destinations 0-69 | the insertion effects' parameters | not played (reported as not covered) | the engine has no effects |
 | A parameter changed while a sound plays | not measured | from the next control step for what moves, the next note for what a note keeps; a change of the operators heard, their forms, the feedback path, mono or key assign waits until the sound is silent | a voice's state stays valid |
 
@@ -68,3 +83,9 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 - Retrigger fade: about 1 ms ahead of the reference's in its first 10 ms.
 - Operator pitch envelope times 90-99 unmeasured; fixed-mode pitch velocity sensitivities 4 and 6
   halfway between their neighbours.
+- Filter: 676 of 697 measured cases within 1 dB; the wide band-pass 14 of 16 (1.1-1.3 dB at cutoff
+  256); the dual band-pass at distance +127 8.1 dB off; low-pass 12 + band-pass 6 13 of 21. Cutoff
+  key follow up to 16 cents off at fractional octaves. Filter envelope decay 42 2.0 ms off; holds
+  above 96 unmeasured; depth velocity curves 0, 1, 3, 4 measured at two velocities.
+- Pan: scaling pan +63 at key 30 (the reference's far side at -64.7 dB, the law's -45.6); random
+  pan's narrower spread at depth 127 and its left lean.
