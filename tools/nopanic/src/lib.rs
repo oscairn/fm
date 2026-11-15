@@ -92,6 +92,8 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
         (7, (pick % 128) as i16),
         (8, (pick / 11 % 128) as i16),
         (208, (pick % 256) as i16 - 128),
+        (206, (pick % 73) as i16 - 48),
+        (207, (pick / 5 % 73) as i16 - 48),
     ] {
         let _ = s.set(id, v);
     }
@@ -137,6 +139,13 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
                 frame: at(17),
                 sound,
                 kind: Kind::Off { id: b.wrapping_sub(1) },
+            },
+            Event {
+                frame: at(23),
+                sound,
+                kind: Kind::Bend {
+                    value: pick.rotate_left(b) as i16,
+                },
             },
         ];
         e.render_events::<Native>(out, &events, &mut end);

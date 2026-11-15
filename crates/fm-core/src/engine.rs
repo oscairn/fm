@@ -57,7 +57,7 @@ pub struct NoteEnd {
     pub id: u32,
 }
 
-/// A note or pedal event at a frame of a block (see [`Engine::render_events`]).
+/// A note, pedal or bend event at a frame of a block (see [`Engine::render_events`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Event {
     /// The frame it takes effect at (0 to `BLOCK` - 1).
@@ -74,6 +74,8 @@ pub enum Kind {
     Off { id: u32 },
     /// [`Engine::pedal`]
     Pedal { down: bool },
+    /// [`Engine::bend`]
+    Bend { value: i16 },
 }
 
 /// A sound's place in the voice budget's order (oscairn.voice-budget): voices it keeps from other
@@ -128,6 +130,8 @@ pub struct Prepared {
     /// (octaves a millisecond); the operators whose levels are away from 0.
     opeg: [[f32; 4]; OPS],
     opeg_on: u8,
+    /// The pitch at full bend up and at full bend down, semitones.
+    bend: (i8, i8),
 }
 
 impl Prepared {
@@ -186,6 +190,7 @@ impl Prepared {
             opeg_on: (0..OPS)
                 .filter(|&op| o(op, Op::PegLevel, 0) != 0 || o(op, Op::PegLevel, 1) != 0)
                 .fold(0, |m, op| m | bit(op)),
+            bend: (s.get(Part::BendUp as usize) as i8, s.get(Part::BendDown as usize) as i8),
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -661,6 +666,8 @@ pub struct Engine {
     age: u32,
     /// Each sound's random source (xorshift32), started again when the sound is installed.
     rng: [u32; SOUNDS],
+    /// Each sound's pitch bend, -8192..+8191.
+    bend: [i16; SOUNDS],
     rate: f64,
     shed_step: f32,
     /// The operators' outputs in a step, at each width (each is written before it is read, so
@@ -682,6 +689,7 @@ impl Engine {
             pedal: 0,
             age: 0,
             rng: [SEED; SOUNDS],
+            bend: [0; SOUNDS],
             rate,
             shed_step: (1.0 / steps) as f32,
             y1: [[[0.0; 1]; STEP]; OPS],
@@ -835,6 +843,14 @@ impl Engine {
         }
     }
 
+    /// The pitch bend of `sound`, -8192..+8191 (a 14-bit controller about its centre), played by
+    /// the sound's ranges on every operator from the next control step (an event's frame).
+    pub fn bend(&mut self, sound: usize, value: i16) {
+        if let Some(b) = self.bend.get_mut(sound) {
+            *b = value.clamp(-8192, 8191);
+        }
+    }
+
     /// The sustain pedal of `sound`: up releases the notes it held.
     pub fn pedal(&mut self, sound: usize, down: bool) {
         let Some(p) = self.sounds.get(sound).copied() else {
@@ -931,6 +947,7 @@ impl Engine {
                     Kind::On { id, key, velocity } => self.note_on(s, id, key, velocity, end),
                     Kind::Off { id } => self.note_off(s, id),
                     Kind::Pedal { down } => self.pedal(s, down),
+                    Kind::Bend { value } => self.bend(s, value),
                 }
             }
             self.render_sound::<V>(sound, out, from, BLOCK, end);
@@ -955,7 +972,9 @@ impl Engine {
             rate: self.rate,
             shed_step: self.shed_step,
             ms: (1000.0 / self.rate) as f32,
-            bend: 0.0,
+            bend: self.bend.get(usize::from(sound)).map_or(0.0, |&b| {
+                laws::bend_steps(i32::from(b), i32::from(p.bend.0), i32::from(p.bend.1)) as f32 / 2048.0
+            }),
             fixed_max: (laws::FIXED_MAX_HZ / self.rate * 4_294_967_296.0) as f32,
         };
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
@@ -2655,6 +2674,45 @@ mod tests {
         let (mut c, mut z) = (engine(&p), [0.0; BLOCK]);
         c.render_events::<Native>(&mut z, &[on(0, 0, 1, 60)], &mut |_| {});
         assert!(x[37..].iter().zip(&z).all(|(a, b)| (a - b).abs() < 1e-3));
+    }
+
+    /// Pitch bend: from its event's frame on, every operator (fixed-mode ones too) at the law's
+    /// steps for the sound's ranges; the frames before it the same bits as without it; back at 0,
+    /// the note's own increments exactly.
+    #[test]
+    fn bend_on_its_frame() {
+        let p = sound(
+            "algorithm=1 bend_up=12 bend_down=-24\nop1.level=99\nop2.level=99 op2.mode=1 op2.coarse=15\nop8.level=0",
+        );
+        let (mut a, mut b) = (engine(&p), engine(&p));
+        let (mut x, mut y) = ([0.0; BLOCK], [0.0; BLOCK]);
+        for e in [&mut a, &mut b] {
+            e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+        }
+        let bend = |frame, value| Event {
+            frame,
+            sound: 0,
+            kind: Kind::Bend { value },
+        };
+        a.render_events::<Native>(&mut x, &[bend(50, -8192)], &mut |_| {});
+        b.render::<Native>(&mut y, &mut |_| {});
+        let same = x.iter().zip(&y).take_while(|(a, b)| a.to_bits() == b.to_bits()).count();
+        assert_eq!(
+            same, 51,
+            "the bend reaches the output at frame 51 (frame 50's phase is set before it)"
+        );
+        let ratio = |e: &Engine, op: usize| f64::from(e.lanes[0].inc[op][0]) / f64::from(e.lanes[0].pt.base[op][0]);
+        let want = (f64::from(laws::bend_steps(-8192, 12, -24)) / 2048.0).exp2();
+        for op in 0..2 {
+            assert!(
+                (ratio(&a, op) / want - 1.0).abs() < 1e-4,
+                "operator {op}: {}",
+                ratio(&a, op)
+            );
+        }
+        a.render_events::<Native>(&mut x, &[bend(0, 0)], &mut |_| {});
+        assert_eq!(a.lanes[0].inc, b.lanes[0].inc);
     }
 
     /// A sound's events cut its own control steps only: another sound plays the same bits; a voice
