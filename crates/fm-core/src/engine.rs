@@ -427,6 +427,10 @@ pub struct Engine {
     age: u32,
     rate: f64,
     shed_step: f32,
+    /// The operators' outputs in a step, at each width (each is written before it is read, so
+    /// they are never cleared).
+    y1: [[[f32; 1]; STEP]; OPS],
+    y4: [[[f32; W]; STEP]; OPS],
 }
 
 impl Engine {
@@ -443,6 +447,8 @@ impl Engine {
             age: 0,
             rate,
             shed_step: (1.0 / steps) as f32,
+            y1: [[[0.0; 1]; STEP]; OPS],
+            y4: [[[0.0; W]; STEP]; OPS],
         }
     }
 
@@ -688,8 +694,7 @@ impl Engine {
             while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
         }
         let shed_step = self.shed_step;
-        // the operators' outputs in a step, at each width: each is written before it is read
-        let (mut y1, mut y4) = ([[[0.0f32; 1]; STEP]; OPS], [[[0.0f32; W]; STEP]; OPS]);
+        let (y1, y4) = (&mut self.y1, &mut self.y4);
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0) {
             let Some(p) = self.sounds.get(usize::from(lane.sound)) else {
                 continue;
@@ -702,8 +707,8 @@ impl Engine {
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
-                    1 => step::<1, scalar::F<1>>(lane, p, shed_step, end, chunk, &mut y1),
-                    _ => step::<W, V>(lane, p, shed_step, end, chunk, &mut y4),
+                    1 => step::<1, scalar::F<1>>(lane, p, shed_step, end, chunk, y1),
+                    _ => step::<W, V>(lane, p, shed_step, end, chunk, y4),
                 }
             }
         }
