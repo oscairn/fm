@@ -281,6 +281,8 @@ mod tests {
                 );
             }
             assert!(g.fb_from >= g.fb_to);
+            // the engine's interleaved loop holds three operators
+            assert!(g.fb_from - g.fb_to < 3);
             let loops = g.fb_from > g.fb_to;
             assert_eq!(loops, i + 1 == 12 || i + 1 == 14, "routing {}", i + 1);
         }

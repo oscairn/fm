@@ -1021,8 +1021,13 @@ fn interleaved_forms<const L: usize, V: F4<L>>(
     interleaved::<L, V, true>(lane, p, g0, dg, y, lo, hi);
 }
 
+/// The most operators a feedback loop runs through (routing 12's 3 > 4 > 5).
+const LOOP: usize = 3;
+
 /// Operators `lo..=hi` (the live ones) sample by sample: each sample's input reads the outputs
-/// already written for that sample (sources below `lo` were written for the whole step before).
+/// already made for that sample. Their inputs from below `lo` (written for the whole step before)
+/// are summed first, a whole step at a time, in the order a single operator sums its sources, so
+/// the bits are the same.
 fn interleaved<const L: usize, V: F4<L>, const MIXED: bool>(
     lane: &mut Lane,
     p: &Prepared,
@@ -1033,51 +1038,88 @@ fn interleaved<const L: usize, V: F4<L>, const MIXED: bool>(
     hi: usize,
 ) {
     let plan = &p.plan;
-    let mut ph = lane.ph.map(|a| V::U::load4(&a));
-    let inc = lane.inc.map(|a| V::U::load4(&a));
-    let mut g = g0.map(V::load);
-    let mut dg = dg.map(V::load);
+    // the loop's live operators in order (OPS past the last)
+    let mut ks = [OPS; LOOP];
+    for (x, k) in ks.iter_mut().zip((lo..=hi).filter(|&k| has(u32::from(plan.live), k))) {
+        *x = k;
+    }
+    let mods = ks.map(|k| u32::from(plan.mods.get(k).copied().unwrap_or(0)));
+    // each one's sources inside the loop, by place in `ks`
+    let inner = mods.map(|m| {
+        (0..LOOP)
+            .filter(|&a| ks.get(a).is_some_and(|&j| has(m, j)))
+            .fold(0, |n, a| n | bit(a))
+    });
+    let mut buf = [[[0.0f32; L]; STEP]; LOOP];
+    for (b, &m) in buf.iter_mut().zip(mods.iter()) {
+        for (j, src) in y.iter().enumerate().take(lo) {
+            if has(m, j) {
+                for (x, s) in b.iter_mut().zip(src.iter()) {
+                    *x = (V::load(*x) + V::load(*s)).store();
+                }
+            }
+        }
+    }
+    let mut ph = ks.map(|k| V::U::load4(lane.ph.get(k).unwrap_or(&[0; W])));
+    let inc = ks.map(|k| V::U::load4(lane.inc.get(k).unwrap_or(&[0; W])));
+    let waves = ks.map(|k| plan.waves.get(k).copied().unwrap_or(Wave::Sine));
+    let mut g = ks.map(|k| V::load(g0.get(k).copied().unwrap_or([0.0; L])));
+    let mut d = ks.map(|k| V::load(dg.get(k).copied().unwrap_or([0.0; L])));
     if MIXED {
-        for ((gk, dk), (&w, &i)) in g.iter_mut().zip(dg.iter_mut()).zip(plan.waves.iter().zip(inc.iter())) {
-            (*gk, *dk) = nyquist::<L, V>(w, i, *gk, *dk);
+        for ((g, d), (&w, &i)) in g.iter_mut().zip(d.iter_mut()).zip(waves.iter().zip(inc.iter())) {
+            (*g, *d) = nyquist::<L, V>(w, i, *g, *d);
         }
     }
     let fbk = V::splat(p.fbk);
     let (mut y1, mut y2) = (V::load4(&lane.fb[0]), V::load4(&lane.fb[1]));
+    // (written out for two or three operators, so their state stays in registers)
+    let three = ks.get(2).is_some_and(|&k| k < OPS);
+    let [n1, n2] = [inner.get(1), inner.get(2)].map(|n| u32::from(n.copied().unwrap_or(0)));
     for s in 0..STEP {
-        for k in (lo..=hi).filter(|&k| has(u32::from(plan.live), k)) {
-            let mods = plan.mods.get(k).copied().unwrap_or(0);
-            let mut m = V::splat(0.0);
-            for (j, yj) in y.iter().enumerate().take(k) {
-                if has(u32::from(mods), j) {
-                    m = m + V::load(yj.get(s).copied().unwrap_or([0.0; L]));
-                }
-            }
-            if k == lo {
-                m = (y1 + y2).mul_add(fbk, m);
-            }
-            let (Some(pk), Some(&inck), Some(gk), Some(&dgk)) = (ph.get_mut(k), inc.get(k), g.get_mut(k), dg.get(k))
-            else {
-                continue;
+        // operator `a` of the loop, its input from below with `add` applied
+        let mut op = |a: usize, add: &dyn Fn(V) -> V| {
+            let (Some(b), Some(pa), Some(&ia), Some(&w), Some(ga), Some(&da)) = (
+                buf.get_mut(a).and_then(|b| b.get_mut(s)),
+                ph.get_mut(a),
+                inc.get(a),
+                waves.get(a),
+                g.get_mut(a),
+                d.get(a),
+            ) else {
+                return V::splat(0.0);
             };
-            let v = if MIXED {
-                wave::<L, V>(plan.waves.get(k).copied().unwrap_or(Wave::Sine), *pk, offset(m))
+            let m = add(V::load(*b));
+            let out = if MIXED {
+                wave::<L, V>(w, *pa, offset(m))
             } else {
-                read::<L, V>(&SINE, pk.add(offset(m)))
-            } * *gk;
-            *gk = *gk + dgk;
-            *pk = pk.add(inck);
-            if k == hi {
-                (y2, y1) = (y1, v);
-            }
-            if let Some(out) = y.get_mut(k).and_then(|o| o.get_mut(s)) {
-                *out = v.store();
-            }
-        }
+                read::<L, V>(&SINE, pa.add(offset(m)))
+            } * *ga;
+            *ga = *ga + da;
+            *pa = pa.add(ia);
+            *b = out.store();
+            out
+        };
+        let v0 = op(0, &|m| (y1 + y2).mul_add(fbk, m));
+        let v1 = op(1, &|m| if n1 & 1 != 0 { m + v0 } else { m });
+        let last = if three {
+            op(2, &|m| {
+                let m = if n2 & 1 != 0 { m + v0 } else { m };
+                if n2 & 2 != 0 {
+                    m + v1
+                } else {
+                    m
+                }
+            })
+        } else {
+            v1
+        };
+        // the loop's last operator is its feedback source
+        (y2, y1) = (y1, last);
     }
-    for k in lo..=hi {
-        if let (Some(d), Some(v)) = (lane.ph.get_mut(k), ph.get(k)) {
-            v.store4(d);
+    for ((&k, b), pa) in ks.iter().zip(buf.iter()).zip(ph.iter()) {
+        if let (Some(yk), Some(d)) = (y.get_mut(k), lane.ph.get_mut(k)) {
+            *yk = *b;
+            pa.store4(d);
         }
     }
     let [f1, f2] = &mut lane.fb;
