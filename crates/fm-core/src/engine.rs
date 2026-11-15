@@ -104,6 +104,8 @@ pub enum Kind {
     Bend { value: i16 },
     /// [`Engine::param`]: a parameter's raw value (its id in the sound format)
     Param { id: u16, value: i16 },
+    /// [`Engine::choke_note`]
+    Choke { id: u32 },
 }
 
 /// A sound's place in the voice budget's order (oscairn.voice-budget): voices it keeps from other
@@ -1913,6 +1915,7 @@ impl Engine {
                         Kind::Pedal { down } => self.pedal(s, down),
                         Kind::Bend { value } => self.bend(s, value),
                         Kind::Param { id, value } => self.param(s, id, value),
+                        Kind::Choke { id } => self.choke_note(s, id, end),
                     }
                 }
                 self.render_sound::<V>(sound, pair, &mut left, from, frames, end);
@@ -5076,6 +5079,18 @@ mod tests {
             e.render::<Native>(&mut [[0.0; BLOCK]; 2], &mut |n| ended.push(n.id));
         }
         assert_eq!(ended, vec![3], "only the choked note ends, after its fade");
+        // the same as an event at its frame
+        e.note_on(0, 4, 69, 100.0, &mut |_| {});
+        let choke = Event {
+            frame: 40,
+            sound: 0,
+            kind: Kind::Choke { id: 4 },
+        };
+        for b in 0..2 {
+            let ev = if b == 0 { vec![choke] } else { vec![] };
+            e.render_events::<Native>(&mut [[0.0; BLOCK]; 2], &ev, &mut |n| ended.push(n.id));
+        }
+        assert_eq!(ended, vec![3, 4]);
         let mut n = 0;
         e.voices(|s, id, loud| {
             n += 1;
