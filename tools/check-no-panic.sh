@@ -22,7 +22,7 @@ cat > "$T/m.c" <<'EOC'
 void fm_nopanic_play(uint32_t pick, uint32_t centre, size_t voice, float hz, uint32_t blocks, float *out);
 uint32_t fm_nopanic_engine(uint32_t pick, uint8_t key, float velocity, uint32_t blocks, float *out);
 int main(int argc, char **argv) {
-    static float out[128];
+    static float out[256]; /* the engine's left and right (the spike's: the first 128) */
     uint32_t a = argc > 1 ? (uint32_t)atoi(argv[1]) : 0;
     for (uint32_t pick = 0; pick < 32; pick++)
         fm_nopanic_play(pick + a, 7 + a, (size_t)argc * 5, 440.0f * (float)argc, 4, out);

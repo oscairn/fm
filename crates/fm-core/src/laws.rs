@@ -79,7 +79,7 @@ pub fn db_to_gain(db: f64) -> f64 {
 pub const DOUBLINGS_PER_DB: f64 = 1.0 / 6.020_599_913_279_624;
 
 /// Straight lines through `(x, y)`, clamped at both ends; `x` ascending.
-fn interpolate(x: &[f64], y: &[f64], v: f64) -> f64 {
+pub(crate) fn interpolate(x: &[f64], y: &[f64], v: f64) -> f64 {
     let mut prev: Option<(f64, f64)> = None;
     for (&xi, &yi) in x.iter().zip(y) {
         if v <= xi {
@@ -282,7 +282,7 @@ pub fn fixed_steps(coarse: i32, fine: i32) -> i32 {
 pub const FIXED_MAX_HZ: f64 = 22_040.0;
 
 /// To the nearest integer, held within +-2^24 (so callers' integer arithmetic cannot overflow).
-fn round(x: f64) -> i32 {
+pub(crate) fn round(x: f64) -> i32 {
     ((if x < 0.0 { x - 0.5 } else { x + 0.5 }) as i32).clamp(-1 << 24, 1 << 24)
 }
 

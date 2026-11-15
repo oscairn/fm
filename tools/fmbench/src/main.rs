@@ -7,7 +7,8 @@
 //!   fmbench engine VOICES BLOCKS ROUTING [OPS] [native|scalar] [FORMS] [SOUNDS]
 //!                                VOICES held notes of a sound on ROUTING with OPS operators (default 8)
 //!                                on FORMS (sine, all, odd, res, mixed: eight different tables; pitch,
-//!                                mod, slfo: sines with modulators, see `case_sound`), in
+//!                                mod, slfo: sines with modulators; a suffix +fT, +fx, +pan adds
+//!                                a filter or pan, see `case_sound`), in
 //!                                each of SOUNDS sounds (default 1); a last argument `param` sends a
 //!                                parameter event every block
 //!   fmbench VOICES BLOCKS [om|sm] [edges|loop|chain] [sine|table|window] [native|scalar]
@@ -36,7 +37,7 @@ pub extern "C" fn fmbench_render(e: &mut spike::Engine, out: &mut [f32; BLOCK], 
 
 #[no_mangle]
 #[inline(never)]
-pub extern "C" fn fmbench_render_engine(e: &mut Engine, out: &mut [f32; BLOCK], scalar: bool) {
+pub extern "C" fn fmbench_render_engine(e: &mut Engine, out: &mut [[f32; BLOCK]; 2], scalar: bool) {
     let mut end = |_: NoteEnd| {};
     if scalar {
         e.render::<scalar::F>(out, &mut end)
@@ -47,7 +48,7 @@ pub extern "C" fn fmbench_render_engine(e: &mut Engine, out: &mut [f32; BLOCK], 
 
 #[no_mangle]
 #[inline(never)]
-pub extern "C" fn fmbench_render_event(e: &mut Engine, out: &mut [f32; BLOCK], ev: &Event) {
+pub extern "C" fn fmbench_render_event(e: &mut Engine, out: &mut [[f32; BLOCK]; 2], ev: &Event) {
     e.render_events::<Native>(out, core::slice::from_ref(ev), &mut |_: NoteEnd| {});
 }
 
@@ -71,6 +72,10 @@ fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
 /// on every operator; `slfo`: sines with the sound LFO (triangle, delay) on every operator's
 /// frequency, level and detune.
 fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
+    // FORMS+fT: filter type T (the stored value) on the case, its envelope moving; FORMS+fx: the
+    // dual band-stop with the envelope, the voice LFO on the cutoff and the sound LFO on cutoff,
+    // resonance and pan (the costliest filter); FORMS+pan: alternate and random pan
+    let (forms, post) = forms.split_once('+').unwrap_or((forms, ""));
     let pitch = forms == "pitch";
     let mut t = format!(
         "fm-sound/1\nalgorithm={routing} feedback=7 portamento={}\n",
@@ -90,6 +95,28 @@ fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
         for o in 1..=8 {
             t += &format!("op{o}.{}\n", m.replace(' ', &format!(" op{o}.")));
         }
+    }
+    if let Some(f) = post.strip_prefix('f') {
+        let all = f == "x";
+        if all {
+            t += "lfo_wave=0 lfo_speed=40 lfo_filter_depth=30\n";
+        }
+        let (kind, gain) = match f {
+            "x" => ("17", 255),
+            "gain" => ("21", 200),
+            k => (k, 255),
+        };
+        t += &format!(
+            "filter_type={kind} cutoff=600 resonance=60 hpf_cutoff=200 distance=24 filter_gain={gain} \
+             filter_eg_time_attack=100 filter_eg_level_attack=40 filter_eg_depth=40\n"
+        );
+        if all {
+            t += "slfo_wave=0 slfo_speed=40 slfo_dest1=70 slfo_depth1=40 slfo_dest2=72 slfo_depth2=10 \
+                  slfo_dest3=73 slfo_depth3=20\n";
+        }
+    }
+    if post == "pan" {
+        t += "random_pan=64 alternate_pan=32\n";
     }
     for o in 1..=8 {
         let level = if o > 8 - ops { 99 } else { 0 };
@@ -148,10 +175,9 @@ fn time(blocks: usize) {
         rows.push((name, engine(12, 8, voices, "sine", sounds), voices * sounds));
     }
     for (name, mut e, voices) in rows {
-        let mut out = [0.0f32; BLOCK];
         let mut t = Vec::with_capacity(blocks);
         for _ in 0..blocks {
-            out.fill(0.0);
+            let mut out = [[0.0f32; BLOCK]; 2];
             let s = Instant::now();
             fmbench_render_engine(&mut e, &mut out, false);
             t.push(s.elapsed().as_secs_f64() * 1e6);
@@ -200,9 +226,10 @@ fn check() -> bool {
                 );
             }
         }
-        let mut out = [0.0f32; BLOCK];
+        let mut out = [[0.0f32; BLOCK]; 2];
         e.render::<Native>(&mut out, &mut |_| ended += 1);
         bad += out
+            .as_flattened()
             .iter()
             .filter(|x| !x.is_finite() || (x.abs() < f32::MIN_POSITIVE && **x != 0.0))
             .count();
@@ -256,14 +283,13 @@ fn main() {
             let mut e = engine(num(3, 12) as u32, num(4, 8) as u32, voices, &arg(6, "sine"), sounds);
             let scalar = arg(5, "native") == "scalar";
             let voices = voices * sounds;
-            let mut out = [0.0f32; BLOCK];
             let mut sum = 0.0f64;
             let t = Instant::now();
             // "param": a parameter event every block (the voice LFO's speed, so the sound is prepared
             // again and its plan stays)
             let param = arg(8, "") == "param";
             for b in 0..blocks {
-                out.fill(0.0);
+                let mut out = [[0.0f32; BLOCK]; 2];
                 if param {
                     let kind = Kind::Param {
                         id: 23,
@@ -281,7 +307,7 @@ fn main() {
                 } else {
                     fmbench_render_engine(&mut e, &mut out, scalar);
                 }
-                sum += out.iter().map(|x| f64::from(x.abs())).sum::<f64>();
+                sum += out.as_flattened().iter().map(|x| f64::from(x.abs())).sum::<f64>();
             }
             let us = t.elapsed().as_secs_f64() * 1e6 / (blocks * voices.max(1)) as f64;
             println!(

@@ -6,6 +6,7 @@
 //! Fixed size; nothing here allocates, and the block path (`note_on`, `note_off`, `pedal`,
 //! `render`) has no panic path (tools/check-no-panic.sh).
 
+use crate::filter::{Laws, Voices, VOICES0};
 use crate::forms::Wave;
 use crate::laws::{self, DOUBLINGS_PER_DB as DPD};
 use crate::params::{op_index, slfo_box_index, Common, Op, Part, OPS};
@@ -212,14 +213,17 @@ pub struct Prepared {
     feedback: u8,
     forms: [(u8, u8, u8); OPS],
     slfo_fbk: [f32; 8],
+    /// The filter, its envelope and pan (docs/design.md, 3.7).
+    filter: Laws,
 }
 
 /// What the sound LFO moves: pitch (frequency or detune), level, what the kernels play (form or
-/// feedback), the voice LFO's speed.
+/// feedback), the voice LFO's speed, the filter or pan.
 const SLFO_PITCH: u8 = 1;
 const SLFO_AMP: u8 = 2;
 const SLFO_KERN: u8 = 4;
 const SLFO_SPEED: u8 = 8;
+const SLFO_POST: u8 = 16;
 
 /// The sound LFO's running state, one a sound: phase (2^32 a cycle), frames since its envelope
 /// started, frames it still stands still after a reset, its random source and the sample-and-hold
@@ -246,6 +250,9 @@ impl Prepared {
         let r = routing(s.get(Common::Algorithm as usize));
         let feedback = i32::from(s.get(Common::Feedback as usize));
         let o = |op: usize, k: Op, i: usize| i32::from(s.get(op_index(op, k, i)));
+        // the sound LFO's destinations with depth (the reference's numbers: 70-78 this part's)
+        let slfo_part = |i: usize| i32::from(s.get((Part::SlfoDest as usize).wrapping_add(i)));
+        let dests = [0, 2, 4].map(|i| (slfo_part(i), slfo_part(i + 1)));
         let mut p = Prepared {
             sound: *s,
             plan: Plan::new(&r, 0, false, [Wave::Sine; OPS]),
@@ -336,6 +343,7 @@ impl Prepared {
             feedback: feedback.clamp(0, 7) as u8,
             forms: [(0, 0, 0); OPS],
             slfo_fbk: [0.0; 8],
+            filter: Laws::new(s, &dests),
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -450,9 +458,6 @@ impl Prepared {
         }
         let waves = forms.map(|(f, s, n)| Wave::new(f, s, n));
         p.forms = forms.map(|(f, s, n)| (f as u8, s as u8, n as u8));
-        // the sound LFO's destinations with depth (the reference's numbers: 70-78 this part's)
-        let slfo_part = |i: usize| i32::from(s.get((Part::SlfoDest as usize).wrapping_add(i)));
-        let dests = [0, 2, 4].map(|i| (slfo_part(i), slfo_part(i + 1)));
         // (the feedback destination needs the feedback path, at amount 0 where the sound has none)
         let fb_dest = dests.iter().any(|&(x, depth)| x == 74 && depth > 0);
         p.plan = Plan::new(&r, audible, feedback > 0 || fb_dest, waves);
@@ -503,6 +508,11 @@ impl Prepared {
         p
     }
 
+    /// Whether the voice LFO reaches anything (pitch, amplitude, the cutoff).
+    fn lfo_on(&self) -> bool {
+        self.lfo_pitch_on || self.lfo_amp_on || self.filter.uses_lfo()
+    }
+
     /// The sound LFO's laws (docs/design.md, 3.6), from the sound `s` and its destinations
     /// (number, depth).
     fn prepare_slfo(&mut self, s: &Sound, dests: &[(i32, i32); 3]) {
@@ -529,8 +539,8 @@ impl Prepared {
                         }
                     }
                 }
-                // pan, filter cutoff and resonance (M5) and the effects' parameters are not played
-                // (the coverage report names them)
+                // pan, cutoff and resonance (70, 72, 73) are the filter's (`Laws`); the effects'
+                // parameters are not played (the coverage report names them)
                 _ => {}
             }
         }
@@ -545,11 +555,12 @@ impl Prepared {
             } else {
                 0
             }
-            | if self.slfo_speed != 0.0 && (self.lfo_pitch_on || self.lfo_amp_on) {
+            | if self.slfo_speed != 0.0 && self.lfo_on() {
                 SLFO_SPEED
             } else {
                 0
-            };
+            }
+            | if self.filter.uses_slfo() { SLFO_POST } else { 0 };
         // shortcut: tempo sync and random speed are not played (the coverage report names them)
         self.slfo_hz = laws::slfo_hz(part(Part::SlfoSpeed, 0)) as f32;
         self.slfo_wave = part(Part::SlfoWave, 0).clamp(0, 12) as u8;
@@ -637,6 +648,8 @@ struct Lane {
     /// starts.
     sdt_d: [i8; OPS],
     sdt: [[f32; W]; OPS],
+    /// The filter and pan, read only when its sound has them.
+    post: Voices,
 }
 
 /// What a lane's increments are made of while a voice's pitch moves (docs/design.md, 2.3), read
@@ -709,6 +722,7 @@ const LANE0: Lane = Lane {
     lfo_rnd: [0; W],
     sdt_d: [SDT_NONE; OPS],
     sdt: [[0.0; W]; OPS],
+    post: VOICES0,
 };
 
 /// No sound LFO detune move held (`Lane::sdt_d`).
@@ -826,6 +840,7 @@ impl Lane {
         if let (Some(c), Some(g)) = (self.pt.c_seg.get_mut(s), self.pt.glide.get_mut(s)) {
             (*c, *g) = (DONE, 0.0);
         }
+        self.post.clear(s);
     }
 
     /// Moves the voices in the highest slots into free lower ones, so a lane's voices fill its
@@ -892,6 +907,7 @@ impl Lane {
             one(x, from, to);
         }
         one(&mut pt.c_seg, from, to);
+        self.post.mv(from, to);
         let (f, t) = (bit(from), bit(to));
         for m in [
             &mut self.used,
@@ -917,6 +933,7 @@ impl Lane {
         for op in (0..OPS).filter(|&op| has(u32::from(p.plan.live), op)) {
             self.enter(p, op, s, RELEASE, rate);
         }
+        self.post.release(&p.filter, s, rate);
         if p.peg_on {
             if let Some(c) = self.pt.c_seg.get_mut(s) {
                 *c = RELEASE;
@@ -1062,6 +1079,12 @@ pub struct Engine {
     /// they are never cleared).
     y1: [[[f32; 1]; STEP]; OPS],
     y4: [[[f32; W]; STEP]; OPS],
+    /// Sounds whose next note takes alternate pan's other side, a bit each.
+    alt: u8,
+    /// The block's sum of the sounds without pan (added to both channels at its end), and whether
+    /// any added to it.
+    mono: [f32; BLOCK],
+    mono_on: bool,
 }
 
 impl Engine {
@@ -1091,6 +1114,9 @@ impl Engine {
             retrig_step: (STEP as f64 * 1000.0 / (RETRIGGER_MS * rate)) as f32,
             y1: [[[0.0; 1]; STEP]; OPS],
             y4: [[[0.0; W]; STEP]; OPS],
+            alt: 0,
+            mono: [0.0; BLOCK],
+            mono_on: false,
         }
     }
 
@@ -1106,6 +1132,7 @@ impl Engine {
             (Some(d), Some(r), Some(l)) if !busy => {
                 (*d, *r, *l) = (*p, SEED, SLFO0);
                 self.pending &= !bit(sound);
+                self.alt &= !bit(sound);
                 true
             }
             _ => false,
@@ -1331,6 +1358,9 @@ impl Engine {
             (*k, *i, *a, *vl) = (h.key, h.id, self.age, h.velocity);
         }
         (lane.held, lane.sustained) = (lane.held | bit(s), lane.sustained & !bit(s));
+        // shortcut: the voice keeps its pan (unmeasured)
+        lane.post
+            .retune(&p.filter, s, i32::from(h.key) + i32::from(p.note_shift), v);
         lane.tune(
             &p,
             s,
@@ -1407,6 +1437,13 @@ impl Engine {
             lane.bend = 0.0; // (a lane's first voice: its increments hold no bend)
         }
         lane.tune(&p, s, key, v, r, rate, true, glide);
+        // pan: alternate pan's side changes every note of the sound; a random draw only for random
+        // pan (so the random pitch's sequence is as it was without it)
+        let other = has(u32::from(self.alt), sound);
+        self.alt ^= bit(sound);
+        let pr = p.filter.random_pan().then(|| next_random(self.rng.get_mut(sound)));
+        let pos = p.filter.position(key, other, pr);
+        lane.post.start(&p.filter, s, key, v, pos, lane.used == b, rate);
         lane.sdt_d = [SDT_NONE; OPS]; // (the new voice's detune moves are not made yet)
         if let (Some(ph), Some(t), Some(rnd)) = (lane.lfo_ph.get_mut(s), lane.lfo_t.get_mut(s), lane.lfo_rnd.get_mut(s))
         {
@@ -1584,15 +1621,22 @@ impl Engine {
         true
     }
 
-    /// Adds one block of every sounding voice, mono, to `out`; reports the notes that ended.
-    pub fn render<V: F4>(&mut self, out: &mut [f32; BLOCK], end: &mut impl FnMut(NoteEnd)) {
+    /// Adds one block of every sounding voice to `out` (left, right); reports the notes that ended.
+    /// A sound without pan plays the same in both channels.
+    pub fn render<V: F4>(&mut self, out: &mut [[f32; BLOCK]; 2], end: &mut impl FnMut(NoteEnd)) {
         self.render_events::<V>(out, &[], end);
     }
 
     /// [`Engine::render`] with `events` (in frame order) applied at their frames: each sound's
     /// control steps start again at its own events' frames (a step shorter than 16 frames before
     /// one), so a note starts on its frame and no sound's output depends on another's events.
-    pub fn render_events<V: F4>(&mut self, out: &mut [f32; BLOCK], events: &[Event], end: &mut impl FnMut(NoteEnd)) {
+    pub fn render_events<V: F4>(
+        &mut self,
+        out: &mut [[f32; BLOCK]; 2],
+        events: &[Event],
+        end: &mut impl FnMut(NoteEnd),
+    ) {
+        self.mono_on = false;
         // parameter changes that waited for their sound to fall silent
         for sound in 0..SOUNDS {
             if !has(u32::from(self.pending), sound) || self.busy(sound) {
@@ -1630,6 +1674,12 @@ impl Engine {
             }
             self.render_sound::<V>(sound, out, from, BLOCK, end);
         }
+        if self.mono_on {
+            let [l, r] = out;
+            for ((l, r), m) in l.iter_mut().zip(r.iter_mut()).zip(self.mono.iter()) {
+                (*l, *r) = (*l + *m, *r + *m);
+            }
+        }
         (self.clock, self.at) = (self.clock.wrapping_add(BLOCK as u64), 0);
     }
 
@@ -1638,7 +1688,7 @@ impl Engine {
     fn render_sound<V: F4>(
         &mut self,
         sound: u8,
-        out: &mut [f32; BLOCK],
+        out: &mut [[f32; BLOCK]; 2],
         from: usize,
         to: usize,
         end: &mut impl FnMut(NoteEnd),
@@ -1647,6 +1697,12 @@ impl Engine {
         let Some(p) = self.sounds.get(usize::from(sound)) else {
             return;
         };
+        // a sound without pan adds to the block's mono sum, cleared when first used
+        if !p.filter.pan_on && !self.mono_on && self.lanes.iter().any(|l| l.used != 0 && l.sound == sound) {
+            (self.mono, self.mono_on) = ([0.0; BLOCK], true);
+        }
+        let mono = &mut self.mono;
+        let [left, right] = out;
         let c = Ctx {
             rate: self.rate,
             shed_step: self.shed_step,
@@ -1669,20 +1725,26 @@ impl Engine {
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
             let mut f = from;
             let mut k = 0usize;
-            while let Some(chunk) = out.get_mut(f..to.min(f.saturating_add(STEP))) {
-                if chunk.is_empty() {
+            while f < to {
+                let e = to.min(f.saturating_add(STEP));
+                let (Some(m), Some(l), Some(r)) = (mono.get_mut(f..e), left.get_mut(f..e), right.get_mut(f..e)) else {
                     break;
-                }
+                };
                 let t = clock.wrapping_add(f as u64);
-                f = f.saturating_add(chunk.len());
+                f = e;
                 let v = sv.get(k).copied().unwrap_or(0.0);
                 k = k.wrapping_add(1);
                 lane.compact();
+                let o = Out {
+                    mono: m,
+                    left: l,
+                    right: r,
+                };
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
-                    1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, chunk, y1, v),
-                    _ => step::<W, V>(lane, p, &c, t, end, chunk, y4, v),
+                    1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, o, y1, v),
+                    _ => step::<W, V>(lane, p, &c, t, end, o, y4, v),
                 }
             }
         }
@@ -1891,6 +1953,13 @@ type Incs<const L: usize> = [[u32; L]; OPS];
 /// The highest increment (the largest `f32` below 2^31).
 const MAX_INC: f32 = 2_147_483_520.0;
 
+/// Where a step of a lane goes: the mono sum (a sound without pan), or left and right.
+struct Out<'a> {
+    mono: &'a mut [f32],
+    left: &'a mut [f32],
+    right: &'a mut [f32],
+}
+
 /// One control step of a lane at width `L` (its voices in its first `L` slots), added to `out`
 /// (1 to 16 frames: a shorter step is rendered whole, its phases and feedback history then set
 /// to where its last frame left them), from frame `t` of the engine's clock.
@@ -1902,13 +1971,13 @@ fn step<const L: usize, V: F4<L>>(
     c: &Ctx,
     t: u64,
     end: &mut impl FnMut(NoteEnd),
-    out: &mut [f32],
+    out: Out,
     y: &mut [[[f32; L]; STEP]; OPS],
     sv: f32,
 ) {
-    let n = out.len().clamp(1, STEP);
+    let n = out.mono.len().clamp(1, STEP);
     // a sound without a voice LFO skips this; the sound LFO's speed destination moves its rate
-    let lfo = (p.lfo_pitch_on || p.lfo_amp_on).then(|| {
+    let lfo = p.lfo_on().then(|| {
         let inc = if p.slfo & SLFO_SPEED != 0 {
             let speed = i32::from(p.lfo_speed.1).saturating_add((sv * p.slfo_speed) as i32);
             lfo_inc(laws::lfo_hz(p.lfo_speed.0, speed) as f32, c.rate)
@@ -1949,8 +2018,16 @@ fn step<const L: usize, V: F4<L>>(
             V::U::load(*to).store4(inc);
         }
     }
+    // the filter and pan (docs/design.md, 3.7)
+    if p.filter.on {
+        let lfo = lfo.as_ref().map_or(&[0.0; W], |l| &l.0);
+        lane.post.filter::<L, V>(&p.filter, c.rate, sv, lfo, n, &mut vout);
+    }
+    if p.filter.pan_on {
+        return lane.post.mix(&p.filter, sv, &vout, out.left, out.right);
+    }
     // the voices in pairs, as four-wide (the missing ones' zeros change no bits)
-    for (o, v) in out.iter_mut().zip(vout.iter()) {
+    for (o, v) in out.mono.iter_mut().zip(vout.iter()) {
         *o += match v.as_slice() {
             [a] => *a,
             [a, b] => *a + *b,
@@ -2674,6 +2751,23 @@ mod tests {
         Prepared::new(&Sound::from_text(&format!("fm-sound/1\n{text}\n")).unwrap())
     }
 
+    impl Engine {
+        /// [`Engine::render`] of sounds without pan: one channel, checked to be both.
+        fn render1<V: F4>(&mut self, out: &mut [f32; BLOCK], end: &mut impl FnMut(NoteEnd)) {
+            self.render1_events::<V>(out, &[], end);
+        }
+
+        fn render1_events<V: F4>(&mut self, out: &mut [f32; BLOCK], events: &[Event], end: &mut impl FnMut(NoteEnd)) {
+            let mut o = [*out; 2];
+            self.render_events::<V>(&mut o, events, end);
+            assert!(
+                o[0].iter().zip(o[1].iter()).all(|(l, r)| l.to_bits() == r.to_bits()),
+                "left and right differ"
+            );
+            *out = o[0];
+        }
+    }
+
     fn engine(p: &Prepared) -> Engine {
         let mut e = Engine::new(RATE);
         assert!(e.set_sound(0, p));
@@ -2690,7 +2784,7 @@ mod tests {
                 e.note_off(0, 1, &mut |_| {});
             }
             let mut out = [0.0; BLOCK];
-            e.render::<V>(&mut out, &mut |_| {});
+            e.render1::<V>(&mut out, &mut |_| {});
             x.extend_from_slice(&out);
         }
         x
@@ -2992,9 +3086,9 @@ mod tests {
         let mut e = engine(&carrier(1, "slfo_wave=6 slfo_speed=10 slfo_dest1=77 slfo_depth1=64"));
         let mut out = [0.0; BLOCK];
         e.note_on(0, 1, 36, 100.0, &mut |_| {});
-        e.render::<Native>(&mut out, &mut |_| {});
+        e.render1::<Native>(&mut out, &mut |_| {});
         e.note_on(0, 2, 96, 100.0, &mut |_| {});
-        e.render::<Native>(&mut out, &mut |_| {});
+        e.render1::<Native>(&mut out, &mut |_| {});
         let law = |k: i32| (laws::detune_steps(15, k) - laws::detune_steps(0, k)) as f32 / 2048.0;
         assert_eq!((e.lanes[0].sdt[0][0], e.lanes[0].sdt[0][1]), (law(36), law(96)));
         // level: depth 32 loses 18.85 dB at the bottom, nothing at the top (a fast square)
@@ -3080,7 +3174,7 @@ mod tests {
             ));
             let mut e = engine(&p);
             let mut out = [0.0; BLOCK];
-            e.render_events::<Native>(&mut out, events, &mut |_| {});
+            e.render1_events::<Native>(&mut out, events, &mut |_| {});
             e.slfo[0]
         };
         let inc = lfo_inc(laws::slfo_hz(40) as f32, RATE);
@@ -3128,7 +3222,7 @@ mod tests {
                 if b == 3 && direct {
                     e.param(0, 27, 50);
                 }
-                e.render_events::<Native>(&mut out, if b == 3 { events } else { &[] }, &mut |_| {});
+                e.render1_events::<Native>(&mut out, if b == 3 { events } else { &[] }, &mut |_| {});
                 x.extend_from_slice(&out);
             }
             x
@@ -3162,7 +3256,7 @@ mod tests {
         e.note_off(0, 1, &mut |_| {});
         let mut out = [0.0; BLOCK];
         for _ in 0..400 {
-            e.render::<Native>(&mut out, &mut |_| {});
+            e.render1::<Native>(&mut out, &mut |_| {});
         }
         assert!(e.pending == 0 && e.sounds[0].plan != p.plan);
     }
@@ -3412,7 +3506,7 @@ mod tests {
             seen.insert(k as i32);
             e.note_off(0, id, &mut |_| {});
             e.choke(0, &mut |_| {});
-            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         }
         assert!(seen.len() > 40, "{} values", seen.len());
     }
@@ -3480,7 +3574,7 @@ mod tests {
                 if b == 21 && text.contains("release") {
                     e.note_off(0, 1, &mut |_| {});
                 }
-                e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+                e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
                 let t = (b * BLOCK) as f64 / RATE * 1000.0;
                 let got = 1200.0 * (f64::from(e.lanes[0].inc[0][0]) / base).log2();
                 assert!(
@@ -3504,7 +3598,7 @@ mod tests {
         let (lo, rate) = (laws::peg_cents(-50), laws::peg_cents_per_ms(0) * 1000.0 / RATE);
         let (mut law, mut worst) = (0.0f64, 0.0f64);
         for b in 0..12 {
-            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
             for k in b * BLOCK..(b + 1) * BLOCK {
                 law += base * ((lo + rate * k as f64).min(0.0) / 1200.0).exp2();
             }
@@ -3561,7 +3655,7 @@ mod tests {
                 e.note_off(0, 3, &mut |_| {});
             }
             let mut out = [0.0; BLOCK];
-            e.render::<Native>(&mut out, &mut |n| ends.push(n));
+            e.render1::<Native>(&mut out, &mut |n| ends.push(n));
             assert_eq!(e.active(), usize::from(b < 1000), "block {b}");
         }
         assert_eq!(ends.len(), 1);
@@ -3576,12 +3670,12 @@ mod tests {
         e.note_on(0, 1, 60, 100.0, &mut |_| ends += 1);
         e.note_off(0, 1, &mut |_| {});
         for _ in 0..200 {
-            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| ends += 1);
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| ends += 1);
         }
         assert_eq!((e.active(), ends), (1, 0));
         e.pedal(0, false);
         for _ in 0..200 {
-            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| ends += 1);
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| ends += 1);
         }
         assert_eq!((e.active(), ends), (0, 1));
     }
@@ -3593,7 +3687,7 @@ mod tests {
         let loud = carrier(1, "");
         let run = |e: &mut Engine, ends: &mut Vec<u32>| {
             for _ in 0..4 {
-                e.render::<Native>(&mut [0.0; BLOCK], &mut |n| ends.push(n.id));
+                e.render1::<Native>(&mut [0.0; BLOCK], &mut |n| ends.push(n.id));
             }
         };
         let mut e = Engine::new(RATE);
@@ -3665,13 +3759,13 @@ mod tests {
         let mut e = engine(&carrier(1, ""));
         e.note_on(0, 1, 60, 100.0, &mut |_| {});
         for _ in 0..8 {
-            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         }
         e.choke(0, &mut |_| {});
         let mut x = [0.0; BLOCK * 2];
         let mut ended_at = None;
         for (b, out) in x.chunks_exact_mut(BLOCK).enumerate() {
-            e.render::<Native>(out.try_into().unwrap(), &mut |_| ended_at = Some(b));
+            e.render1::<Native>(out.try_into().unwrap(), &mut |_| ended_at = Some(b));
         }
         assert_eq!(ended_at, Some(1));
         // a linear fade: no step larger than the fade's slope allows, silent from 3 ms on
@@ -3685,13 +3779,18 @@ mod tests {
         let mut s = Sound::default();
         // (and the pitch parameters: both envelopes, key follow, random pitch, mono, key assign,
         // portamento, bend ranges, detune)
-        // and the voice LFO, the macros, the part's envelope offsets and level scaling
+        // and the voice LFO, the macros, the part's envelope offsets and level scaling; the sound
+        // LFO; the filter, its envelope and pan
         let played = |id: u16| {
             [30u16, 31, 209, 212, 213].contains(&id)
-                || (6..=28).contains(&id)
+                || (0..=2).contains(&id)
+                || (6..=29).contains(&id)
                 || (32..=40).contains(&id)
+                || (100..=134).contains(&id)
                 || (200..=208).contains(&id)
-                || (249..=252).contains(&id)
+                || (214..=216).contains(&id)
+                || (219..=247).contains(&id)
+                || (249..=255).contains(&id)
         };
         for p in PARAMS.iter() {
             let k = p.id % 100;
@@ -3729,7 +3828,7 @@ mod tests {
                     a.choke(s, &mut |n| record(n, &mut ended));
                     b.choke(s, &mut |_| {});
                     for _ in 0..4 {
-                        let mut o = [0.0; BLOCK];
+                        let mut o = [[0.0; BLOCK]; 2];
                         a.render::<Native>(&mut o, &mut |n| record(n, &mut ended));
                         b.render::<scalar::F>(&mut o, &mut |_| {});
                     }
@@ -3811,14 +3910,17 @@ mod tests {
                 }
             }
             ev.sort_by_key(|e| e.frame);
-            let (mut oa, mut ob) = ([0.0; BLOCK], [0.0; BLOCK]);
+            let (mut oa, mut ob) = ([[0.0; BLOCK]; 2], [[0.0; BLOCK]; 2]);
             a.render_events::<Native>(&mut oa, &ev, &mut |n| record(n, &mut ended));
             b.render_events::<scalar::F>(&mut ob, &ev, &mut |_| {});
+            let (oa, ob) = (oa.as_flattened(), ob.as_flattened());
             assert!(
-                oa.iter().zip(&ob).all(|(x, y)| x.to_bits() == y.to_bits()),
+                oa.iter().zip(ob).all(|(x, y)| x.to_bits() == y.to_bits()),
                 "block {block}: back ends differ"
             );
-            assert!(oa.iter().all(|v| v.is_finite() && v.abs() < 2000.0), "block {block}");
+            // finite and bounded, and no subnormal (the filter's states are flushed)
+            let ok = |v: &f32| v.is_finite() && v.abs() < 2000.0 && (*v == 0.0 || v.abs() >= f32::MIN_POSITIVE);
+            assert!(oa.iter().all(ok), "block {block}");
             assert_eq!(a.active(), b.active());
         }
         // everything released: every note rings out and ends
@@ -3827,7 +3929,7 @@ mod tests {
             a.choke(s, &mut |n| record(n, &mut ended));
         }
         for _ in 0..100 {
-            a.render::<Native>(&mut [0.0; BLOCK], &mut |n| record(n, &mut ended));
+            a.render::<Native>(&mut [[0.0; BLOCK]; 2], &mut |n| record(n, &mut ended));
         }
         assert_eq!(a.active(), 0);
         assert!(started.len() > 3000, "{} notes", started.len());
@@ -3993,7 +4095,10 @@ mod tests {
         // (conflicts measured by tools/cost/cg.sh, cache-mixed-N)
         let forms = hot + 8 * size_of::<crate::tables::Table16>();
         assert!(forms <= 28 * 1024, "{forms} B with eight form tables");
-        assert!(size_of::<Lane>() <= 2048, "{} B a lane", size_of::<Lane>());
+        // the filter and pan state is read only when the sound has them
+        let post = size_of::<Voices>();
+        assert!(size_of::<Lane>() - post <= 2048, "{} B a lane", size_of::<Lane>());
+        assert!(post <= 384, "{post} B of filter and pan a lane");
     }
 
     /// A hash of the output of six notes on routings 12 and 80 with feedback, every operator,
@@ -4021,11 +4126,106 @@ mod tests {
                     (0..6).for_each(|v| e.note_off(0, v, &mut |_| {}));
                 }
                 let mut out = [0.0; BLOCK];
-                e.render::<Native>(&mut out, &mut |_| {});
+                e.render1::<Native>(&mut out, &mut |_| {});
                 h = out.iter().fold(h, |h, x| h.rotate_left(5) ^ u64::from(x.to_bits()));
             }
         }
         h
+    }
+
+    /// Renders one note of `p` at key 48 for `blocks` blocks, held: left and right.
+    fn stereo(e: &mut Engine, id: u32, blocks: usize) -> (Vec<f32>, Vec<f32>) {
+        e.note_on(0, id, 48, 100.0, &mut |_| {});
+        let (mut l, mut r) = (Vec::new(), Vec::new());
+        for _ in 0..blocks {
+            let mut o = [[0.0; BLOCK]; 2];
+            e.render::<Native>(&mut o, &mut |_| {});
+            l.extend_from_slice(&o[0]);
+            r.extend_from_slice(&o[1]);
+        }
+        e.note_off(0, id, &mut |_| {});
+        (l, r)
+    }
+
+    /// The filter after the operators: high-pass 12 at resonance 0 (Q 0.5) at cutoff value 512
+    /// (448.9 Hz) takes a 130.9 Hz carrier down by the second-order high-pass's 22.1 dB (the
+    /// section is close to the analog one far below a sixth of the rate); the gain 0.375 dB a step,
+    /// through thru too.
+    #[test]
+    fn filter_in_the_engine() {
+        // (the text form takes a line's parameters in id order)
+        let f = |lfo: &str, filter: &str, slfo: &str| {
+            held(&format!("{lfo} {filter} filter_eg_depth=0 cutoff_key_follow=0 {slfo}"))
+        };
+        let (thru, f0) = f("", "", "");
+        let (hp, _) = f("", "filter_type=7 cutoff=512 resonance=0", "");
+        let (w, wc) = (f0, f64::from(crate::filter::cutoff_hz(512.0)));
+        let want = 20.0 * (w * w / ((wc * wc - w * w).powi(2) + (2.0 * w * wc).powi(2)).sqrt()).log10();
+        let got = peak_db(&hp[BLOCK * 20..]) - peak_db(&thru[BLOCK * 20..]);
+        assert!((got - want).abs() < 0.3, "{got:.2} dB, the law {want:.2}");
+        let (quiet, _) = f("", "filter_gain=191", "");
+        let got = peak_db(&quiet) - peak_db(&thru);
+        assert!((got + 24.0).abs() < 0.01, "{got:.3} dB");
+        // the voice LFO and the sound LFO move the cutoff, and the sound LFO the resonance: the
+        // filtered level swings
+        for (lfo, filter, slfo) in [
+            (
+                "lfo_wave=3 lfo_speed=40 lfo_filter_depth=40",
+                "filter_type=7 cutoff=512 resonance=0",
+                "",
+            ),
+            (
+                "",
+                "filter_type=7 cutoff=512 resonance=0",
+                "slfo_wave=6 slfo_speed=50 slfo_dest1=72 slfo_depth1=40",
+            ),
+            (
+                "",
+                "filter_type=11 cutoff=400 resonance=0",
+                "slfo_wave=6 slfo_speed=50 slfo_dest1=73 slfo_depth1=100",
+            ),
+        ] {
+            let m = format!("{lfo} {filter} {slfo}");
+            let (x, _) = f(lfo, filter, slfo);
+            let w = x.chunks(1200).map(peak_db).collect::<Vec<_>>();
+            let (lo, hi) = w.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+            assert!(hi - lo > 3.0, "{m}: {lo:.1} to {hi:.1} dB");
+        }
+    }
+
+    /// Pan: alternate pan puts the first note on its side and the next on the other (the far side
+    /// silent at 63); a centred position through the pan path plays the mono bits in both
+    /// channels; the sound LFO's pan moves it.
+    #[test]
+    fn pan_in_the_engine() {
+        let mut e = engine(&carrier(1, "alternate_pan=63"));
+        let (l, r) = stereo(&mut e, 1, 8);
+        assert!(peak_db(&l) < -200.0 && peak_db(&r) > -30.0);
+        e.choke(0, &mut |_| {});
+        for _ in 0..3 {
+            e.render::<Native>(&mut [[0.0; BLOCK]; 2], &mut |_| {});
+        }
+        let (l, r) = stereo(&mut e, 2, 8);
+        assert!(peak_db(&l) > -30.0 && peak_db(&r) < -200.0);
+        // scaling pan has no positions between keys 60 and 64 (key 48 here: centre at depth 0
+        // otherwise); random pan at depth 1 draws within half a position
+        let mono = play::<Native>(&carrier(1, ""), 48, 100.0, 8, 8);
+        for extra in ["random_pan=1", "scaling_pan=63 note_shift=14"] {
+            let mut e = engine(&carrier(1, extra));
+            let (l, r) = stereo(&mut e, 1, 8);
+            let shifted = play::<Native>(&carrier(1, extra.replace("random_pan=1", "").as_str()), 48, 100.0, 8, 8);
+            let want = if extra.contains("note_shift") { &shifted } else { &mono };
+            assert!(l.iter().zip(want).all(|(a, b)| a.to_bits() == b.to_bits()), "{extra}");
+            assert!(l.iter().zip(&r).all(|(a, b)| a.to_bits() == b.to_bits()), "{extra}");
+        }
+        let mut e = engine(&carrier(1, "slfo_wave=6 slfo_speed=50 slfo_dest1=70 slfo_depth1=127"));
+        let (l, r) = stereo(&mut e, 1, 60);
+        let w = |x: &[f32]| x.chunks(1200).map(peak_db).collect::<Vec<_>>();
+        let (wl, wr) = (w(&l[BLOCK * 8..]), w(&r[BLOCK * 8..]));
+        assert!(
+            wl.iter().any(|&v| v < -60.0) && wr.iter().any(|&v| v < -60.0),
+            "{wl:?} {wr:?}"
+        );
     }
 
     /// The same bits on every target and back end (checked on every CI target), sines and forms.
@@ -4100,7 +4300,7 @@ mod tests {
                     }
                 }
                 let mut o = [0.0; BLOCK];
-                e.render::<Native>(&mut o, &mut |_| {});
+                e.render1::<Native>(&mut o, &mut |_| {});
                 out.extend_from_slice(&o);
                 states.push(voice(&e, 0));
                 widths.push(e.lanes[0].used);
@@ -4154,10 +4354,10 @@ mod tests {
         let p = carrier(12, "");
         let mut a = engine(&p);
         let mut x = [0.0; BLOCK];
-        a.render_events::<Native>(&mut x, &[on(37, 0, 1, 60)], &mut |_| {});
+        a.render1_events::<Native>(&mut x, &[on(37, 0, 1, 60)], &mut |_| {});
         let mut b = engine(&p);
         let mut y = [0.0; BLOCK];
-        b.render_events::<Native>(&mut y, &[on(0, 0, 1, 60)], &mut |_| {});
+        b.render1_events::<Native>(&mut y, &[on(0, 0, 1, 60)], &mut |_| {});
         assert!(x[..38].iter().all(|&v| v == 0.0) && x[38] != 0.0);
         let whole = (BLOCK - 37) / STEP * STEP;
         assert!(x[37..37 + whole]
@@ -4166,7 +4366,7 @@ mod tests {
             .all(|(a, b)| a.to_bits() == b.to_bits()));
         // and the step cut short at the block's end leaves the note where 128 - 37 frames take it
         let (mut c, mut z) = (engine(&p), [0.0; BLOCK]);
-        c.render_events::<Native>(&mut z, &[on(0, 0, 1, 60)], &mut |_| {});
+        c.render1_events::<Native>(&mut z, &[on(0, 0, 1, 60)], &mut |_| {});
         assert!(x[37..].iter().zip(&z).all(|(a, b)| (a - b).abs() < 1e-3));
     }
 
@@ -4194,7 +4394,7 @@ mod tests {
         };
         let blocks = |e: &mut Engine, n: usize, end: &mut dyn FnMut(NoteEnd)| {
             for _ in 0..n {
-                e.render::<Native>(&mut [0.0; BLOCK], &mut |x| end(x));
+                e.render1::<Native>(&mut [0.0; BLOCK], &mut |x| end(x));
             }
         };
         // legato with portamento
@@ -4222,7 +4422,7 @@ mod tests {
         blocks(&mut e, 4, &mut end);
         e.note_on(0, 2, 64, 100.0, &mut end);
         assert_eq!((ids(&e), e.active()), (vec![2], 2));
-        e.render::<Native>(&mut [0.0; BLOCK], &mut end);
+        e.render1::<Native>(&mut [0.0; BLOCK], &mut end);
         let l = e.lanes.iter().find(|l| l.id.contains(&1) && l.used != 0).unwrap();
         let s = l.id.iter().position(|&i| i == 1).unwrap();
         let share = 1.0 - 8.0 * e.retrig_step;
@@ -4274,14 +4474,14 @@ mod tests {
     fn glide_track(text: &str, to: u8, release: bool) -> (Vec<f64>, usize) {
         let mut e = engine(&carrier(1, text));
         e.note_on(0, 1, 60, 100.0, &mut |_| {});
-        e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+        e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         if release {
             e.note_off(0, 1, &mut |_| {});
         }
         e.note_on(0, 2, to, 100.0, &mut |_| {});
         let (mut track, mut moves) = (Vec::new(), 0);
         for _ in 0..200 {
-            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
             let l = e.lanes.iter().find(|l| l.used != 0 && l.id.contains(&2)).unwrap();
             let s = l.id.iter().position(|&i| i == 2).unwrap();
             let c = 1200.0 * (f64::from(l.inc[0][s]) / f64::from(l.pt.base[0][s])).log2();
@@ -4348,15 +4548,15 @@ mod tests {
         let (mut x, mut y) = ([0.0; BLOCK], [0.0; BLOCK]);
         for e in [&mut a, &mut b] {
             e.note_on(0, 1, 60, 100.0, &mut |_| {});
-            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         }
         let bend = |frame, value| Event {
             frame,
             sound: 0,
             kind: Kind::Bend { value },
         };
-        a.render_events::<Native>(&mut x, &[bend(50, -8192)], &mut |_| {});
-        b.render::<Native>(&mut y, &mut |_| {});
+        a.render1_events::<Native>(&mut x, &[bend(50, -8192)], &mut |_| {});
+        b.render1::<Native>(&mut y, &mut |_| {});
         let same = x.iter().zip(&y).take_while(|(a, b)| a.to_bits() == b.to_bits()).count();
         assert_eq!(
             same, 51,
@@ -4371,7 +4571,7 @@ mod tests {
                 ratio(&a, op)
             );
         }
-        a.render_events::<Native>(&mut x, &[bend(0, 0)], &mut |_| {});
+        a.render1_events::<Native>(&mut x, &[bend(0, 0)], &mut |_| {});
         assert_eq!(a.lanes[0].inc, b.lanes[0].inc);
     }
 
@@ -4403,7 +4603,7 @@ mod tests {
                         ..*e
                     })
                     .collect();
-                e.render_events::<Native>(&mut o, &ev, &mut |_| {});
+                e.render1_events::<Native>(&mut o, &ev, &mut |_| {});
                 x.extend_from_slice(&o);
             }
             x
@@ -4427,7 +4627,7 @@ mod tests {
     fn silence_in_silence_out() {
         let mut e = Engine::new(RATE);
         let mut out = [0.0; BLOCK];
-        e.render::<Native>(&mut out, &mut |_| {});
+        e.render1::<Native>(&mut out, &mut |_| {});
         assert!(out.iter().all(|&x| x == 0.0));
     }
 }

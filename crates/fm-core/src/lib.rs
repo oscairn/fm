@@ -10,6 +10,7 @@
 
 pub mod coverage;
 pub mod engine;
+pub mod filter;
 pub mod forms;
 #[cfg(test)]
 mod forms_build;

@@ -341,6 +341,9 @@ pub fn index_of(id: u16) -> Option<usize> {
 /// Part-wide parameters the engine reads, by index.
 #[derive(Clone, Copy)]
 pub enum Common {
+    RandomPan = 0,
+    AlternatePan = 1,
+    ScalingPan = 2,
     PitchVelocity = 6,
     RandomPitch = 7,
     PitchKeyFollow = 8,
@@ -357,6 +360,7 @@ pub enum Common {
     LfoKeyOnReset = 26,
     LfoPitchDepth = 27,
     LfoAmpDepth = 28,
+    LfoFilterDepth = 29,
     Algorithm = 30,
     Feedback = 31,
     LfoSpeedRange = 32,
@@ -397,6 +401,35 @@ pub enum Part {
     DecayOffset = COMMON.len() as isize + FILTER.len() as isize + 50,
     SustainOffset = COMMON.len() as isize + FILTER.len() as isize + 51,
     ReleaseOffset = COMMON.len() as isize + FILTER.len() as isize + 52,
+    FegDepthOffset = COMMON.len() as isize + FILTER.len() as isize + 53,
+    CutoffOffset = COMMON.len() as isize + FILTER.len() as isize + 54,
+    ResonanceOffset = COMMON.len() as isize + FILTER.len() as isize + 55,
+}
+
+/// The filter and its envelope's parameters, by index (ids 100-134, in order).
+#[derive(Clone, Copy)]
+pub enum Filter {
+    Type = COMMON.len() as isize,
+    Cutoff,
+    CutoffVelocity,
+    Resonance,
+    ResonanceVelocity,
+    HpfCutoff,
+    Distance,
+    Gain,
+    EgTime,                               // five times from here: hold, attack, decay 1, decay 2, release
+    EgLevel = COMMON.len() as isize + 13, // five levels from here, in the same order
+    EgDepth = COMMON.len() as isize + 18,
+    EgTimeVelocitySegment,
+    EgTimeVelocity,
+    EgDepthVelocity,
+    EgDepthVelocityCurve,
+    EgTimeKeyFollow,
+    EgTimeKeyCentre,
+    KeyFollow,
+    Break,                               // four break points from here
+    Offset = COMMON.len() as isize + 30, // four offsets from here
+    HpfKeyFollow = COMMON.len() as isize + 34,
 }
 
 /// Operator parameters the engine reads, by their place in the operator's parameter list.

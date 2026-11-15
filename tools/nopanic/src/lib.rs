@@ -59,10 +59,16 @@ pub extern "C" fn fm_nopanic_play(pick: u32, centre: u32, voice: usize, hz: f32,
 }
 
 /// Plays the engine: a sound on routing and feedback chosen by `pick`, every operator at full
-/// level on a form chosen by `pick`, six notes from `key`, a voice limit, the pedal, a release and a choke halfway; `blocks`
-/// blocks into `out`. Returns the notes that ended.
+/// level on a form chosen by `pick`, a filter and pan chosen by `pick`, six notes from `key`, a voice limit, the pedal, a release and a choke halfway; `blocks`
+/// blocks into `out` (left, right). Returns the notes that ended.
 #[no_mangle]
-pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u32, out: &mut [f32; BLOCK]) -> u32 {
+pub extern "C" fn fm_nopanic_engine(
+    pick: u32,
+    key: u8,
+    velocity: f32,
+    blocks: u32,
+    out: &mut [[f32; BLOCK]; 2],
+) -> u32 {
     let mut s = Sound::default();
     let _ = s.set(30, (pick % 88 + 1) as i16);
     let _ = s.set(31, (pick / 88 % 8) as i16);
@@ -148,6 +154,29 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
         (231, (pick / 23 % 4) as i16),
         (232, (pick % 128) as i16 - 64),
         (247, (pick / 5 % 128) as i16 - 64),
+        // the filter, its envelope and pan: every type, the top cutoff and resonance among them
+        (0, (pick / 3 % 128) as i16),
+        (1, (pick / 5 % 128) as i16 - 64),
+        (2, (pick / 7 % 128) as i16 - 64),
+        (29, (pick / 11 % 100) as i16),
+        (100, (pick % 22) as i16),
+        (101, (pick.wrapping_mul(37) % 1024) as i16),
+        (102, (pick / 13 % 128) as i16 - 64),
+        (103, (pick / 17 % 128) as i16),
+        (104, (pick / 19 % 128) as i16 - 64),
+        (105, (pick / 23 % 1024) as i16),
+        (106, (pick / 29 % 256) as i16 - 128),
+        (107, (pick / 31 % 256) as i16),
+        (108, (pick / 37 % 128) as i16),
+        (109, (pick / 41 % 128) as i16),
+        (114, (pick / 43 % 256) as i16 - 128),
+        (115, (pick / 47 % 256) as i16 - 128),
+        (118, (pick / 53 % 128) as i16 - 64),
+        (120, (pick / 59 % 128) as i16 - 64),
+        (123, (pick / 61 % 128) as i16 - 64),
+        (125, (pick / 67 % 128) as i16 - 64),
+        (130, (pick / 71 % 256) as i16 - 128),
+        (254, (pick / 73 % 128) as i16 - 64),
     ] {
         let _ = s.set(id, v);
     }

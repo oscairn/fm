@@ -12,19 +12,21 @@ FM plugin profile's measured accuracy against the reference (docs/design.md, sec
 the laws here reuse; "the engine" figures are this repository's tests. Known differences from the
 reference: docs/known-differences.md.
 
-At M4: the laws below are played on every routing, the operator forms, pitch, the voice LFO, the
-sound LFO, the macros, level scaling and the part's envelope offsets included; nothing else. A
-sound LFO destination with depth that is not played (pan, filter, an effect's parameter) is
-reported by `fmbench coverage` beside the parameters. Pitch that moves (both pitch envelopes,
+At M5: the laws below are played on every routing, the operator forms, pitch, the voice LFO, the
+sound LFO, the macros, level scaling, the part's envelope offsets, the filter with its envelope
+and pan included; nothing else. A sound LFO destination with depth that is not played (an
+effect's parameter) and a stored filter type that is none of the model's are reported by
+`fmbench coverage` beside the parameters. The filter's coefficients and pan are evaluated every
+16 frames and ramped a frame (docs/design.md, 3.7). Pitch that moves (both pitch envelopes,
 portamento, bend, the voice and sound LFOs) is
 evaluated every 16 frames, the increments ramped linearly across a step while something moves them
 (docs/design.md, 2.3); the pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|
-| `random_pan` | 0 | M5 (filter and output) | 0 to 127 (0) |  |
-| `alternate_pan` | 1 | M5 (filter and output) | -64 to 63 (0) |  |
-| `scaling_pan` | 2 | M5 (filter and output) | -64 to 63 (0) |  |
+| `random_pan` | 0 | played | 0 to 127 (0) | uniform within depth / 2 positions either way, a draw a note from the sound's own source (only when the depth is above 0); positions add (alternate, scaling, random) and are held within -64..+63, then the pan law: the near side keeps full level (no dip at the centre), the far side falls by the measured table every 4 positions (-0.39 dB at 8, -6.41 at 32, -17.70 at 48, -45.55 at 60, silent from 63); a sound with no pan renders the same bits in both channels; existing profile: the pan law and scaling pan 75 of 76 within 0.5 dB on the far side; random pan's narrower spread at 127 and left lean not modelled (inherited); the engine plays the law (tests) |
+| `alternate_pan` | 1 | played | -64 to 63 (0) | the first note of the sound at its side, the next at the other, and so on (the alternation itself unmeasured: the existing profile's choice); as random_pan; a mono legato note keeps its voice's pan |
+| `scaling_pan` | 2 | played | -64 to 63 (0) | depth / 32 positions a key below key 60 and above key 64 (note shift applied), none between, +63 as 64; as random_pan; existing profile: +63 at key 30 misses (the reference's far side at -64.7 dB, the law's -45.6: inherited) |
 | `key_on_delay` | 3 | M5 (filter and output) | 0 to 127 (0) |  |
 | `key_on_delay_sync` | 4 | M5 (filter and output) | 0 to 1 (0) |  |
 | `key_on_delay_length` | 5 | M5 (filter and output) | 5 to 21 (14) |  |
@@ -51,7 +53,7 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 | `lfo_key_on_reset` | 26 | played | 0 to 1 (0) | on: each note's LFO from its start phase; off: a note takes the sound's free-running phase (from the engine's clock at the note's block; chosen: the reference's is not modelled) |
 | `lfo_pitch_depth` | 27 | played | 0 to 99 (0) | twice the six-operator depth (depth × 165 / 64 steps, 99 as 256) times each operator's offset, ratio-mode operators; existing profile: 30 of 31 within 1 cent (depth 80 +1.3 cents); the engine within 0.2 cent of the law (test) |
 | `lfo_amp_depth` | 28 | played | 0 to 99 (0) | each operator loses, straight in dB from the LFO's top, the measured offset-7 swing times its offset's eighths, through the carrier envelope's bend below about 45 dB; existing profile: within 0.16 dB on the renders it was fitted to, depth 99 at offsets 3-4 0.8 and 2.6 dB short; the engine: 6 dB at depth 30 within 0.1 dB (test) |
-| `lfo_filter_depth` | 29 | M5 (filter and output) | 0 to 99 (0) |  |
+| `lfo_filter_depth` | 29 | played | 0 to 99 (0) | the voice LFO's value at each step's end (as its pitch route: the triangle from its top) moves the cutoff 68 cents a depth step at its peak; existing profile: measured at depth 25 only; the engine plays the law (test) |
 | `algorithm` | 30 | played | 1 to 88 (69) | the 88 routings as data, checked against the model's documented chart (routing 70 as the reference plays it: 1 and 2 both modulate 3); the carriers' output level per routing measured, 0 to +13.55 dB |
 | `feedback` | 31 | played | 0 to 7 (0) | a modulator feeds back its own output: 2^(f - 9) cycles of phase per unit of the sum of its last two outputs; a carrier 0.18 of that, of its signal before the routing's level; existing profile: carrier within 0.4 dB, modulator harmonics 2-6 within 0.09 dB, 3 cases off by 2.5, 3.8 and 20 dB |
 | `lfo_speed_range` | 32 | played | 0 to 1 (1) | normal or extended; as lfo_speed and lfo_extended_speed |
@@ -63,41 +65,41 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 | `macro_sustain` | 38 | played | -99 to 99 (0) | added to modulators' decay 2 levels; as macro_attack |
 | `macro_release` | 39 | played | -99 to 99 (0) | added to modulators' release times; as macro_attack |
 | `macro_texture` | 40 | played | -99 to 99 (0) | moves the forms of the carriers (below 0) or the modulators (above) along the measured path of form places, coming round past +-99, per sound; existing profile: extremes off by 16-25 dB, -99 by 22.6 dB, the wrap unmeasured (inherited); the engine plays the law (test) |
-| `filter_type` | 100 | M5 (filter and output) | 0 to 21 (21) |  |
-| `cutoff` | 101 | M5 (filter and output) | 0 to 1023 (1023) |  |
-| `cutoff_velocity` | 102 | M5 (filter and output) | -64 to 63 (0) |  |
-| `resonance` | 103 | M5 (filter and output) | 0 to 127 (10) |  |
-| `resonance_velocity` | 104 | M5 (filter and output) | -64 to 63 (0) |  |
-| `hpf_cutoff` | 105 | M5 (filter and output) | 0 to 1023 (0) |  |
-| `distance` | 106 | M5 (filter and output) | -128 to 127 (0) |  |
-| `filter_gain` | 107 | M5 (filter and output) | 0 to 255 (255) |  |
-| `filter_eg_time_hold` | 108 | M5 (filter and output) | 0 to 127 (0) |  |
-| `filter_eg_time_attack` | 109 | M5 (filter and output) | 0 to 127 (0) |  |
-| `filter_eg_time_decay1` | 110 | M5 (filter and output) | 0 to 127 (0) |  |
-| `filter_eg_time_decay2` | 111 | M5 (filter and output) | 0 to 127 (0) |  |
-| `filter_eg_time_release` | 112 | M5 (filter and output) | 0 to 127 (0) |  |
-| `filter_eg_level_hold` | 113 | M5 (filter and output) | -128 to 127 (0) |  |
-| `filter_eg_level_attack` | 114 | M5 (filter and output) | -128 to 127 (0) |  |
-| `filter_eg_level_decay1` | 115 | M5 (filter and output) | -128 to 127 (0) |  |
-| `filter_eg_level_decay2` | 116 | M5 (filter and output) | -128 to 127 (0) |  |
-| `filter_eg_level_release` | 117 | M5 (filter and output) | -128 to 127 (0) |  |
-| `filter_eg_depth` | 118 | M5 (filter and output) | -64 to 63 (40) |  |
-| `filter_eg_time_velocity_segment` | 119 | M5 (filter and output) | 0 to 4 (4) |  |
-| `filter_eg_time_velocity` | 120 | M5 (filter and output) | -64 to 63 (0) |  |
-| `filter_eg_depth_velocity` | 121 | M5 (filter and output) | -64 to 63 (0) |  |
-| `filter_eg_depth_velocity_curve` | 122 | M5 (filter and output) | 0 to 4 (2) |  |
-| `filter_eg_time_key_follow` | 123 | M5 (filter and output) | -64 to 63 (0) |  |
-| `filter_eg_time_key_centre` | 124 | M5 (filter and output) | 0 to 127 (24) |  |
-| `cutoff_key_follow` | 125 | M5 (filter and output) | -64 to 63 (10) |  |
-| `cutoff_break1` | 126 | M5 (filter and output) | 0 to 124 (36) |  |
-| `cutoff_break2` | 127 | M5 (filter and output) | 1 to 125 (48) |  |
-| `cutoff_break3` | 128 | M5 (filter and output) | 2 to 126 (60) |  |
-| `cutoff_break4` | 129 | M5 (filter and output) | 3 to 127 (72) |  |
-| `cutoff_offset1` | 130 | M5 (filter and output) | -128 to 127 (0) |  |
-| `cutoff_offset2` | 131 | M5 (filter and output) | -128 to 127 (0) |  |
-| `cutoff_offset3` | 132 | M5 (filter and output) | -128 to 127 (0) |  |
-| `cutoff_offset4` | 133 | M5 (filter and output) | -128 to 127 (0) |  |
-| `hpf_key_follow` | 134 | M5 (filter and output) | -64 to 63 (0) |  |
+| `filter_type` | 100 | played | 0 to 21 (21) | the stored values 0-8, 10-17, 19 are the model's 18 types in its order, 21 thru (9, 18 and 20 are none: played as thru, reported); every type two sections the existing profile's measurements fit with no free shape parameter, a state-variable section (F = 2 sin(pi fc / rate), damping 1 / Q, held stable) and a one-pole with the same F (docs/design.md, 3.7), after the operators, per voice, the coefficients at the end of each 16-frame step ramped a frame; states held within +-8 (the reference's overload at high resonance is not modelled); existing profile: 676 of 697 cases within 1 dB, worst 0.88 dB, not met: the 24 dB low-pass, 24 dB high-pass and 12 dB band-pass at resonance 96-127 (8-51 dB, the overload), the wide band-pass 14 of 16 (1.1-1.3 dB), the dual band-pass at distance +127 (8.1 dB), low-pass 12 + band-pass 6 13 of 21 (approximate model) (inherited); the engine: every type within 0.01 dB of its sections' transfer function (test), the high-pass through the engine within 0.3 dB of the second-order law (test) |
+| `cutoff` | 101 | played | 0 to 1023 (1023) | the existing profile's measured table (Hz at every value, each within 10 of a measured one), straight in Hz between its 193 measured points, 14.3 Hz to 7350 Hz (F = 1 at 44.1 kHz; at lower rates a sixth of the rate); at other rates the same Hz (the section's shape near a sixth of the rate follows the rate: docs/known-differences.md); the least Q rises from 3.57 kHz to 1 at the top (measured); existing profile: as filter_type; the engine plays the table (test) |
+| `cutoff_velocity` | 102 | played | -64 to 63 (0) | at +63 a measured curve in cents (-9609 at velocity 1, 0 near 114, +1201 at 127), negative sensitivities mirroring the velocity, others scaling downward moves in cents and upward ones in frequency ratio; existing profile: measured at -64, -32, +16, +32, +63; the engine plays the law (test) |
+| `resonance` | 103 | played | 0 to 127 (10) | Q 0.5 × 2^(r / 16), the damping held to the least Q at the cutoff; existing profile: confirmed to 0.01 at 16-127 on the 12 dB high-pass; the overload above 80-96 on three types not modelled (inherited); the engine plays the law (test) |
+| `resonance_velocity` | 104 | played | -64 to 63 (0) | the Q divided by 1 + share × h(127 - velocity), h measured (0.25 at 7, 1 at 31, 3 at 63, straight beyond), negative sensitivities mirroring the velocity; existing profile: measured at +63, +32 and -64 at a few velocities; the engine plays the law (test) |
+| `hpf_cutoff` | 105 | played | 0 to 1023 (0) | the high-pass (Q 1) after the low-pass of the 12 dB and 6 dB low-pass + high-pass types, the cutoff's table; existing profile: 126 of 126 and 7 of 7 cases within 1 dB; the engine plays the law (test) |
+| `distance` | 106 | played | -128 to 127 (0) | the dual types' second section at F × 2^(d / 16), up to F = 1.75, its damping limited only where it would turn unstable; existing profile: met except the dual band-pass at +127 (8.1 dB; the second section's limit above F = 1 is a guess: inherited); the engine plays the law (test) |
+| `filter_gain` | 107 | played | 0 to 255 (255) | 0.375 dB a step below 255, 0 silent, through thru too (thru at 255 runs nothing); existing profile: measured at 0, 64, 128, 192, 255; the engine within 0.01 dB (test) |
+| `filter_eg_time_hold` | 108 | played | 0 to 127 (0) | the hold at the hold level, measured every fourth value to 96 (straight between, held above); existing profile: holds 0-96 within 2 % (the reference itself differs by up to 7 ms between campaigns at 24-48); the engine plays the law (test) |
+| `filter_eg_time_attack` | 109 | played | 0 to 127 (0) | each segment takes its time value's duration whatever its distance (one measured table for attack, decay 1, decay 2 and release: every second value 22-92 and 100, 108; 0-20 instant, 96 and up 11.85 s), straight in cents (the reference's segments bend up to about 90 cents), evaluated a step with the frames inside a step exact; existing profile: 91 of 92 within 2 % (decay 42 by 2.0 ms); the engine within 1 cent of the law (test) |
+| `filter_eg_time_decay1` | 110 | played | 0 to 127 (0) | as filter_eg_time_attack |
+| `filter_eg_time_decay2` | 111 | played | 0 to 127 (0) | as filter_eg_time_attack; decay 2's level holds while the key is down |
+| `filter_eg_time_release` | 112 | played | 0 to 127 (0) | as filter_eg_time_attack, from the level at the key's release (pedal: at the pedal's); the release level then holds |
+| `filter_eg_level_hold` | 113 | played | -128 to 127 (0) | 75 cents a step, times the depth's share; existing profile: static levels within 15 cents; the engine plays the law (test) |
+| `filter_eg_level_attack` | 114 | played | -128 to 127 (0) | as filter_eg_level_hold |
+| `filter_eg_level_decay1` | 115 | played | -128 to 127 (0) | as filter_eg_level_hold |
+| `filter_eg_level_decay2` | 116 | played | -128 to 127 (0) | as filter_eg_level_hold |
+| `filter_eg_level_release` | 117 | played | -128 to 127 (0) | as filter_eg_level_hold |
+| `filter_eg_depth` | 118 | played | -64 to 63 (40) | the share of the levels that moves the cutoff, measured at -64, -32, 0, 16, 32, 48, 63 (-1 to 1.004), straight between; existing profile: within 15 cents; the engine plays the law (test) |
+| `filter_eg_time_velocity_segment` | 119 | played | 0 to 4 (4) | the segments the time velocity reaches: attack; attack and decay (decay 2 with decay 1); decay; attack and release; all (decay 2 and the release by the names: unmeasured, the existing profile's choice) |
+| `filter_eg_time_velocity` | 120 | played | -64 to 63 (0) | positive: sens × (velocity - 1) / 127 off the time values reached; negative: those segments instant above velocity 1; existing profile: within 7 % of the duration (3 % on average) from +8 to +63; negative measured from velocity 16 (2-15 unmeasured); the engine plays the law |
+| `filter_eg_depth_velocity` | 121 | played | -64 to 63 (0) | the depth times 1 + share × (g(velocity) - 1), g measured per curve at +63, negative sensitivities mirroring the velocity; existing profile: curve 2 at 5 velocities, the others at 32 and 96 (taken through curve 2's ends: inherited); the engine plays the law (test) |
+| `filter_eg_depth_velocity_curve` | 122 | played | 0 to 4 (2) | as filter_eg_depth_velocity |
+| `filter_eg_time_key_follow` | 123 | played | -64 to 63 (0) | times 2^(-1.79 × sens / 63 × octaves from the centre key); existing profile: +63 two octaves up 12 times shorter (measured); the negative side mirrors the positive (the reference's is shorter for -64 too: unmeasured, inherited); the engine plays the law (test) |
+| `filter_eg_time_key_centre` | 124 | played | 0 to 127 (24) | as filter_eg_time_key_follow |
+| `cutoff_key_follow` | 125 | played | -64 to 63 (10) | 3.125 % steps (+63 plays 200 %) about key 60 (note shift applied), straight in frequency within each octave, exact at whole octaves; existing profile: up to 16 cents at fractional octaves; the engine plays the law (test) |
+| `cutoff_break1` | 126 | played | 0 to 124 (36) | the cutoff scaling offsets straight between the break points by key, held outside, 37.5 cents a step; existing profile: measured below, between and above the break points; the engine plays the law (test) |
+| `cutoff_break2` | 127 | played | 1 to 125 (48) | as cutoff_break1 |
+| `cutoff_break3` | 128 | played | 2 to 126 (60) | as cutoff_break1 |
+| `cutoff_break4` | 129 | played | 3 to 127 (72) | as cutoff_break1 |
+| `cutoff_offset1` | 130 | played | -128 to 127 (0) | as cutoff_break1 |
+| `cutoff_offset2` | 131 | played | -128 to 127 (0) | as cutoff_break1 |
+| `cutoff_offset3` | 132 | played | -128 to 127 (0) | as cutoff_break1 |
+| `cutoff_offset4` | 133 | played | -128 to 127 (0) | as cutoff_break1 |
+| `hpf_key_follow` | 134 | played | -64 to 63 (0) | as cutoff_key_follow, on the high-pass of the low-pass + high-pass types |
 | `mono_poly` | 200 | played | 0 to 1 (1) | mono: one voice, last-note priority; with portamento a note whose predecessor's key is down takes over its voice (legato: amplitude envelopes, common pitch envelope and phases go on; the operator pitch envelopes start again), otherwise the sounding note fades out as a retrigger (13.3 ms, gain the square of the share left) while the new one starts; releasing the sounding key returns to the newest key still down (the same two ways); a held mono key is never shed; existing profile: 18 of 18 and 12 of 13, the fade about 1 ms ahead (inherited); the engine: every note ends exactly once (tests, fuzz) |
 | `key_assign` | 201 | played | 0 to 1 (1) | single (poly): a key played again retriggers its sounding note (the same fade, unmeasured); multi: both sound (test) |
 | `portamento` | 202 | played | 0 to 1 (1) | on (the documented default): from the pitch the sound's latest note has now, ratio-mode operators only; fingered glides only when another key of the sound is down |
@@ -122,7 +124,7 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 | `slfo_hold` | 221 | played | 0 to 127 (127) | as slfo_fade_in; 127 holds for ever (test) |
 | `slfo_fade_out` | 222 | played | 0 to 127 (64) | as slfo_fade_in |
 | `slfo_key_on_reset` | 223 | played | 0 to 2 (2) | each: every note starts the phase and envelope again; first: only a note with no other key of the sound down; after a reset the LFO stands still 12 ms (the measured onset); off: free-running from the engine's clock, a first key starting the envelope (unmeasured); existing profile: each and first 4 of 4 within 15 cents (95th percentile, worst 9.6), off not compared; the engine (test) |
-| `slfo_dest1` | 224 | played | 0 to 78 (2) | the reference's numbers: 71 the voice LFO's speed, 74 feedback, 75 operator frequency, 76 form, 77 detune, 78 level played; 70 pan, 72 cutoff, 73 resonance M5 (reported as not covered); 0-69 effects' parameters, not the engine's (reported); range widened from 0-69 to cover 70-78 |
+| `slfo_dest1` | 224 | played | 0 to 78 (2) | the reference's numbers: 71 the voice LFO's speed, 74 feedback, 75 operator frequency, 76 form, 77 detune, 78 level played; 70 pan (64 (1 - e^(-depth / 20)) positions at the LFO's top, through the pan law), 72 cutoff (8 cutoff values a depth step at its top), 73 resonance (a resonance step a depth step, rounded towards 0; the wide band-pass's width does not move: unmeasured) played, each at the LFO's value at each step's end, ramped; 0-69 effects' parameters, not the engine's (reported); range widened from 0-69 to cover 70-78 |
 | `slfo_depth1` | 225 | played | 0 to 127 (0) | at the LFO's top (bottom for level), after each operator's box and ratio: frequency 3600/127 cents a step (17 depths within 0.3 cents); level 0.589 dB a step lost at the bottom, none at the top, straight in dB (square wave at 8, 32, 64 within 0.2 dB; depth 127 silent in the reference, 74.8 dB down here); detune depth / 4 steps, form depth / 16, feedback depth / 16, the voice LFO's speed depth × 100 / 128, each move cut towards 0 and held in range (detune within 0.08 cents, speed within 0.3 %); frequency and detune ratio-mode operators only; existing profile: measured with a square wave only (values between top and bottom taken as straight); the engine: frequency, ratio, box, detune within 0.2 cent, level within 0.1 dB, the stepped ones the same bits as the moved value at the top (test) |
 | `slfo_dest2` | 226 | played | 0 to 78 (4) | as slfo_dest1 |
 | `slfo_depth2` | 227 | played | 0 to 127 (0) | as slfo_depth1 |
@@ -151,9 +153,9 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 | `amp_eg_decay_offset` | 250 | played | -64 to 63 (0) | 1.5 time values a step (rounded) added to every operator's decay 1 and decay 2 times; existing profile: 18 of 18 offsets within 0.3 dB (with release); the engine plays the law (test) |
 | `amp_eg_sustain_offset` | 251 | played | -64 to 63 (0) | decay 2 level steps from a measured table at even offsets -22 to +32 (odd ones halfway, 1.5 a step beyond, unmeasured); existing profile: 1.2-2.3 dB off; the engine plays the law (test) |
 | `amp_eg_release_offset` | 252 | played | -64 to 63 (0) | as amp_eg_decay_offset, on release times; existing profile: -8 off by 1.0 dB |
-| `filter_eg_depth_offset` | 253 | M5 (filter and output) | -64 to 63 (0) |  |
-| `cutoff_offset` | 254 | M5 (filter and output) | -64 to 63 (0) |  |
-| `resonance_offset` | 255 | M5 (filter and output) | -64 to 63 (0) |  |
+| `filter_eg_depth_offset` | 253 | played | -64 to 63 (0) | 2 depth values a step added to filter_eg_depth, held within -64..+63; existing profile: measured at 6 offsets through the high-pass against the equivalent value (18 of 18 part offsets within 0.3 dB); the engine plays the law (test) |
+| `cutoff_offset` | 254 | played | -64 to 63 (0) | 8 cutoff values a step added to the cutoff, held within 0-1023; as filter_eg_depth_offset |
+| `resonance_offset` | 255 | played | -64 to 63 (0) | 2 resonance values a step added to the resonance (and the wide band-pass's width), held within 0-127; as filter_eg_depth_offset |
 | `opN.ctrl_set1` | 1000 + 100 op + 0 | M7 (controllers, tuning) | 0 to 1 (1) |  |
 | `opN.ctrl_set2` | 1000 + 100 op + 1 | M7 (controllers, tuning) | 0 to 1 (1) |  |
 | `opN.ctrl_set3` | 1000 + 100 op + 2 | M7 (controllers, tuning) | 0 to 1 (1) |  |

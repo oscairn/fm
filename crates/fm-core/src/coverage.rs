@@ -12,11 +12,13 @@ pub const PLAYED: &str = "played";
 /// Tempo sync: the core has no tempo input.
 const NO_TEMPO: &str = "not covered (no tempo input)";
 
+/// A stored filter type value that is none of the model's types (9, 18, 20).
+const NO_TYPE: &str = "not covered (no filter type: played as thru)";
+
 /// Why a sound LFO destination (the reference's number) with depth is not played, or `None`.
 pub fn slfo_destination(dest: i16) -> Option<&'static str> {
     match dest {
-        71 | 74..=78 => None,
-        70 | 72 | 73 => Some("M5 (filter and output)"),
+        70..=78 => None,
         _ => Some("not covered (an effect's parameter, not the engine's)"),
     }
 }
@@ -107,6 +109,8 @@ pub fn status(p: &Param) -> &'static str {
         // M3: both pitch envelopes, key follow, velocity, random pitch, detune, bend,
         // portamento, mono and key assign
         PLAYED
+    } else if starts(&["key_on_delay"]) {
+        "M5 (filter and output)"
     } else if starts(&[
         "filter_",
         "cutoff",
@@ -115,9 +119,11 @@ pub fn status(p: &Param) -> &'static str {
         "distance",
         "random_pan",
         "alternate_pan",
-    ]) || starts(&["scaling_pan", "key_on_delay", "lfo_filter_depth"])
-    {
-        "M5 (filter and output)"
+        "scaling_pan",
+        "lfo_filter_depth",
+    ]) {
+        // M5: the filter, its envelope and pan
+        PLAYED
     } else {
         // the LFOs, macros, level scaling, part envelope offsets
         "M4 (modulators)"
@@ -131,6 +137,8 @@ pub fn not_covered(s: &Sound, mut f: impl FnMut(&'static Param, i16, &'static st
         let why = status(p);
         if why != PLAYED {
             f(p, v, why);
+        } else if p.name == "filter_type" && !crate::filter::is_type(v) {
+            f(p, v, NO_TYPE);
         }
     }
     for d in 0..3 {
@@ -183,8 +191,9 @@ mod tests {
     #[test]
     fn report() {
         let s = Sound::from_text(
-            "fm-sound/1\nalgorithm=5 random_pan=3 slfo_depth1=3 slfo_dest2=72 slfo_depth2=9 slfo_dest3=75 \
-             slfo_depth3=1 slfo_tempo_sync=1\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
+            "fm-sound/1\nrandom_pan=3 key_on_delay=4 algorithm=5 filter_type=18 slfo_depth1=3 slfo_dest2=72 \
+             slfo_depth2=9 slfo_dest3=75 slfo_depth3=1 slfo_tempo_sync=1\nop2.level=50 op2.pitch_velocity=3 \
+             op2.scaling_low_depth=3\n",
         )
         .unwrap();
         let mut got = Vec::new();
@@ -193,10 +202,10 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (0, 3, "M5 (filter and output)"),
+                (3, 4, "M5 (filter and output)"),
+                (100, 18, NO_TYPE),
                 (217, 1, NO_TEMPO),
-                (224, 2, effect),
-                (226, 72, "M5 (filter and output)")
+                (224, 2, effect)
             ]
         );
         let mut n = 0;
