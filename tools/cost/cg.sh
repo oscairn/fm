@@ -11,7 +11,7 @@
 # voices. "check" fails (exit 1) when a case is more than 10 % over tools/cost/baseline.txt (cache
 # misses: tools/cost/cache-baseline.txt, 10 % and half a miss) or over the absolute gates: at most
 # 2,000 a block at rest, at most 28,000 a voice-block for the worst plan with all eight operators
-# (the engine's cases, fm-*-8, and the spike's operator-major cases on its non-sine forms; the
+# (the engine's cases, fm-*-8 with or without a filter, and the spike's operator-major cases on its non-sine forms; the
 # spike's sample-major cases are kept as the measured alternative); and the lane gate: a voice's
 # cost with few voices a sound against its cost at 32 voices of one sound, each ratio at most 2 %
 # over its "ratio-" line in tools/cost/baseline.txt (docs/design.md, "Lanes": the targets).
@@ -65,6 +65,18 @@ run fm-s1-v1-mod 1 e 12 8 native mod 1
 # the sound LFO on every operator's frequency, level and detune
 run fm-r12-8-slfo 32 e 12 8 native slfo
 run fm-s1-v1-slfo 1 e 12 8 native slfo 1
+# the filter: a type of each family (the 24 dB and 18 dB low-passes, the 12 dB high-pass, band-pass and
+# band-stop, a dual type, low-pass 12 + band-pass 6, thru with a gain) with its envelope moving on every
+# voice; the costliest filter (the dual band-stop with the envelope, the voice LFO and the sound LFO on
+# cutoff, resonance and pan) on the costliest plan; pan alone
+for f in 0 2 7 8 11 17 19 gain; do
+  run "fm-r12-8-f$f" 32 e 12 8 native "sine+f$f"
+  run "fm-s1-v1-f$f" 1 e 12 8 native "sine+f$f" 1
+done
+run fm-r12-8-odd-fx 32 e 12 8 native odd+fx
+run fm-s1-v1-fx 1 e 12 8 native sine+fx 1
+run fm-r12-8-pan 32 e 12 8 native sine+pan
+run fm-s1-v1-pan 1 e 12 8 native sine+pan 1
 # a parameter event every block (the sound prepared again) on one voice: less fm-s1-v1, an event's cost
 run fm-s1-v1-param 1 e 12 8 native sine 1 param
 # voices few a sound: 1 and 2 voices in each of 1, 5 and 8 sounds (a voice-block: by all the voices)
