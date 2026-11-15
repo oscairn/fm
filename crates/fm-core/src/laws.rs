@@ -286,6 +286,148 @@ fn round(x: f64) -> i32 {
     ((if x < 0.0 { x - 0.5 } else { x + 0.5 }) as i32).clamp(-1 << 24, 1 << 24)
 }
 
+// ---- pitch: offsets a note keeps, envelopes, bend and portamento ----
+
+/// Cents to the nearest step of the grid.
+pub fn cents_steps(c: f64) -> i32 {
+    round(c * 2048.0 / 1200.0)
+}
+
+/// Pitch key follow 0-127 (-200 % to +200 %; 96 is 100 %) at a key, about a centre key: cents off
+/// the key's own pitch, straight in cents.
+pub fn pitch_key_follow_cents(v: i32, key: i32, centre: i32) -> f64 {
+    let pct = KEY_FOLLOW_PERCENT.get(v.clamp(0, 127) as usize).copied().unwrap_or(100);
+    f64::from((i32::from(pct) - 100) * (key.clamp(-256, 383) - centre.clamp(0, 127)))
+}
+
+/// Random pitch 0-127 with a uniform 32-bit draw: whole steps of 18.75 cents within depth / 4
+/// steps either way, cut towards 0.
+pub fn random_pitch_cents(depth: i32, r: u32) -> f64 {
+    let u = f64::from(r >> 8) * (2.0 / 16_777_216.0) - 1.0;
+    f64::from((u * f64::from(depth.clamp(0, 127)) / 4.0) as i32) * 18.75
+}
+
+/// The part's pitch velocity sensitivity -64..+63 at a velocity: cents, every operator.
+pub fn pitch_velocity_cents(depth: i32, velocity: f64) -> f64 {
+    interpolate(&PV_DEPTH, &PV_DEPTH_CENTS, f64::from(depth.clamp(-64, 63)))
+        * interpolate(&PV_X, &PV_FACTOR, velocity.clamp(0.0, 127.0))
+}
+
+/// An operator's pitch velocity sensitivity -7..+7 at a velocity: cents, fixed-frequency operators
+/// only (straight in velocity from 64; the value at 127 by sensitivity).
+pub fn fixed_pitch_velocity_cents(sens: i32, velocity: f64) -> f64 {
+    let top = FIXED_PV_TOP
+        .get(sens.unsigned_abs().min(7) as usize)
+        .copied()
+        .unwrap_or(0.0);
+    let c = top * (velocity.clamp(1.0, 127.0) - 64.0) / 63.0;
+    if sens < 0 {
+        -c
+    } else {
+        c
+    }
+}
+
+/// Fixed-mode key follow 0-99 at a key: cents off its frequency, about key 60.
+pub fn fixed_key_follow_cents(sens: i32, key: i32) -> f64 {
+    interpolate(&FKF_X, &FKF_CENTS, f64::from(sens.clamp(0, 99))) * f64::from(key.clamp(-256, 383) - 60)
+}
+
+/// The part's detune -128..+127 (documented as tenths of a hertz): cents, the same at every key;
+/// nothing within 2 of 0, straight between the measured values.
+pub fn part_detune_cents(d: i32) -> f64 {
+    let raw = d.clamp(-128, 127) + 128;
+    let t = |i: i32| at(&PART_DETUNE_CENTS, i);
+    match raw {
+        126..=130 => 0.0,
+        121..=125 => t(15) * f64::from(126 - raw) / 6.0,
+        131..=135 => t(17) * f64::from(raw - 130) / 6.0,
+        255 => t(32),
+        _ => {
+            let i = raw / 8;
+            t(i) + (t(i + 1) - t(i)) * f64::from(raw - 8 * i) / if i == 31 { 7.0 } else { 8.0 }
+        }
+    }
+}
+
+/// An operator's pitch envelope level -50..+50: cents.
+pub fn peg_cents(level: i32) -> f64 {
+    at(&PEG_CENTS, level.clamp(-50, 50) + 50)
+}
+
+/// An operator's pitch envelope time 0-99: its rate, cents a millisecond, straight in cents.
+pub fn peg_cents_per_ms(t: i32) -> f64 {
+    at(&PEG_CENTS_PER_MS, t)
+}
+
+/// The common pitch envelope's level -50..+50 at depth 0-3 (8, 2, 1 and 0.5 octaves across):
+/// cents, steps of 37.5 cents at depth 0, wider beyond +-32.
+pub fn part_peg_cents(level: i32, depth: i32) -> f64 {
+    let steps = PART_PEG_STEPS
+        .get((level.clamp(-50, 50) + 50) as usize)
+        .copied()
+        .unwrap_or(0);
+    f64::from(steps) * 37.5 * at(&[1.0, 0.25, 0.125, 0.0625], depth)
+}
+
+/// The common pitch envelope's time 0-99: cents a millisecond, a whole multiple of 0.05619077;
+/// 0 is instant (returned as 0).
+pub fn part_peg_cents_per_ms(t: i32) -> f64 {
+    f64::from(PART_PEG_RATE_STEPS.get(t.clamp(0, 99) as usize).copied().unwrap_or(0)) * 0.056_190_77
+}
+
+/// The common pitch envelope's depth velocity sensitivity 0-7 at a velocity: the factor on its
+/// levels and rates alike (so its times do not change): of its 128 steps at +50 it loses this
+/// many at velocity 1, in proportion to 127 - velocity, rounded down.
+pub fn part_peg_velocity_scale(sens: i32, velocity: f64) -> f64 {
+    let lost = f64::from(PART_PEG_LOST.get(sens.clamp(0, 7) as usize).copied().unwrap_or(0));
+    // (truncation of a non-negative number is its floor)
+    f64::from(128 - (lost * (127.0 - velocity.clamp(1.0, 127.0)) / 126.0) as i32) / 128.0
+}
+
+/// The common pitch envelope's time key follow 0-7 at a key: the factor on its rates,
+/// 1 + s (key - 3) / 33 (keys below 3 as key 3).
+pub fn part_peg_key_scale(sens: i32, key: i32) -> f64 {
+    1.0 + f64::from(sens.clamp(0, 7) * (key.clamp(3, 383) - 3)) / 33.0
+}
+
+/// Pitch bend -8192..+8191 with the part's ranges (the pitch at full bend up and at full bend
+/// down, semitones -48..+24 each): whole cents, then whole steps, each cut towards 0.
+pub fn bend_steps(bend: i32, up: i32, down: i32) -> i32 {
+    let b = bend.clamp(-8192, 8191);
+    let (range, full) = if b >= 0 { (up, 8191) } else { (-down, 8192) };
+    let cents = b * range.clamp(-48, 48) * 100 / full;
+    cents * 2048 / 1200
+}
+
+/// Portamento moves in steps this far apart (440 samples at 44.1 kHz).
+pub const GLIDE_TICK_MS: f64 = 440.0 / 44.1;
+
+/// Portamento time 0-127 and time mode 0-3 (rate 1, time 1, rate 2, time 2) over a glide of
+/// `semitones`: semitones a second, straight in semitones (time 0: instant, returned as 0). The
+/// rates are straight in log rate between the measured times; time 1 takes as long for any glide
+/// as rate 1 takes for an octave, time 2 the same up to an octave; rate 2 and time 2 start at most
+/// an octave away (the caller's part).
+pub fn portamento_rate(time: i32, mode: i32, semitones: f64) -> f64 {
+    let t = f64::from(time.clamp(0, 127));
+    if t == 0.0 {
+        return 0.0;
+    }
+    let i = PORTA_TIMES.iter().rposition(|&x| x <= t).unwrap_or(0);
+    let (x0, y0) = (at(&PORTA_TIMES, i as i32), at(&PORTA_RATE, i as i32));
+    let (x1, y1) = (at(&PORTA_TIMES, i as i32 + 1), at(&PORTA_RATE, i as i32 + 1));
+    let rate = if x1 > x0 {
+        y0 * exp2(log2(y1 / y0) * (t - x0) / (x1 - x0))
+    } else {
+        y0
+    };
+    match mode {
+        1 => rate * semitones / 12.0,
+        3 => rate * semitones.min(12.0) / 12.0,
+        _ => rate,
+    }
+}
+
 // ---- feedback ----
 
 /// Feedback 0-7 on a carrier: its amount against a modulator's at the same value.
@@ -497,6 +639,82 @@ const DETUNE_CENTS: [[f64; 31]; 8] = [
         0.928, 1.381, 1.761, 1.845, 2.224,
     ],
 ];
+// pitch key follow by value, percent: 1 % steps within 10 of 0, 100 and 200 (and down to 191 at the
+// bottom), 5 % between
+const KEY_FOLLOW_PERCENT: [i16; 128] = [
+    -200, -199, -198, -197, -196, -195, -194, -193, -192, -191, -190, -185, -180, -175, -170, -165, -160, -155, -150,
+    -145, -140, -135, -130, -125, -120, -115, -110, -105, -104, -103, -102, -101, -100, -99, -98, -97, -96, -95, -90,
+    -85, -80, -75, -70, -65, -60, -55, -50, -45, -40, -35, -30, -25, -20, -15, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 96, 97, 98,
+    99, 100, 101, 102, 103, 104, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180, 185,
+    190, 192, 193, 194, 195, 196, 197, 198, 199, 200,
+];
+const PV_DEPTH: [f64; 9] = [-64., -48., -16., -1., 0., 1., 16., 48., 63.];
+const PV_DEPTH_CENTS: [f64; 9] = [
+    -1189.46, -891.979, -296.61, -17.6139, 0.0, 17.4349, 296.341, 891.797, 1189.4,
+];
+const PV_X: [f64; 10] = [0., 1., 16., 32., 48., 64., 80., 96., 112., 127.];
+const PV_FACTOR: [f64; 10] = [
+    0.0, 0.00750278, 0.126218, 0.25242, 0.378432, 0.50444, 0.630633, 0.756767, 0.882821, 1.0,
+];
+// at velocity 127, by sensitivity (4 and 6 halfway, unmeasured)
+const FIXED_PV_TOP: [f64; 8] = [0.0, 73.75, 147.7, 304.05, 604.1, 904.15, 1204.1, 1504.05];
+const FKF_X: [f64; 5] = [0., 25., 50., 75., 99.];
+const FKF_CENTS: [f64; 5] = [0.0, 25.784, 50.78, 75.7805, 100.0];
+// every eighth value from -128 (and 127)
+const PART_DETUNE_CENTS: [f64; 33] = [
+    -49.95, -45.94, -42.81, -39.95, -37.11, -33.99, -30.59, -27.76, -24.65, -20.71, -17.62, -14.81, -11.72, -8.93,
+    -6.13, -3.06, 0.0, 2.78, 5.83, 8.6, 11.64, 14.4, 17.44, 20.46, 24.58, 27.32, 30.33, 33.88, 36.88, 39.6, 42.59,
+    45.57, 49.63,
+];
+const PEG_CENTS: [f64; 101] = [
+    -4800.74, -4200.55, -3675.3, -3225.39, -2925.42, -2775.32, -2625.35, -2475.32, -2362.98, -2250.45, -2137.97,
+    -2025.35, -1912.86, -1837.98, -1762.84, -1687.88, -1612.98, -1538.0, -1462.91, -1388.13, -1312.91, -1275.32,
+    -1200.39, -1162.98, -1087.96, -1050.42, -975.488, -937.97, -862.936, -825.353, -750.485, -712.856, -675.5,
+    -637.974, -600.398, -562.836, -525.426, -487.876, -450.477, -412.978, -375.32, -338.001, -300.338, -262.904,
+    -225.359, -188.133, -150.273, -112.909, -75.3136, -38.0961, 0.0, 37.0097, 74.4803, 112.027, 149.607, 187.028,
+    224.6, 262.095, 299.615, 336.998, 374.56, 412.052, 449.567, 487.118, 524.502, 562.184, 599.592, 636.958, 674.532,
+    712.034, 749.43, 824.537, 862.034, 937.205, 974.541, 1049.5, 1087.08, 1162.04, 1199.56, 1274.46, 1312.03, 1387.03,
+    1462.09, 1536.99, 1612.05, 1687.11, 1762.18, 1836.96, 1912.03, 2024.54, 2137.2, 2249.41, 2362.04, 2474.46, 2624.6,
+    2774.54, 2924.5, 3224.54, 3674.46, 4199.59, 4762.09,
+];
+const PEG_CENTS_PER_MS: [f64; 100] = [
+    387.613, 336.101, 336.101, 284.374, 232.672, 232.672, 193.865, 167.996, 167.996, 142.154, 142.152, 116.297,
+    96.9144, 96.9144, 83.9892, 71.0671, 71.0671, 58.1447, 48.4532, 48.4531, 41.9924, 35.5317, 35.5317, 29.0711,
+    29.0711, 24.2257, 20.9956, 20.9956, 17.7654, 14.5352, 14.5352, 12.1127, 10.4976, 10.4976, 8.88256, 8.88256,
+    7.26752, 6.05626, 6.05626, 5.24875, 4.44124, 4.44124, 3.63374, 3.02811, 3.02811, 2.62436, 2.22062, 2.22062,
+    1.81687, 1.81687, 1.51406, 1.31218, 1.31218, 1.11031, 0.908433, 0.908433, 0.757028, 0.656093, 0.656093, 0.555156,
+    0.454221, 0.454219, 0.378515, 0.378515, 0.328047, 0.277578, 0.277578, 0.227109, 0.189258, 0.189258, 0.164029,
+    0.138789, 0.138789, 0.113555, 0.113555, 0.0946287, 0.0820116, 0.0820116, 0.0693965, 0.0567772, 0.0567767,
+    0.0473139, 0.0410066, 0.0410066, 0.0346983, 0.0283897, 0.0283897, 0.0236579, 0.0236579, 0.0205036, 0.0173498,
+    0.0173496, 0.0141948, 0.0126179, 0.0126179, 0.0126179, 0.0126179, 0.0126179, 0.0126179, 0.0126182,
+];
+// the common pitch envelope's level in 37.5-cent steps at depth 0
+const PART_PEG_STEPS: [i16; 101] = [
+    -128, -116, -104, -95, -85, -76, -68, -61, -56, -52, -49, -46, -43, -41, -39, -37, -35, -33, -32, -31, -30, -29,
+    -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5,
+    -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 38, 40, 43, 46, 49, 53, 58, 65, 73, 82, 92, 103, 115, 127, 128,
+];
+// its rate by time, in multiples of 0.05619077 cents a millisecond
+const PART_PEG_RATE_STEPS: [u8; 100] = [
+    0, 254, 244, 233, 212, 203, 194, 186, 179, 172, 166, 160, 154, 148, 142, 136, 131, 125, 120, 115, 110, 106, 102,
+    98, 94, 91, 88, 85, 82, 79, 76, 74, 72, 70, 68, 66, 64, 62, 60, 58, 56, 54, 53, 51, 49, 47, 46, 44, 42, 41, 39, 38,
+    37, 36, 34, 33, 31, 30, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 18, 17, 16, 16, 15, 14, 14, 13, 13, 12, 12, 11,
+    11, 10, 10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 1,
+];
+// steps of 128 lost at velocity 1, by depth velocity sensitivity
+const PART_PEG_LOST: [u8; 8] = [0, 17, 35, 53, 70, 88, 106, 126];
+// portamento rate 1, semitones a second, at these times
+const PORTA_TIMES: [f64; 35] = [
+    1., 2., 4., 6., 8., 12., 16., 20., 24., 28., 32., 36., 40., 44., 48., 52., 56., 60., 64., 68., 72., 76., 80., 84.,
+    88., 92., 96., 100., 104., 108., 112., 116., 120., 124., 127.,
+];
+const PORTA_RATE: [f64; 35] = [
+    434.1, 381.0, 378.3, 336.1, 336.2, 274.2, 248.7, 207.3, 176.3, 151.2, 131.1, 116.3, 94.93, 85.03, 71.99, 58.98,
+    51.22, 43.10, 36.63, 30.40, 25.63, 21.26, 17.81, 14.66, 11.843, 9.354, 7.533, 5.943, 4.565, 3.402, 2.42, 1.770,
+    1.083, 0.5208, 0.1199,
+];
 
 #[cfg(test)]
 mod tests {
@@ -619,5 +837,68 @@ mod tests {
         assert_eq!(feedback_amount(7), 0.25);
         assert_eq!(feedback_amount(1), 1.0 / 256.0);
         assert_eq!(carrier_feedback_scale(5), 0.18446);
+    }
+
+    /// The pitch laws at the existing profile's measured values, and the documented bend ranges.
+    #[test]
+    fn pitch_laws() {
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // operator pitch envelope: levels and rates as measured
+        assert_eq!((peg_cents(-50), peg_cents(0), peg_cents(50)), (-4800.74, 0.0, 4762.09));
+        assert_eq!((peg_cents_per_ms(0), peg_cents_per_ms(99)), (387.613, 0.0126182));
+        // common pitch envelope: 37.5-cent steps (wider past +-32) by depth; rates a multiple of
+        // 0.05619077 cents/ms, time 0 instant; velocity and key scale the rates and levels
+        assert_eq!(part_peg_cents(50, 0), 4800.0);
+        assert_eq!((part_peg_cents(35, 0), part_peg_cents(36, 0)), (1312.5, 1425.0));
+        assert_eq!((part_peg_cents(50, 2), part_peg_cents(-50, 3)), (600.0, -300.0));
+        assert!(part_peg_cents_per_ms(0) == 0.0 && near(part_peg_cents_per_ms(99), 0.05619077));
+        assert!(near(part_peg_cents_per_ms(1), 254.0 * 0.05619077));
+        assert_eq!(part_peg_velocity_scale(3, 64.0), 102.0 / 128.0);
+        assert_eq!(
+            (part_peg_velocity_scale(7, 1.0), part_peg_velocity_scale(7, 127.0)),
+            (2.0 / 128.0, 1.0)
+        );
+        assert_eq!((part_peg_key_scale(7, 36), part_peg_key_scale(5, 2)), (8.0, 1.0));
+        // key follow: 96 is 100 % (no change), 64 is 0 % (every key the centre's pitch)
+        assert_eq!(pitch_key_follow_cents(96, 30, 60), 0.0);
+        assert_eq!(pitch_key_follow_cents(64, 72, 60), -1200.0);
+        assert_eq!(pitch_key_follow_cents(127, 84, 48), 3600.0);
+        // random pitch: whole 18.75-cent steps within depth / 4 either way
+        assert_eq!(random_pitch_cents(127, 0), -31.0 * 18.75);
+        assert_eq!(random_pitch_cents(127, u32::MAX), 31.0 * 18.75);
+        // (a draw of exactly -1, r < 256, reaches one step further down)
+        assert!((1..1000u32).all(|i| random_pitch_cents(4, i.wrapping_mul(0x9e37_79b9)) == 0.0));
+        assert!((1..1000u32).all(|i| random_pitch_cents(8, i.wrapping_mul(0x9e37_79b9)).abs() <= 18.75));
+        // velocity: the part's depth at every operator, the operator's on fixed frequencies
+        assert_eq!(
+            (pitch_velocity_cents(63, 127.0), pitch_velocity_cents(-64, 127.0)),
+            (1189.4, -1189.46)
+        );
+        assert!(near(pitch_velocity_cents(16, 64.0), 296.341 * 0.50444));
+        assert_eq!(fixed_pitch_velocity_cents(7, 127.0), 1504.05);
+        assert!(near(fixed_pitch_velocity_cents(-7, 96.0), -1504.05 * 32.0 / 63.0));
+        assert!((fixed_key_follow_cents(99, 72) - 1200.0).abs() < 1e-9 && fixed_key_follow_cents(0, 100) == 0.0);
+        // the part's detune: cents, nothing within 2 of 0
+        assert_eq!((part_detune_cents(-128), part_detune_cents(127)), (-49.95, 49.63));
+        assert_eq!(
+            (part_detune_cents(2), part_detune_cents(-2), part_detune_cents(8)),
+            (0.0, 0.0, 2.78)
+        );
+        // bend: the documented ranges, whole cents then whole steps, cut towards 0
+        assert_eq!(
+            (
+                bend_steps(8191, 2, -2),
+                bend_steps(-8192, 2, -2),
+                bend_steps(0, 24, -48)
+            ),
+            (341, -341, 0)
+        );
+        assert_eq!((bend_steps(-8192, 24, -48), bend_steps(8191, 24, -48)), (-8192, 4096));
+        assert_eq!(bend_steps(-4096, 2, 12), 1024); // a range below the centre the other way
+                                                    // portamento: rate 1 at the measured times, time 1 and 2 by distance
+        assert_eq!((portamento_rate(64, 0, 5.0), portamento_rate(0, 0, 12.0)), (36.63, 0.0));
+        assert!(near(portamento_rate(64, 1, 24.0), 2.0 * 36.63) && near(portamento_rate(64, 3, 24.0), 36.63));
+        assert!(near(portamento_rate(64, 3, 6.0), 36.63 / 2.0) && portamento_rate(127, 2, 3.0) == 0.1199);
+        assert!(near(portamento_rate(3, 0, 1.0), (381.0f64 * 378.3).sqrt()));
     }
 }
