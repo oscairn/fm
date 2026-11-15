@@ -453,7 +453,329 @@ pub fn feedback_amount(f: i32) -> f64 {
     }
 }
 
+// ---- modulators ----
+
+/// The voice LFO's rate, Hz: speed 0-99 in the normal range, 0-415 in the extended one
+/// (measured tables; the extended one every fifth value, straight between).
+pub fn lfo_hz(extended: bool, speed: i32) -> f64 {
+    if extended {
+        interpolate(&LFO_EXT_X, &LFO_EXT_HZ, f64::from(speed.clamp(0, 415)))
+    } else {
+        at(&LFO_HZ, speed)
+    }
+}
+
+/// The voice LFO's delay 0-99: seconds it holds at depth 0 before fading in over as long again
+/// (the six-operator model's delay law; 0 none).
+pub fn lfo_delay_s(delay: i32) -> f64 {
+    let a = 99 - delay.clamp(0, 99);
+    if a == 99 {
+        return 0.0;
+    }
+    let units = f64::from(16 + (a & 15)) * pow2i(i64::from(1 + (a >> 4)));
+    2_147_483_648.0 / (25_190_424.0 * units)
+}
+
+/// The voice LFO's pitch swing at its peak, cents, for depth 0-99 and an operator's offset 0-7:
+/// twice the six-operator depth (depth × 165 / 64 steps, 99 as 256; offsets as 0, 10, 20, 33, 56,
+/// 96, 160, 256 steps; 256 × 256 steps swing 2400 cents).
+pub fn lfo_pitch_cents(depth: i32, offset: i32) -> f64 {
+    let d = if depth >= 99 { 256 } else { depth.max(0) * 165 / 64 };
+    f64::from(d) * at(&LFO_PITCH_OFFSET, offset) * 1200.0 / 32768.0
+}
+
+/// The voice LFO's amplitude depth 0-99: dB an operator with offset 7 loses at the LFO's bottom,
+/// as played (0.375 dB steps, measured at 26 depths, straight between).
+pub fn lfo_amp_db(depth: i32) -> f64 {
+    0.375 * interpolate(&LFO_AMP_X, &LFO_AMP_STEPS, f64::from(depth.clamp(0, 99)))
+}
+
+/// Amplitude depth offset 0-7: its share of offset 7's straight loss (eighths, measured).
+pub fn lfo_amp_share(offset: i32) -> f64 {
+    at(&[0., 1., 2., 4., 5., 6., 7., 8.], offset) / 8.0
+}
+
+/// An amplitude loss as played (dB, positive) from its straight loss: straight in dB to about
+/// 45 dB, then the carrier envelope levels' bend, silent past their last audible level.
+pub fn amp_loss_db(straight: f64) -> f64 {
+    let (x, y) = amp_bend();
+    interpolate(&x, &y, straight)
+}
+
+/// The inverse of [`amp_loss_db`] (a loss past the last audible level is its own straight loss).
+pub fn amp_straight_db(played: f64) -> f64 {
+    let (x, y) = amp_bend();
+    if played >= at(&y, 20) {
+        played
+    } else {
+        interpolate(&y, &x, played)
+    }
+}
+
+/// The bend's points: straight loss (levels 0.7525 dB apart below level 99) and loss as played,
+/// at the carrier envelope's measured levels, then silence.
+fn amp_bend() -> ([f64; 22], [f64; 22]) {
+    let step = -at(&CARRIER_EG_DB, 11) / 8.0;
+    let mut x = [0.0; 22];
+    let mut y = [0.0; 22];
+    let levels = CARRIER_EG_X.iter().zip(CARRIER_EG_DB.iter()).rev();
+    let low = LEVEL_X.iter().zip(EG_LEVEL_DB.iter()).take(8).rev();
+    for ((xi, yi), (&l, &db)) in x.iter_mut().zip(y.iter_mut()).zip(levels.chain(low)) {
+        (*xi, *yi) = ((99.0 - l) * step, -db);
+    }
+    let last = at(&x, 20);
+    if let (Some(xi), Some(yi)) = (x.get_mut(21), y.get_mut(21)) {
+        (*xi, *yi) = (last + step, 200.0);
+    }
+    (x, y)
+}
+
+/// Level scaling, dB, at `key` for break point 0-99 (A-1 to C8), low and high (depth 0-99,
+/// curve 0-3: - linear, - exponential, + exponential, + linear): the six-operator model's
+/// documented curves, in its output level steps (0.7526 dB), keys in groups of three. Documented,
+/// not measured.
+pub fn level_scaling_db(key: i32, brk: i32, low: (i32, i32), high: (i32, i32)) -> f64 {
+    let offset = key.clamp(0, 127) - brk.clamp(0, 99) - 17;
+    let (group, (depth, curve)) = if offset >= 0 {
+        ((offset + 1) / 3, high)
+    } else {
+        ((1 - offset) / 3, low)
+    };
+    let (depth, curve) = (depth.clamp(0, 99), curve.clamp(0, 3));
+    let steps = if curve == 0 || curve == 3 {
+        (group * depth * 329) >> 12
+    } else {
+        (i32::from(EXP_SCALE.get(group.min(32) as usize).copied().unwrap_or(250)) * depth * 329) >> 15
+    };
+    f64::from(if curve < 2 { -steps } else { steps }) * 32.0 * 6.020_599_913_279_624 / 256.0
+}
+
+/// The part's decay or release offset -64..+63: time values added to every operator's (1.5 a
+/// step, rounded).
+pub fn aeg_offset_steps(offset: i32) -> i32 {
+    round(1.5 * f64::from(offset.clamp(-64, 63)))
+}
+
+/// The part's attack offset -64..+63: its factor on every attack time, 2^(offset / 4).
+pub fn aeg_attack_scale(offset: i32) -> f64 {
+    exp2(f64::from(offset.clamp(-64, 63)) / 4.0)
+}
+
+/// The part's sustain offset -64..+63: decay-2 level steps (measured at even offsets from -22 to
+/// +32, odd ones halfway, 1.5 a step beyond).
+pub fn aeg_sustain_steps(offset: i32) -> i32 {
+    const UP: [f64; 17] = [0., 2., 6., 8., 12., 14., 18., 22., 24., 28., 30., 34., 36., 40., 44., 47., 49.];
+    const DOWN: [f64; 12] = [0., 4., 6., 10., 12., 16., 18., 22., 26., 28., 31., 33.];
+    let v = offset.clamp(-64, 63);
+    let a = v.abs();
+    let on = |t: &[f64], a: i32| {
+        let n = t.len() as i32 - 1;
+        if a >= 2 * n {
+            at(t, n) + 1.5 * f64::from(a - 2 * n)
+        } else {
+            let i = a / 2;
+            at(t, i) + if a % 2 == 1 { 0.5 * (at(t, i + 1) - at(t, i)) } else { 0.0 }
+        }
+    };
+    round(if v >= 0 { on(&UP, a) } else { -on(&DOWN, a) })
+}
+
+/// The ratio macro -99..+99 on a modulator's ratio: measured at nine ratios and 79 values,
+/// straight between both; the offset at ratio 16 above it; never below 0.5.
+pub fn shifted_ratio(ratio: f64, value: i32) -> f64 {
+    let v = value.clamp(-99, 99);
+    if v == 0 {
+        return ratio;
+    }
+    let i = RATIO_SHIFT_VALUE.iter().rposition(|&x| x <= v).unwrap_or(0).min(77);
+    let x0 = f64::from(RATIO_SHIFT_VALUE.get(i).copied().unwrap_or(0));
+    let x1 = f64::from(RATIO_SHIFT_VALUE.get(i + 1).copied().unwrap_or(1));
+    let u = (f64::from(v) - x0) / (x1 - x0);
+    let offset = |j: i32| {
+        let row = RATIO_SHIFTED.get(j as usize).copied().unwrap_or([0.0; 79]);
+        let a = f64::from(row.get(i).copied().unwrap_or(0.0));
+        let b = f64::from(row.get(i + 1).copied().unwrap_or(0.0));
+        a + (b - a) * u - at(&RATIO_SHIFT_AT, j)
+    };
+    let d = match RATIO_SHIFT_AT.iter().position(|&r| r >= ratio) {
+        Some(0) => offset(0),
+        None => offset(8),
+        Some(j) => {
+            let j = j as i32;
+            let (r0, r1) = (at(&RATIO_SHIFT_AT, j - 1), at(&RATIO_SHIFT_AT, j));
+            offset(j - 1) + (offset(j) - offset(j - 1)) * (ratio - r0) / (r1 - r0)
+        }
+    };
+    (ratio + d).max(0.5)
+}
+
+/// The texture macro -99..+99 on an operator's form 0-6, spread 0-7 and formant 0-99: the form,
+/// spread and formant it plays and a level change in dB, or `None` where it does not reach it
+/// (negative values reach carriers, positive ones modulators). The forms lie on a path of places
+/// -99..+99, the first form of each kind on the plus side: the sine at 0, odd forms by spread
+/// (2-17), harmonic forms by spread down (18-31), a sine 6.17 dB down (32-33), resonant forms by
+/// formant at spread 0 (34-49), by spread at formant 7 (50-63), then by formant at spread 7; the
+/// value moves an operator from its own place, coming round past either end.
+pub fn texture(value: i32, modulator: bool, form: i32, spread: i32, formant: i32) -> Option<(i32, i32, i32, f64)> {
+    let v = value.clamp(-99, 99);
+    if v == 0 || (v > 0) != modulator {
+        return None;
+    }
+    let (spread, formant) = (spread.clamp(0, 7), formant.clamp(0, 99));
+    let sign = if form % 2 == 1 { 1 } else { -1 };
+    let from = sign
+        * match form {
+            1 | 2 => 32 - 2 * spread,
+            3 | 4 => 2 + 2 * spread,
+            5 | 6 if formant <= 7 => 34 + 2 * formant,
+            5 | 6 if formant <= 29 => 42 + 2 * spread + formant,
+            5 | 6 => 72 + 2 * spread + round(f64::from(formant - 30) * 13.0 / 69.0),
+            _ => 0,
+        };
+    let mut place = from + v;
+    if place > 99 {
+        place -= 199;
+    } else if place < -99 {
+        place += 199;
+    }
+    let (up, a) = (place > 0, place.abs());
+    let kind = |plus: i32| if up { plus } else { plus + 1 };
+    Some(match a {
+        0..=1 => (0, 0, 0, 0.0),
+        2..=17 => (kind(3), (a - 2) / 2, 0, 0.0),
+        18..=31 => (kind(1), 7 - (a - 18) / 2, 0, 0.0),
+        32..=33 => (0, 0, 0, -6.17),
+        34..=49 => (kind(5), 0, (a - 34) / 2, 0.0),
+        50..=63 => (kind(5), (a - 48) / 2, 7, 0.0),
+        _ => (kind(5), 7, if a <= 86 { a - 56 } else { 30 + round(f64::from(a - 86) * 69.0 / 13.0) }, 0.0),
+    })
+}
+
 // ---- the measured data ----
+
+// the voice LFO: normal speeds, extended speeds every fifth value, pitch offsets (steps), and
+// amplitude depth steps (0.375 dB) at offset 7
+const LFO_HZ: [f64; 100] = [
+    0.08380198, 0.1677885, 0.3356519, 0.4197255, 0.6715107, 0.7550843, 1.008079, 1.17515, 1.261077, 1.511134,
+    1.596851, 1.765982, 1.930386, 2.097981, 2.349887, 2.430962, 2.601796, 2.769843, 2.9357, 3.105414, 3.273296,
+    3.441511, 3.613093, 3.777085, 3.94147, 4.112679, 4.27951, 4.448302, 4.614656, 4.789686, 4.948374, 5.120633,
+    5.287449, 5.455317, 5.62546, 5.790979, 5.964879, 6.125459, 6.210602, 6.462337, 6.623867, 6.799516, 6.965852,
+    7.049286, 7.301528, 7.469369, 7.635997, 7.805042, 7.88384, 8.140731, 8.224006, 8.4727, 8.644277, 8.730975,
+    8.978244, 9.063882, 9.314723, 9.399569, 9.56774, 9.819163, 9.90142, 10.07094, 10.23745, 10.40665, 11.58202,
+    11.74939, 12.92429, 14.09921, 14.26671, 15.44201, 16.78329, 17.11993, 18.29734, 19.80599, 19.97371, 21.48463,
+    21.48457, 23.16288, 24.50566, 24.84134, 26.51857, 27.8636, 28.19846, 29.8768, 31.62688, 31.96334, 33.64561,
+    35.32789, 35.66437, 37.34665, 39.36538, 39.70185, 41.72058, 42.05703, 43.0664, 45.75807, 45.75806, 48.44974,
+    49.79552, 49.79553,
+];
+#[allow(clippy::indexing_slicing)] // compile-time evaluation: an out-of-range index fails the build
+const LFO_EXT_X: [f64; 86] = {
+    let mut x = [0.0; 86];
+    let mut i = 1;
+    while i < 86 {
+        x[i] = if i < 3 { i as f64 } else { 5.0 * (i - 2) as f64 };
+        i += 1;
+    }
+    x
+};
+const LFO_EXT_HZ: [f64; 86] = [
+    0.002142449, 0.0837663, 0.1675321, 0.4187534, 0.8370164, 1.257364, 1.677451, 2.0978, 2.518042, 2.937899,
+    3.357562, 3.776756, 4.196582, 4.616091, 5.031115, 5.455341, 5.867969, 6.294572, 6.713245, 7.136733, 7.558105,
+    7.971922, 8.393544, 8.812187, 9.2277, 9.651327, 10.07093, 10.49055, 11.07573, 11.92024, 12.75481, 13.59567,
+    14.4345, 15.27412, 16.11336, 16.95259, 17.79022, 18.62918, 19.4715, 20.31063, 21.14865, 22.49149, 24.16997,
+    25.84984, 27.52689, 29.2055, 30.95397, 32.63628, 34.31857, 36.00083, 37.68309, 39.36539, 41.04771, 42.72995,
+    48.44971, 55.17884, 61.90795, 68.6371, 75.36623, 82.09536, 91.51613, 104.9744, 118.4326, 131.8909, 145.3491,
+    158.8074, 172.2656, 199.1821, 226.0986, 253.0151, 279.9316, 306.8481, 333.7646, 376.831, 430.6641, 484.4971,
+    538.3301, 592.1631, 645.9961, 710.5957, 818.2617, 925.9277, 1033.594, 1141.26, 1248.926, 1356.592,
+];
+const LFO_PITCH_OFFSET: [f64; 8] = [0., 10., 20., 33., 56., 96., 160., 256.];
+const LFO_AMP_X: [f64; 26] = [
+    0., 2., 3., 4., 6., 8., 10., 12., 16., 20., 25., 30., 35., 40., 45., 50., 55., 60., 65., 70., 75., 80., 85., 90.,
+    95., 99.,
+];
+const LFO_AMP_STEPS: [f64; 26] = [
+    0., 0., 1., 1., 2., 3., 4., 5., 8., 10., 13., 16., 20., 24., 28., 32., 37., 42., 49., 56., 65., 75., 89., 111.,
+    149., 256.,
+];
+// level scaling's exponential curve (the six-operator model's), by group of three keys
+const EXP_SCALE: [u8; 33] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 14, 16, 19, 23, 27, 33, 39, 47, 56, 66, 80, 94, 110, 126, 142, 158, 174, 190,
+    206, 222, 238, 250,
+];
+// the ratio macro: the values measured, the ratios measured at, and the ratio each plays
+const RATIO_SHIFT_VALUE: [i32; 79] = [
+    -99, -96, -93, -90, -88, -87, -84, -81, -78, -77, -75, -72, -69, -66, -63, -60, -57, -55, -54, -51, -48, -45, -44,
+    -42, -39, -36, -33, -30, -27, -24, -22, -21, -18, -15, -12, -11, -9, -6, -3, 0, 3, 6, 9, 11, 12, 15, 18, 21, 22,
+    24, 27, 30, 33, 36, 39, 42, 44, 45, 48, 51, 54, 55, 57, 60, 63, 66, 69, 72, 75, 77, 78, 81, 84, 87, 88, 90, 93,
+    96, 99,
+];
+const RATIO_SHIFT_AT: [f64; 9] = [0.5, 1., 1.5, 2., 3., 4., 5., 8., 16.];
+const RATIO_SHIFTED: [[f32; 79]; 9] = [
+    [
+        0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+        0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.51, 0.52, 0.53,
+        0.545, 0.55, 0.575, 0.595, 0.63, 0.65, 0.685, 0.74, 0.8, 0.855, 0.95, 1.119, 1.35, 1.5, 1.569, 1.799, 2.039,
+        2.5, 2.639, 3.059, 3.599, 4.199, 4.96, 5.55, 6.152, 6.879, 7.281, 7.491, 8.098, 8.801, 10.022, 10.622, 11.679,
+        13.308, 14.941, 16.527,
+    ],
+    [
+        0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.53, 0.585, 0.64, 0.65, 0.665, 0.685, 0.71, 0.73, 0.755, 0.775, 0.785, 0.79,
+        0.795, 0.805, 0.82, 0.83, 0.835, 0.84, 0.85, 0.865, 0.875, 0.885, 0.895, 0.91, 0.915, 0.92, 0.93, 0.94, 0.955,
+        0.955, 0.965, 0.977, 0.982, 1.0, 1.018, 1.04, 1.06, 1.09, 1.1, 1.15, 1.19, 1.259, 1.3, 1.37, 1.48, 1.6, 1.71,
+        1.9, 2.239, 2.699, 3.0, 3.08, 3.359, 3.621, 3.901, 3.981, 4.359, 5.1, 5.668, 6.299, 7.019, 7.618, 8.252,
+        8.717, 8.956, 9.551, 10.199, 11.522, 12.0, 13.129, 14.761, 16.35, 17.938,
+    ],
+    [
+        0.5, 0.555, 0.61, 0.665, 0.705, 0.725, 0.78, 0.835, 0.89, 0.9, 0.915, 0.935, 0.96, 0.981, 1.007, 1.05, 1.07,
+        1.08, 1.09, 1.11, 1.14, 1.16, 1.17, 1.18, 1.2, 1.23, 1.25, 1.27, 1.29, 1.32, 1.319, 1.359, 1.36, 1.38, 1.41,
+        1.41, 1.43, 1.45, 1.47, 1.5, 1.52, 1.54, 1.56, 1.59, 1.6, 1.65, 1.69, 1.76, 1.799, 1.87, 1.981, 2.2, 2.42,
+        2.799, 3.139, 3.421, 3.599, 3.68, 3.959, 4.321, 4.708, 4.831, 5.159, 5.73, 6.398, 7.082, 7.681, 8.33, 9.03,
+        9.442, 9.63, 10.262, 10.982, 12.203, 12.779, 13.805, 15.465, 17.095, 18.72,
+    ],
+    [
+        0.75, 0.805, 0.86, 0.915, 0.955, 0.978, 1.06, 1.17, 1.28, 1.3, 1.319, 1.37, 1.42, 1.46, 1.51, 1.549, 1.569,
+        1.58, 1.59, 1.61, 1.64, 1.66, 1.67, 1.679, 1.7, 1.73, 1.75, 1.77, 1.79, 1.82, 1.83, 1.84, 1.86, 1.88, 1.911,
+        1.91, 1.93, 1.943, 1.996, 2.0, 2.047, 2.08, 2.12, 2.179, 2.2, 2.299, 2.38, 2.519, 2.601, 2.74, 2.96, 3.12,
+        3.24, 3.479, 3.74, 4.037, 4.28, 4.4, 4.798, 5.121, 5.402, 5.501, 5.799, 6.481, 7.149, 7.749, 8.398, 9.103,
+        9.702, 10.104, 10.346, 11.041, 11.64, 12.961, 13.499, 14.563, 16.162, 17.781, 19.404,
+    ],
+    [
+        1.01, 1.119, 1.23, 1.359, 1.42, 1.46, 1.569, 1.679, 1.79, 1.81, 1.84, 1.881, 1.931, 1.991, 2.032, 2.12, 2.16,
+        2.179, 2.2, 2.239, 2.299, 2.34, 2.361, 2.38, 2.42, 2.48, 2.519, 2.56, 2.601, 2.659, 2.679, 2.699, 2.74, 2.779,
+        2.84, 2.84, 2.88, 2.92, 2.959, 3.0, 3.03, 3.059, 3.08, 3.12, 3.12, 3.179, 3.24, 3.32, 3.359, 3.449, 3.58, 3.72,
+        3.859, 4.121, 4.499, 4.89, 5.1, 5.201, 5.491, 5.761, 6.081, 6.198, 6.56, 7.242, 7.838, 8.501, 9.177, 9.78,
+        10.437, 10.9, 11.108, 11.702, 12.396, 13.684, 14.183, 15.301, 16.935, 18.53, 20.139,
+    ],
+    [
+        1.84, 1.946, 2.12, 2.34, 2.5, 2.579, 2.799, 3.0, 3.139, 3.16, 3.199, 3.24, 3.3, 3.359, 3.421, 3.46, 3.479,
+        3.501, 3.51, 3.541, 3.57, 3.599, 3.599, 3.621, 3.641, 3.68, 3.7, 3.72, 3.751, 3.779, 3.799, 3.809, 3.841,
+        3.859, 3.901, 3.901, 3.92, 3.941, 3.959, 4.0, 4.042, 4.079, 4.109, 4.16, 4.168, 4.26, 4.321, 4.439, 4.521,
+        4.639, 4.831, 5.011, 5.159, 5.398, 5.68, 5.972, 6.202, 6.32, 6.699, 7.039, 7.351, 7.441, 7.738, 8.398, 9.091,
+        9.681, 10.318, 11.003, 11.622, 12.039, 12.254, 12.961, 13.581, 14.882, 15.404, 16.493, 18.085, 19.707, 21.332,
+    ],
+    [
+        2.84, 3.03, 3.16, 3.3, 3.391, 3.44, 3.57, 3.7, 3.841, 3.859, 3.902, 3.941, 4.0, 4.079, 4.16, 4.231, 4.26, 4.28,
+        4.288, 4.321, 4.379, 4.409, 4.439, 4.439, 4.478, 4.53, 4.561, 4.598, 4.639, 4.68, 4.708, 4.721, 4.76, 4.798,
+        4.841, 4.841, 4.88, 4.92, 4.951, 5.0, 5.011, 5.038, 5.069, 5.1, 5.121, 5.19, 5.24, 5.319, 5.369, 5.46, 5.599,
+        5.761, 5.902, 6.181, 6.539, 6.902, 7.121, 7.203, 7.501, 7.802, 8.12, 8.242, 8.6, 9.252, 9.853, 10.53, 11.198,
+        11.804, 12.481, 12.954, 13.129, 13.758, 14.406, 15.699, 16.206, 17.306, 18.961, 20.553, 22.201,
+    ],
+    [
+        5.851, 6.0, 6.181, 6.359, 6.481, 6.551, 6.717, 6.902, 7.072, 7.082, 7.14, 7.198, 7.252, 7.301, 7.36, 7.42,
+        7.441, 7.451, 7.481, 7.501, 7.553, 7.558, 7.563, 7.598, 7.618, 7.65, 7.681, 7.702, 7.738, 7.77, 7.802, 7.802,
+        7.838, 7.85, 7.902, 7.902, 7.919, 7.951, 7.978, 8.0, 8.049, 8.081, 8.103, 8.158, 8.158, 8.252, 8.32, 8.398,
+        8.479, 8.6, 8.758, 8.956, 9.103, 9.36, 9.662, 9.961, 10.199, 10.303, 10.645, 10.987, 11.306, 11.406, 11.702,
+        12.362, 13.041, 13.656, 14.298, 14.982, 15.604, 16.0, 16.239, 16.923, 17.542, 18.871, 19.362, 20.442, 22.051,
+        23.676, 25.301,
+    ],
+    [
+        13.861, 14.003, 14.165, 14.319, 14.483, 14.522, 14.702, 14.851, 15.003, 15.044, 15.105, 15.126, 15.206, 15.28,
+        15.342, 15.393, 15.404, 15.434, 15.455, 15.475, 15.509, 15.54, 15.571, 15.591, 15.604, 15.614, 15.676, 15.699,
+        15.72, 15.751, 15.763, 15.805, 15.838, 15.838, 15.902, 15.902, 15.923, 15.943, 15.967, 16.0, 16.054, 16.075,
+        16.108, 16.162, 16.162, 16.239, 16.306, 16.383, 16.483, 16.56, 16.74, 16.923, 17.085, 17.342, 17.638, 17.938,
+        18.195, 18.306, 18.606, 18.961, 19.26, 19.362, 19.681, 20.344, 21.002, 21.609, 22.262, 22.951, 23.563, 24.0,
+        24.211, 24.889, 25.506, 26.833, 27.368, 28.406, 30.026, 31.676, 33.347,
+    ],
+];
 
 const DECAY_MS_PER_DB: [f64; 100] = [
     0.06422956, 0.07406888, 0.07406888, 0.08756147, 0.1070121, 0.1070121, 0.1283906, 0.1482076, 0.1482076, 0.1751299,
@@ -908,5 +1230,66 @@ mod tests {
         assert!(near(portamento_rate(64, 1, 24.0), 2.0 * 36.63) && near(portamento_rate(64, 3, 24.0), 36.63));
         assert!(near(portamento_rate(64, 3, 6.0), 36.63 / 2.0) && portamento_rate(127, 2, 3.0) == 0.1199);
         assert!(near(portamento_rate(3, 0, 1.0), (381.0f64 * 378.3).sqrt()));
+    }
+
+    /// The modulators' laws at the existing profile's measured values, and level scaling at the
+    /// six-operator model's documented curves.
+    #[test]
+    fn modulator_laws() {
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        // voice LFO rates: the tables, the extended one straight between every fifth value
+        assert_eq!((lfo_hz(false, 0), lfo_hz(false, 99)), (0.08380198, 49.79553));
+        assert_eq!((lfo_hz(true, 2), lfo_hz(true, 415)), (0.1675321, 1356.592));
+        assert!(near(lfo_hz(true, 12), (0.8370164 * 3.0 + 1.257364 * 2.0) / 5.0));
+        // delay: none at 0; the hold at 99 2.66 s; each fifth of a row of 16 values doubles
+        assert_eq!(lfo_delay_s(0), 0.0);
+        assert!(near(lfo_delay_s(99), 2_147_483_648.0 / (25_190_424.0 * 32.0)));
+        assert!(near(lfo_delay_s(83) / lfo_delay_s(99), 0.5));
+        // pitch: depth 99 with offset 7 swings 2400 cents, depth 30 with offset 7 722 (measured
+        // +-722), offset 0 none
+        assert_eq!(lfo_pitch_cents(99, 7), 2400.0);
+        assert!(near(lfo_pitch_cents(30, 7), 77.0 * 256.0 * 1200.0 / 32768.0));
+        assert_eq!(lfo_pitch_cents(99, 0), 0.0);
+        // amplitude: 0.375 dB steps (depth 30: 16 steps), offsets in eighths (3: 4 eighths)
+        assert_eq!((lfo_amp_db(30), lfo_amp_db(99), lfo_amp_db(1)), (6.0, 96.0, 0.0));
+        assert_eq!((lfo_amp_share(3), lfo_amp_share(7)), (0.5, 1.0));
+        // the bend: within 0.06 dB of straight to 30 dB; depth 99 at offsets 3 and 4 (48 and 60 dB
+        // straight) play 48.50 and 62.64 dB (the reference 48.7 and 62.8); the inverse returns the
+        // straight loss
+        assert!((amp_loss_db(30.0) - 30.059).abs() < 1e-3 && (amp_loss_db(48.0) - 48.503).abs() < 1e-3);
+        assert!((amp_loss_db(60.0) - 62.641).abs() < 1e-3);
+        for db in [3.0, 47.0, 61.0, 70.0] {
+            assert!((amp_loss_db(amp_straight_db(db)) - db).abs() < 1e-9, "{db}");
+        }
+        assert!(amp_loss_db(1000.0) >= 200.0);
+        // level scaling: none within the break point's group; +linear 7 steps a group at depth 99
+        // above it, -linear the mirror below; the exponential curves 250/32768 of 329 x depth
+        // steps at the far end (whole steps, cut down)
+        let step = 32.0 * 6.020_599_913_279_624 / 256.0;
+        assert_eq!(level_scaling_db(56, 39, (99, 0), (99, 3)), 0.0);
+        assert!(near(level_scaling_db(60, 39, (0, 0), (99, 3)), 7.0 * step));
+        assert!(near(level_scaling_db(52, 39, (99, 0), (0, 0)), -7.0 * step));
+        assert!(near(level_scaling_db(127, 0, (0, 0), (99, 2)), 248.0 * step));
+        assert!(near(level_scaling_db(127, 0, (0, 0), (99, 1)), -248.0 * step));
+        assert_eq!(level_scaling_db(127, 0, (99, 3), (0, 3)), 0.0);
+        // part offsets: 1.5 values a step; the attack factor 2^(offset / 4); sustain's table
+        assert_eq!((aeg_offset_steps(-8), aeg_offset_steps(3), aeg_offset_steps(63)), (-12, 5, 95));
+        assert_eq!((aeg_attack_scale(4), aeg_attack_scale(-8)), (2.0, 0.25));
+        assert_eq!((aeg_sustain_steps(2), aeg_sustain_steps(3), aeg_sustain_steps(32)), (2, 4, 49));
+        assert_eq!((aeg_sustain_steps(-22), aeg_sustain_steps(-24), aeg_sustain_steps(63)), (-33, -36, 96));
+        // the ratio macro at measured points, between ratios, and its floor
+        assert_eq!(shifted_ratio(2.0, 0), 2.0);
+        assert!(near(shifted_ratio(1.0, 99), 17.938_000_679_016_113));
+        assert!(near(shifted_ratio(16.0, -99), 13.861_000_061_035_156));
+        assert!(near(shifted_ratio(32.0, 99), 32.0 + 33.347_000_122_070_31 - 16.0));
+        assert!(near(shifted_ratio(1.25, 3), 1.25 + (0.018_000_006_675_720_215 + 0.020_000_100_135_803_223) / 2.0));
+        assert_eq!(shifted_ratio(0.5, -99), 0.5);
+        // texture: carriers below 0, modulators above; a harmonic form at spread 3 (place +26)
+        // plays a sine at -25 and the second harmonic form at spread 4 at -50; round past 99
+        assert_eq!(texture(-25, false, 1, 3, 0), Some((0, 0, 0, 0.0)));
+        assert_eq!(texture(-50, false, 1, 3, 0), Some((2, 4, 0, 0.0)));
+        assert_eq!((texture(-25, true, 1, 3, 0), texture(25, false, 1, 3, 0)), (None, None));
+        assert_eq!(texture(33, true, 0, 0, 0), Some((0, 0, 0, -6.17)));
+        assert_eq!(texture(1, true, 5, 7, 99), Some((6, 7, 99, 0.0)));
     }
 }
