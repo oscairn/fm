@@ -251,10 +251,9 @@ struct Lane {
     top: [[f32; W]; OPS],
     /// Each voice's gain on everything: 1, falling to 0 while it is shed; 0 in a free slot.
     fade: [f32; W],
-    /// Read only when a segment changes: the segment, frames left of the hold, each segment's rate.
+    /// Read only when a segment changes: the segment, frames left of the hold.
     seg: [[u8; W]; OPS],
     count: [[u32; W]; OPS],
-    rates: [[[f32; W]; 4]; OPS],
     /// Envelopes that can change segment, bit 4 op + slot.
     watch: u32,
     sound: u8,
@@ -283,7 +282,6 @@ const LANE0: Lane = Lane {
     fade: [0.0; W],
     seg: [[DONE; W]; OPS],
     count: [[0; W]; OPS],
-    rates: [[[0.0; W]; 4]; OPS],
     watch: 0,
     sound: 0,
     used: 0,
@@ -324,21 +322,21 @@ fn get<T: Copy + Default>(a: &[[T; W]; OPS], op: usize, s: usize) -> T {
 }
 
 impl Lane {
-    /// Enters segment `seg` of operator `op`'s envelope in slot `s`.
-    fn enter(&mut self, p: &Prepared, op: usize, s: usize, seg: u8) {
+    /// Enters segment `seg` of operator `op`'s envelope in slot `s` (at `rate` Hz).
+    fn enter(&mut self, p: &Prepared, op: usize, s: usize, seg: u8, rate: f64) {
         let top = get(&self.top, op, s);
         let full = top - (laws::ATTACK_OVER_DB * DPD) as f32;
         let k = usize::from(seg.saturating_sub(1)).min(3);
         let (mut tgt, mut fall) = (get(&self.lvl, op, s), 0.0);
         if (ATTACK..=RELEASE).contains(&seg) {
             tgt = (full + p.eg.get(op).and_then(|e| e.get(k)).copied().unwrap_or(FLOOR)).max(FLOOR);
-            fall = self
-                .rates
-                .get(op)
-                .and_then(|r| r.get(k))
-                .and_then(|r| r.get(s))
-                .copied()
-                .unwrap_or(0.0);
+            // the segment's fall a step, its time moved by time key follow at the note's key
+            let key = i32::from(self.key.get(s).copied().unwrap_or(0)) + i32::from(p.note_shift);
+            let ks = laws::time_key_follow_steps(i32::from(p.time_key_follow.get(op).copied().unwrap_or(0)), key);
+            let ms = f64::from(p.ms.get(op).and_then(|m| m.get(k)).copied().unwrap_or(1.0));
+            let from = i32::from(p.rate_step.get(op).and_then(|r| r.get(k)).copied().unwrap_or(0));
+            let scale = laws::rate(from) / laws::rate(from.saturating_add(ks).clamp(0, 127));
+            fall = (STEP as f64 * 1000.0 / (ms * scale * rate) * DPD) as f32;
         }
         if seg == ATTACK {
             let start = get(&self.lvl, op, s).max(full - (laws::ATTACK_START_DB * DPD) as f32);
@@ -412,7 +410,6 @@ impl Lane {
         col(&mut self.top, from, to);
         col(&mut self.seg, from, to);
         col(&mut self.count, from, to);
-        self.rates.iter_mut().for_each(|r| col(r, from, to));
         one(&mut self.fade, from, to);
         one(&mut self.key, from, to);
         one(&mut self.id, from, to);
@@ -428,11 +425,11 @@ impl Lane {
         self.free(from);
     }
 
-    fn release(&mut self, p: &Prepared, s: usize) {
+    fn release(&mut self, p: &Prepared, s: usize, rate: f64) {
         self.held &= !bit(s);
         self.sustained &= !bit(s);
         for op in (0..OPS).filter(|&op| has(u32::from(p.plan.live), op)) {
-            self.enter(p, op, s, RELEASE);
+            self.enter(p, op, s, RELEASE, rate);
         }
     }
 
@@ -635,30 +632,15 @@ impl Engine {
             if has(u32::from(p.reset), op) {
                 put(&mut lane.ph, op, s, 0);
             }
-            // level and the envelope's rates for this key and velocity
+            // level for this velocity
             let full =
                 p.full.get(op).copied().unwrap_or(FLOOR) + (laws::velocity_db(at(&p.level_velocity), v) * DPD) as f32;
             put(&mut lane.top, op, s, full + (laws::ATTACK_OVER_DB * DPD) as f32);
-            let ks = laws::time_key_follow_steps(i32::from(p.time_key_follow.get(op).copied().unwrap_or(0)), key);
-            for k in 0..4 {
-                let ms = f64::from(p.ms.get(op).and_then(|m| m.get(k)).copied().unwrap_or(1.0));
-                let from = i32::from(p.rate_step.get(op).and_then(|r| r.get(k)).copied().unwrap_or(0));
-                let scale = laws::rate(from) / laws::rate(from.saturating_add(ks).clamp(0, 127));
-                let r = STEP as f64 * 1000.0 / (ms * scale * rate) * DPD;
-                if let Some(x) = lane
-                    .rates
-                    .get_mut(op)
-                    .and_then(|r| r.get_mut(k))
-                    .and_then(|r| r.get_mut(s))
-                {
-                    *x = r as f32;
-                }
-            }
             let start = (full + p.eg.get(op).map_or(FLOOR, |e| e[3])).max(FLOOR);
             put(&mut lane.lvl, op, s, start);
             let hold = f64::from(p.hold_ms.get(op).copied().unwrap_or(0.0)) * rate / 1000.0 / STEP as f64 + 0.5;
             put(&mut lane.count, op, s, (hold as u32).saturating_mul(STEP as u32));
-            lane.enter(&p, op, s, if hold as u32 > 0 { HOLD } else { ATTACK });
+            lane.enter(&p, op, s, if hold as u32 > 0 { HOLD } else { ATTACK }, rate);
         }
     }
 
@@ -676,7 +658,7 @@ impl Engine {
                         lane.held &= !bit(s);
                         lane.sustained |= bit(s);
                     } else {
-                        lane.release(&p, s);
+                        lane.release(&p, s, self.rate);
                     }
                 }
             }
@@ -698,7 +680,7 @@ impl Engine {
             {
                 for s in 0..W {
                     if has(u32::from(lane.sustained), s) {
-                        lane.release(&p, s);
+                        lane.release(&p, s, self.rate);
                     }
                 }
             }
@@ -795,7 +777,7 @@ impl Engine {
         to: usize,
         end: &mut impl FnMut(NoteEnd),
     ) {
-        let shed_step = self.shed_step;
+        let shed_step = (self.shed_step, self.rate);
         let (y1, y4) = (&mut self.y1, &mut self.y4);
         let Some(p) = self.sounds.get(usize::from(sound)) else {
             return;
@@ -826,7 +808,7 @@ impl Engine {
 fn step<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
-    shed_step: f32,
+    shed_step: (f32, f64),
     end: &mut impl FnMut(NoteEnd),
     out: &mut [f32],
     y: &mut [[[f32; L]; STEP]; OPS],
@@ -892,7 +874,7 @@ fn short<const L: usize>(
 fn envelopes<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
-    shed_step: f32,
+    (shed_step, rate): (f32, f64),
     n: usize,
     end: &mut impl FnMut(NoteEnd),
 ) -> ([[f32; L]; OPS], [[f32; L]; OPS]) {
@@ -956,11 +938,11 @@ fn envelopes<const L: usize, V: F4<L>>(
                 let c = get(&lane.count, op, s).saturating_sub(n as u32);
                 put(&mut lane.count, op, s, c);
                 if c == 0 {
-                    lane.enter(p, op, s, ATTACK);
+                    lane.enter(p, op, s, ATTACK, rate);
                 }
             }
-            ATTACK | DECAY1 if reached => lane.enter(p, op, s, seg.saturating_add(1)),
-            RELEASE if reached => lane.enter(p, op, s, DONE),
+            ATTACK | DECAY1 if reached => lane.enter(p, op, s, seg.saturating_add(1), rate),
+            RELEASE if reached => lane.enter(p, op, s, DONE, rate),
             _ => {}
         }
     }
