@@ -188,6 +188,8 @@ pub struct Prepared {
     lfo_amp: [f32; OPS],
     lfo_pitch_on: bool,
     lfo_amp_on: bool,
+    /// Whether the voice LFO reaches anything (pitch, amplitude, the cutoff).
+    lfo_on: bool,
     /// The voice LFO's speed value and range (for the sound LFO's speed destination).
     lfo_speed: (bool, i16),
     /// The sound LFO, one a sound (docs/design.md, 3.6): what it moves (`SLFO_*` bits, 0: it does
@@ -328,6 +330,7 @@ impl Prepared {
             lfo_amp: [0.0; OPS],
             lfo_pitch_on: false,
             lfo_amp_on: false,
+            lfo_on: false,
             lfo_speed: (false, 0),
             slfo: 0,
             slfo_hz: 0.0,
@@ -493,6 +496,7 @@ impl Prepared {
         }
         p.lfo_pitch_on = p.lfo_pitch.iter().any(|&x| x != 0.0);
         p.lfo_amp_on = p.lfo_amp.iter().any(|&x| x != 0.0);
+        p.lfo_on = p.lfo_pitch_on || p.lfo_amp_on || p.filter.uses_lfo();
         p.lfo_speed = (c(Common::LfoSpeedRange) != 0, s.get(Common::LfoSpeed as usize));
         if p.lfo_speed.0 {
             p.lfo_speed.1 = s.get(Common::LfoExtendedSpeed as usize);
@@ -512,11 +516,6 @@ impl Prepared {
         p.slfo_fbk = core::array::from_fn(|f| fbk(f as i32));
         p.prepare_slfo(s, &dests);
         p
-    }
-
-    /// Whether the voice LFO reaches anything (pitch, amplitude, the cutoff).
-    fn lfo_on(&self) -> bool {
-        self.lfo_pitch_on || self.lfo_amp_on || self.filter.uses_lfo()
     }
 
     /// The sound LFO's laws (docs/design.md, 3.6), from the sound `s` and its destinations
@@ -561,7 +560,7 @@ impl Prepared {
             } else {
                 0
             }
-            | if self.slfo_speed != 0.0 && self.lfo_on() {
+            | if self.slfo_speed != 0.0 && self.lfo_on {
                 SLFO_SPEED
             } else {
                 0
@@ -1087,10 +1086,10 @@ pub struct Engine {
     y4: [[[f32; W]; STEP]; OPS],
     /// Sounds whose next note takes alternate pan's other side, a bit each.
     alt: u8,
-    /// The block's sum of the sounds without pan (added to both channels at its end), and whether
-    /// any added to it.
-    mono: [f32; BLOCK],
-    mono_on: bool,
+    /// The block's sum of the sounds with pan, left and right (added at its end to the sum of the
+    /// others, which is both channels'), and whether any added to it.
+    pan: [[f32; BLOCK]; 2],
+    pan_on: bool,
     /// Notes waiting out their sound's key-on delay: the sound, the note and the frame it starts at
     /// (from the block's start); the first `delayed_n` are in use.
     delayed: [(u8, Held, u32); DELAYED],
@@ -1125,8 +1124,8 @@ impl Engine {
             y1: [[[0.0; 1]; STEP]; OPS],
             y4: [[[0.0; W]; STEP]; OPS],
             alt: 0,
-            mono: [0.0; BLOCK],
-            mono_on: false,
+            pan: [[0.0; BLOCK]; 2],
+            pan_on: false,
             delayed: [(0, Held::default(), 0); DELAYED],
             delayed_n: 0,
         }
@@ -1702,8 +1701,8 @@ impl Engine {
         true
     }
 
-    /// Adds one block of every sounding voice to `out` (left, right); reports the notes that ended.
-    /// A sound without pan plays the same in both channels.
+    /// Writes one block of every sounding voice to `out` (left, right); reports the notes that
+    /// ended. A sound without pan plays the same in both channels.
     pub fn render<V: F4>(&mut self, out: &mut [[f32; BLOCK]; 2], end: &mut impl FnMut(NoteEnd)) {
         self.render_events::<V>(out, &[], end);
     }
@@ -1717,7 +1716,9 @@ impl Engine {
         events: &[Event],
         end: &mut impl FnMut(NoteEnd),
     ) {
-        self.mono_on = false;
+        // the sounds without pan add to the left channel, copied to the right at the end; those
+        // with pan to their own pair
+        (out[0], self.pan_on) = ([0.0; BLOCK], false);
         // parameter changes that waited for their sound to fall silent
         for sound in 0..SOUNDS {
             if !has(u32::from(self.pending), sound) || self.busy(sound) {
@@ -1728,15 +1729,18 @@ impl Engine {
             }
             self.pending &= !bit(sound);
         }
-        while self.keeping(None) > self.limit && self.shed(None, None) {}
-        for (sound, lim) in (0..SOUNDS as u8).zip(self.limits).filter(|(_, l)| l.limit > 0) {
-            while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
-        }
         let busy = self
             .lanes
             .iter()
             .filter(|l| l.used != 0)
             .fold(0, |m, l| m | bit(usize::from(l.sound)));
+        // (without a voice there is nothing to shed)
+        if busy != 0 {
+            while self.keeping(None) > self.limit && self.shed(None, None) {}
+            for (sound, lim) in (0..SOUNDS as u8).zip(self.limits).filter(|(_, l)| l.limit > 0) {
+                while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
+            }
+        }
         let busy = events.iter().fold(busy, |m, e| m | bit(usize::from(e.sound)));
         let busy = (self.delayed.iter().take(self.delayed_n)).fold(busy, |m, d| m | bit(usize::from(d.0)));
         for sound in (0..SOUNDS as u8).filter(|&s| has(u32::from(busy), usize::from(s))) {
@@ -1765,11 +1769,14 @@ impl Engine {
             }
             self.render_sound::<V>(sound, out, from, BLOCK, end);
         }
-        if self.mono_on {
-            let [l, r] = out;
-            for ((l, r), m) in l.iter_mut().zip(r.iter_mut()).zip(self.mono.iter()) {
-                (*l, *r) = (*l + *m, *r + *m);
+        let [l, r] = out;
+        if self.pan_on {
+            let [pl, pr] = &self.pan;
+            for (((l, r), pl), pr) in l.iter_mut().zip(r.iter_mut()).zip(pl).zip(pr) {
+                (*l, *r) = (*l + *pl, *l + *pr);
             }
+        } else {
+            *r = *l;
         }
         for d in self.delayed.iter_mut().take(self.delayed_n) {
             d.2 = d.2.saturating_sub(BLOCK as u32);
@@ -1791,12 +1798,13 @@ impl Engine {
         let Some(p) = self.sounds.get(usize::from(sound)) else {
             return;
         };
-        // a sound without pan adds to the block's mono sum, cleared when first used
-        if !p.filter.pan_on && !self.mono_on && self.lanes.iter().any(|l| l.used != 0 && l.sound == sound) {
-            (self.mono, self.mono_on) = ([0.0; BLOCK], true);
+        // a sound with pan adds to the block's pair for those, cleared when first used
+        let panned = p.filter.pan_on;
+        if panned && !self.pan_on && self.lanes.iter().any(|l| l.used != 0 && l.sound == sound) {
+            (self.pan, self.pan_on) = ([[0.0; BLOCK]; 2], true);
         }
-        let mono = &mut self.mono;
-        let [left, right] = out;
+        let [left, right] = &mut self.pan;
+        let mono = &mut out[0];
         let c = Ctx {
             rate: self.rate,
             shed_step: self.shed_step,
@@ -1821,19 +1829,17 @@ impl Engine {
             let mut k = 0usize;
             while f < to {
                 let e = to.min(f.saturating_add(STEP));
-                let (Some(m), Some(l), Some(r)) = (mono.get_mut(f..e), left.get_mut(f..e), right.get_mut(f..e)) else {
-                    break;
+                let o = if panned {
+                    left.get_mut(f..e).zip(right.get_mut(f..e)).map(|(l, r)| Out::Pan(l, r))
+                } else {
+                    mono.get_mut(f..e).map(Out::Mono)
                 };
+                let Some(o) = o else { break };
                 let t = clock.wrapping_add(f as u64);
                 f = e;
                 let v = sv.get(k).copied().unwrap_or(0.0);
                 k = k.wrapping_add(1);
                 lane.compact();
-                let o = Out {
-                    mono: m,
-                    left: l,
-                    right: r,
-                };
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
@@ -2047,11 +2053,10 @@ type Incs<const L: usize> = [[u32; L]; OPS];
 /// The highest increment (the largest `f32` below 2^31).
 const MAX_INC: f32 = 2_147_483_520.0;
 
-/// Where a step of a lane goes: the mono sum (a sound without pan), or left and right.
-struct Out<'a> {
-    mono: &'a mut [f32],
-    left: &'a mut [f32],
-    right: &'a mut [f32],
+/// Where a step of a lane goes: the sum of the sounds without pan, or left and right.
+enum Out<'a> {
+    Mono(&'a mut [f32]),
+    Pan(&'a mut [f32], &'a mut [f32]),
 }
 
 /// One control step of a lane at width `L` (its voices in its first `L` slots), added to `out`
@@ -2069,9 +2074,13 @@ fn step<const L: usize, V: F4<L>>(
     y: &mut [[[f32; L]; STEP]; OPS],
     sv: f32,
 ) {
-    let n = out.mono.len().clamp(1, STEP);
+    let n = match &out {
+        Out::Mono(m) => m.len(),
+        Out::Pan(l, _) => l.len(),
+    }
+    .clamp(1, STEP);
     // a sound without a voice LFO skips this; the sound LFO's speed destination moves its rate
-    let lfo = p.lfo_on().then(|| {
+    let lfo = p.lfo_on.then(|| {
         let inc = if p.slfo & SLFO_SPEED != 0 {
             let speed = i32::from(p.lfo_speed.1).saturating_add((sv * p.slfo_speed) as i32);
             lfo_inc(laws::lfo_hz(p.lfo_speed.0, speed) as f32, c.rate)
@@ -2117,17 +2126,13 @@ fn step<const L: usize, V: F4<L>>(
         let lfo = lfo.as_ref().map_or(&[0.0; W], |l| &l.0);
         lane.post.filter::<L, V>(&p.filter, c.rate, sv, lfo, n, &mut vout);
     }
-    if p.filter.pan_on {
-        return lane.post.mix(&p.filter, sv, &vout, out.left, out.right);
-    }
-    // the voices in pairs, as four-wide (the missing ones' zeros change no bits)
-    for (o, v) in out.mono.iter_mut().zip(vout.iter()) {
-        *o += match v.as_slice() {
-            [a] => *a,
-            [a, b] => *a + *b,
-            [a, b, c, d] => (*a + *b) + (*c + *d),
-            _ => 0.0,
-        };
+    match out {
+        Out::Pan(l, r) => lane.post.mix::<L, V>(&p.filter, sv, &vout, l, r),
+        Out::Mono(m) => {
+            for (o, v) in m.iter_mut().zip(vout.iter()) {
+                *o += crate::filter::sum(v);
+            }
+        }
     }
 }
 
@@ -2846,19 +2851,22 @@ mod tests {
     }
 
     impl Engine {
-        /// [`Engine::render`] of sounds without pan: one channel, checked to be both.
+        /// [`Engine::render`] of sounds without pan: one channel, checked to be both, added to
+        /// `out`.
         fn render1<V: F4>(&mut self, out: &mut [f32; BLOCK], end: &mut impl FnMut(NoteEnd)) {
             self.render1_events::<V>(out, &[], end);
         }
 
         fn render1_events<V: F4>(&mut self, out: &mut [f32; BLOCK], events: &[Event], end: &mut impl FnMut(NoteEnd)) {
-            let mut o = [*out; 2];
+            let mut o = [[f32::NAN; BLOCK]; 2]; // (written, whatever it held)
             self.render_events::<V>(&mut o, events, end);
             assert!(
-                o[0].iter().zip(o[1].iter()).all(|(l, r)| l.to_bits() == r.to_bits()),
-                "left and right differ"
+                o[0].iter()
+                    .zip(o[1].iter())
+                    .all(|(l, r)| l.to_bits() == r.to_bits() && !l.is_nan()),
+                "left and right differ, or a frame was not written"
             );
-            *out = o[0];
+            out.iter_mut().zip(o[0]).for_each(|(a, b)| *a += b);
         }
     }
 
@@ -4004,7 +4012,8 @@ mod tests {
                 }
             }
             ev.sort_by_key(|e| e.frame);
-            let (mut oa, mut ob) = ([[0.0; BLOCK]; 2], [[0.0; BLOCK]; 2]);
+            // (every frame is written: a NaN left would fail below)
+            let (mut oa, mut ob) = ([[f32::NAN; BLOCK]; 2], [[f32::NAN; BLOCK]; 2]);
             a.render_events::<Native>(&mut oa, &ev, &mut |n| record(n, &mut ended));
             b.render_events::<scalar::F>(&mut ob, &ev, &mut |_| {});
             let (oa, ob) = (oa.as_flattened(), ob.as_flattened());

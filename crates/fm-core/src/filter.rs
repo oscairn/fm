@@ -623,10 +623,22 @@ fn bit(s: usize) -> u8 {
 }
 
 /// 2 sin(pi x) for x in [0, 1/6] (the cutoff over the rate): a degree-7 polynomial, 1e-8.
-fn two_sin_pi(x: f32) -> f32 {
-    let t = core::f32::consts::PI * x;
+#[inline(always)]
+fn two_sin_pi<const L: usize, V: F4<L>>(x: V) -> V {
+    let t = x * V::splat(core::f32::consts::PI);
     let t2 = t * t;
-    2.0 * t * (1.0 + t2 * (-1.0 / 6.0 + t2 * (1.0 / 120.0 - t2 / 5040.0)))
+    let p = t2.mul_add(V::splat(-1.0 / 5040.0), V::splat(1.0 / 120.0));
+    let p = t2.mul_add(p, V::splat(-1.0 / 6.0));
+    let p = t2.mul_add(p, V::splat(1.0));
+    t * V::splat(2.0) * p
+}
+
+/// `f` lane by lane of `a` and `b` (the rare scalar parts of the coefficients).
+#[inline(always)]
+fn lanes<const L: usize, V: F4<L>>(a: V, b: V, f: impl Fn(f32, f32) -> f32) -> V {
+    let (mut a, b) = (a.store(), b.store());
+    a.iter_mut().zip(b).for_each(|(a, b)| *a = f(*a, b));
+    V::load(a)
 }
 
 /// The rate's part in the coefficients: 1 / rate, the top cutoff (7350 Hz, or a sixth of the rate
@@ -647,75 +659,82 @@ impl Rate {
         }
     }
 
-    /// A section at cutoff `fc` Hz with `damping`, held at the top and to the most damping there,
-    /// and never where it turns unstable (which at 44.1 kHz and above the least Q already keeps it
-    /// from).
-    fn section(&self, fc: f32, damping: f32) -> (f32, f32) {
-        let fc = fc.max(1.0).min(self.top);
-        let f = two_sin_pi(fc * self.inv);
-        let d = if fc > MIN_Q_HZ[0] {
-            damping.min(max_damping(fc))
-        } else {
-            damping.min(2.0)
-        };
-        (
-            f,
-            if self.slow {
-                d.min(0.95 * (2.0 / f - f / 2.0))
-            } else {
-                d
-            },
-        )
+    /// Sections at cutoffs `fc` Hz with `damping`, held at the top and to the most damping there,
+    /// and never where they turn unstable (which at 44.1 kHz and above the least Q already keeps
+    /// them from).
+    #[inline(always)]
+    fn section<const L: usize, V: F4<L>>(&self, fc: V, damping: V) -> (V, V) {
+        let fc = fc.max(V::splat(1.0)).min(V::splat(self.top));
+        let f = two_sin_pi(fc * V::splat(self.inv));
+        let mut d = damping.min(V::splat(2.0));
+        // the least Q rises from 3.06 kHz
+        if fc.store().iter().any(|&x| x > MIN_Q_HZ[0]) {
+            d = lanes(d, fc, |d, fc| d.min(max_damping(fc)));
+        }
+        if self.slow {
+            d = lanes(d, f, |d, f| d.min(0.95 * (2.0 / f - f / 2.0)));
+        }
+        (f, d)
     }
 }
 
-/// A second section at `ratio` times the first's F (the dual types, the 18 dB "s" type): beyond the
-/// first's limit up to F = 1.75, its damping limited only where it would turn unstable (shortcut:
-/// the reference's limit above F = 1 is unmeasured).
-fn second(f: f32, d: f32, damping: f32, ratio: f32) -> (f32, f32) {
-    let f2 = (f * ratio).min(1.75);
-    let edge = 2.0 / f2 - f2 / 2.0;
-    (
-        f2,
-        if f2 > 1.0 {
+/// Second sections at `ratio` times the first's F (the dual types, the 18 dB "s" type): beyond the
+/// first's limit up to F = 1.75, their damping limited only where they would turn unstable
+/// (shortcut: the reference's limit above F = 1 is unmeasured).
+#[inline(always)]
+fn second<const L: usize, V: F4<L>>(f: V, d: V, damping: V, ratio: f32) -> (V, V) {
+    let f2 = (f * V::splat(ratio)).min(V::splat(1.75));
+    let (fs, mut ds, dps) = (f2.store(), d.store(), damping.store());
+    for ((d, f2), damping) in ds.iter_mut().zip(fs).zip(dps) {
+        let edge = 2.0 / f2 - f2 / 2.0;
+        *d = if f2 > 1.0 {
             damping.min(0.9 * edge)
         } else {
             d.min(0.95 * edge)
-        },
-    )
+        };
+    }
+    (f2, V::load(ds))
 }
 
 impl Laws {
-    /// One voice's coefficient targets (F and damping of each section, the one-pole's F) for the
-    /// cutoffs `hz`, at the cutoff ratio `ratio` and `oct` octaves of the envelope and the LFO,
-    /// with `damping` (1 / Q).
-    fn targets(&self, rate: &Rate, hz: [f32; 2], ratio: f32, oct: f32, damping: f32, hpf: f32) -> [f32; 5] {
-        let mv = scalar::F::<1>::splat(oct.clamp(-15.0, 15.0) - 15.0).exp2().0[0] * 32768.0 * ratio;
-        let sec = |fc: f32, d: f32| rate.section(fc, d);
+    /// The coefficient targets of a lane's voices (F and damping of each section, the one-pole's
+    /// F) for the cutoffs `hz`, at the cutoff ratios `ratio` and `oct` octaves of the envelope and
+    /// the LFOs, with `damping` (1 / Q) and the high-passes `hpf` (Hz).
+    #[inline(always)]
+    fn targets<const L: usize, V: F4<L>>(
+        &self,
+        rate: &Rate,
+        hz: [f32; 2],
+        ratio: V,
+        oct: V,
+        damping: V,
+        hpf: V,
+    ) -> [V; 5] {
+        let (zero, one) = (V::splat(0.0), V::splat(1.0));
+        let oct = oct.max(V::splat(-15.0)).min(V::splat(15.0)) - V::splat(15.0);
+        let mv = oct.exp2() * V::splat(32768.0) * ratio;
+        let at = |hz: f32| mv * V::splat(hz);
         if self.kind == Kind::BpWide {
-            let ((f0, d0), (f1, d1)) = (sec(hz[1] * mv, 1.0), sec(hz[0] * mv, 1.0));
-            return [f0, d0, f1, d1, 0.0];
+            let ((f0, d0), (f1, d1)) = (rate.section(at(hz[1]), one), rate.section(at(hz[0]), one));
+            return [f0, d0, f1, d1, zero];
         }
-        let (f, d) = sec(hz[0] * mv, damping);
+        let (f, d) = rate.section(at(hz[0]), damping);
         match self.kind {
-            Kind::Lp24A => {
-                let (_, d1) = sec(hz[0] * mv, 1.0);
-                [f, d1, f, d, 0.0]
-            }
+            Kind::Lp24A => [f, rate.section(at(hz[0]), one).1, f, d, zero],
             Kind::Lp18S => {
                 let (f2, d2) = second(f, d, damping, self.ratio2);
-                [f2, d2, 0.0, 0.0, f]
+                [f2, d2, zero, zero, f]
             }
             Kind::Lp12Hp12 | Kind::Lp6Hp12 => {
-                let (fh, dh) = sec(hpf, 1.0);
+                let (fh, dh) = rate.section(hpf, one);
                 [f, d, fh, dh, f]
             }
             Kind::DualLp | Kind::DualHp | Kind::DualBp | Kind::DualBe => {
                 let (f2, d2) = second(f, d, damping, self.ratio2);
-                [f, d, f2, d2, 0.0]
+                [f, d, f2, d2, zero]
             }
             // the band-pass section's Q is 1.13 times the low-pass's (fitted)
-            Kind::Lp12Bp6 => [f, d, f, d / 1.13, 0.0],
+            Kind::Lp12Bp6 => [f, d, f, d * V::splat(1.0 / 1.13), zero],
             _ => [f, d, f, d, f],
         }
     }
@@ -800,6 +819,17 @@ impl<const L: usize, V: F4<L>> Kern<'_, V, L> {
     }
 }
 
+/// A lane's voices summed in pairs, as four-wide (so a missing voice's zero changes no bits).
+#[inline(always)]
+pub(crate) fn sum<const L: usize>(v: &[f32; L]) -> f32 {
+    match v.as_slice() {
+        [a] => *a,
+        [a, b] => *a + *b,
+        [a, b, c, d] => (*a + *b) + (*c + *d),
+        _ => 0.0,
+    }
+}
+
 /// `x` with every lane below `TINY` in magnitude set to 0.
 #[inline(always)]
 fn flush<const L: usize, V: F4<L>>(x: V) -> V {
@@ -862,6 +892,21 @@ impl Voices {
 
     /// Slot `s`'s envelope `n` frames on: its level (cents).
     fn advance(&mut self, f: &Laws, s: usize, n: f32, rate: f64) -> f32 {
+        // most steps: standing still, or inside a segment
+        let (seg, left, lvl) = (
+            self.seg.get(s).copied().unwrap_or(DONE),
+            at(&self.left, s),
+            at(&self.lvl, s),
+        );
+        if seg >= DONE || (seg == 3 && left <= 0.0) {
+            return lvl;
+        }
+        if left > n {
+            let lvl = lvl + at(&self.step, s) * n;
+            put(&mut self.lvl, s, lvl);
+            put(&mut self.left, s, left - n);
+            return lvl;
+        }
         let mut todo = n;
         // a step crosses at most every segment once
         for _ in 0..6 {
@@ -939,21 +984,20 @@ impl Voices {
         } else {
             1.0
         };
-        let mut t = [[0.0f32; W]; 5];
+        // the envelopes, then the coefficients of every voice at once
+        let mut lvl = [0.0f32; W];
         for s in 0..L {
-            let lvl = self.advance(f, s, n as f32, rate);
-            let oct = lvl * at(&self.depth, s) + at(lfo, s) * f.lfo_oct;
-            let damping = at(&self.damp, s) * dscale;
-            let c = f.targets(&rt, hz, at(&self.ratio, s), oct, damping, at(&self.hpf, s));
-            for (k, x) in c.into_iter().enumerate() {
-                if let Some(t) = t.get_mut(k) {
-                    put(t, s, x);
-                }
-                if self.fresh & bit(s) != 0 {
-                    if let Some(c) = self.c.get_mut(k) {
-                        put(c, s, x);
-                    }
-                }
+            put(&mut lvl, s, self.advance(f, s, n as f32, rate));
+        }
+        let ld = |a: &[f32; W]| V::load4(a);
+        let oct = ld(&lvl) * ld(&self.depth) + ld(lfo) * V::splat(f.lfo_oct);
+        let damping = ld(&self.damp) * V::splat(dscale);
+        let targets = f.targets(&rt, hz, ld(&self.ratio), oct, damping, ld(&self.hpf));
+        let mut t = [[0.0f32; W]; 5];
+        for ((t, x), c) in t.iter_mut().zip(targets).zip(self.c.iter_mut()) {
+            x.store4(t);
+            for s in (0..L).filter(|&s| self.fresh & bit(s) != 0) {
+                put(c, s, at(t, s));
             }
         }
         self.fresh = 0;
@@ -1023,7 +1067,7 @@ impl Voices {
     /// Adds a step of `n` frames of the lane's first `L` voices' outputs `y` to `left` and `right`
     /// through each voice's pan (its position, moved by the sound LFO's `sv`), the gains ramped
     /// across the step from the last step's.
-    pub(crate) fn mix<const L: usize>(
+    pub(crate) fn mix<const L: usize, V: F4<L>>(
         &mut self,
         f: &Laws,
         sv: f32,
@@ -1032,40 +1076,37 @@ impl Voices {
         right: &mut [f32],
     ) {
         let n = left.len().min(right.len()).clamp(1, STEP);
-        let (mut gl, mut gr, mut dl, mut dr) = ([0.0f32; L], [0.0f32; L], [0.0f32; L], [0.0f32; L]);
+        let (mut tl, mut tr) = (self.gl, self.gr);
         for s in 0..L {
-            let pos = laws::round(f64::from(at(&self.pos, s) + sv * f.slfo_pan));
-            let (l, r) = pan_gains(pos);
-            if self.fresh_pan & bit(s) != 0 {
-                put(&mut self.gl, s, l);
-                put(&mut self.gr, s, r);
-            }
-            if let (Some(a), Some(b), Some(c), Some(d)) = (gl.get_mut(s), gr.get_mut(s), dl.get_mut(s), dr.get_mut(s)) {
-                (*a, *b) = (at(&self.gl, s), at(&self.gr, s));
-                (*c, *d) = ((l - *a) / n as f32, (r - *b) / n as f32);
-            }
-            put(&mut self.gl, s, l);
-            put(&mut self.gr, s, r);
+            let (l, r) = pan_gains(laws::round(f64::from(at(&self.pos, s) + sv * f.slfo_pan)));
+            put(&mut tl, s, l);
+            put(&mut tr, s, r);
+        }
+        let fresh = self.fresh_pan;
+        for s in (0..L).filter(|&s| fresh & bit(s) != 0) {
+            put(&mut self.gl, s, at(&tl, s));
+            put(&mut self.gr, s, at(&tr, s));
         }
         self.fresh_pan = 0;
-        // the voices in pairs, as the mono sum
-        let sum = |v: &[f32; L], g: &[f32; L]| -> f32 {
-            let p = |i: usize| v.get(i).copied().unwrap_or(0.0) * g.get(i).copied().unwrap_or(0.0);
-            match L {
-                1 => p(0),
-                2 => p(0) + p(1),
-                _ => (p(0) + p(1)) + (p(2) + p(3)),
+        let (mut gl, mut gr) = (V::load4(&self.gl), V::load4(&self.gr));
+        let frames = y.iter().zip(left.iter_mut()).zip(right.iter_mut()).take(n);
+        if tl == self.gl && tr == self.gr {
+            for ((v, l), r) in frames {
+                let v = V::load(*v);
+                *l += sum(&(v * gl).store());
+                *r += sum(&(v * gr).store());
             }
-        };
-        for ((v, l), r) in y.iter().zip(left.iter_mut()).zip(right.iter_mut()).take(n) {
-            for s in 0..L {
-                if let (Some(a), Some(b), Some(c), Some(d)) = (gl.get_mut(s), gr.get_mut(s), dl.get(s), dr.get(s)) {
-                    (*a, *b) = (*a + c, *b + d);
-                }
-            }
-            *l += sum(v, &gl);
-            *r += sum(v, &gr);
+            return;
         }
+        let k = V::splat(1.0 / n as f32);
+        let (dl, dr) = ((V::load4(&tl) - gl) * k, (V::load4(&tr) - gr) * k);
+        for ((v, l), r) in frames {
+            let v = V::load(*v);
+            (gl, gr) = (gl + dl, gr + dr);
+            *l += sum(&(v * gl).store());
+            *r += sum(&(v * gr).store());
+        }
+        (self.gl, self.gr) = (tl, tr);
     }
 
     /// Empties slot `s`'s sections (a free slot in a four-wide lane is filtered too: it stays
