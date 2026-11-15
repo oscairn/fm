@@ -2265,6 +2265,11 @@ impl Engine {
         for d in self.delayed.iter_mut().take(self.delayed_n) {
             d.2 = d.2.saturating_sub(frames as u32);
         }
+        // the lanes emptied in the block leave the bits
+        let lanes = &self.lanes;
+        self.live = bits(self.live)
+            .filter(|&i| lanes.get(i).is_some_and(|l| l.used != 0))
+            .fold(0, |m, i| m | bit64(i));
         (self.clock, self.at) = (self.clock.wrapping_add(frames as u64), 0);
         w
     }
@@ -2318,16 +2323,13 @@ impl Engine {
         if let Some(l) = self.slfo.get_mut(usize::from(sound)).filter(|_| p.slfo != 0) {
             l.steps(p, self.rate, to.saturating_sub(from), &mut sv);
         }
-        let live = &mut self.live;
-        for i in bits(*live) {
-            let Some(lane) = self.lanes.get_mut(i) else { break };
-            if lane.used == 0 {
-                *live &= !bit64(i);
+        // only the lanes in use: a filter over every lane, the bit tested first, still touched about
+        // 40 lines more a block (measured); clearing bits in this loop changed the operator kernel's code
+        // (32 voices of a sound 1.1 % dearer), so the emptied lanes leave at the block's end
+        for i in bits(self.live) {
+            let Some(lane) = self.lanes.get_mut(i).filter(|l| l.used != 0 && l.sound == sound) else {
                 continue;
-            }
-            if lane.sound != sound {
-                continue;
-            }
+            };
             if panned && !*pan_on {
                 (*left, *right, *pan_on) = ([0.0; BLOCK], [0.0; BLOCK], true);
             } else if !panned && !*written {
@@ -2354,9 +2356,6 @@ impl Engine {
                     1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, o, y1, v, m),
                     _ => step::<W, V>(lane, p, &c, t, end, o, y4, v, m),
                 }
-            }
-            if lane.used == 0 {
-                *live &= !bit64(i);
             }
         }
     }
