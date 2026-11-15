@@ -344,6 +344,7 @@ pub enum Common {
     RandomPan = 0,
     AlternatePan = 1,
     ScalingPan = 2,
+    KeyOnDelay = 3,
     PitchVelocity = 6,
     RandomPitch = 7,
     PitchKeyFollow = 8,

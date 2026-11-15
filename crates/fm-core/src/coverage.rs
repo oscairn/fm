@@ -109,9 +109,11 @@ pub fn status(p: &Param) -> &'static str {
         // M3: both pitch envelopes, key follow, velocity, random pitch, detune, bend,
         // portamento, mono and key assign
         PLAYED
-    } else if starts(&["key_on_delay"]) {
-        "M5 (filter and output)"
+    } else if starts(&["key_on_delay_"]) {
+        // tempo sync and its note length
+        NO_TEMPO
     } else if starts(&[
+        "key_on_delay",
         "filter_",
         "cutoff",
         "resonance",
@@ -122,7 +124,7 @@ pub fn status(p: &Param) -> &'static str {
         "scaling_pan",
         "lfo_filter_depth",
     ]) {
-        // M5: the filter, its envelope and pan
+        // M5: key-on delay, the filter, its envelope and pan
         PLAYED
     } else {
         // the LFOs, macros, level scaling, part envelope offsets
@@ -191,7 +193,7 @@ mod tests {
     #[test]
     fn report() {
         let s = Sound::from_text(
-            "fm-sound/1\nrandom_pan=3 key_on_delay=4 algorithm=5 filter_type=18 slfo_depth1=3 slfo_dest2=72 \
+            "fm-sound/1\nrandom_pan=3 key_on_delay=4 key_on_delay_sync=1 algorithm=5 filter_type=18 slfo_depth1=3 slfo_dest2=72 \
              slfo_depth2=9 slfo_dest3=75 slfo_depth3=1 slfo_tempo_sync=1\nop2.level=50 op2.pitch_velocity=3 \
              op2.scaling_low_depth=3\n",
         )
@@ -202,7 +204,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (3, 4, "M5 (filter and output)"),
+                (4, 1, NO_TEMPO),
                 (100, 18, NO_TYPE),
                 (217, 1, NO_TEMPO),
                 (224, 2, effect)

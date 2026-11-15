@@ -158,6 +158,7 @@ pub extern "C" fn fm_nopanic_engine(
         (0, (pick / 3 % 128) as i16),
         (1, (pick / 5 % 128) as i16 - 64),
         (2, (pick / 7 % 128) as i16 - 64),
+        (3, (pick / 9 % 4) as i16),
         (29, (pick / 11 % 100) as i16),
         (100, (pick % 22) as i16),
         (101, (pick.wrapping_mul(37) % 1024) as i16),

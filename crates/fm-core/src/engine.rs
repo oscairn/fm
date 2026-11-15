@@ -46,6 +46,8 @@ const SEED: u32 = 0x2545_f491;
 const RETRIGGER_MS: f64 = 13.3;
 /// The keys a mono sound keeps to return to (more: the oldest is let go).
 const KEYS: usize = 16;
+/// Notes an instance keeps waiting out a key-on delay (more: a note ends at once).
+const DELAYED: usize = 32;
 
 /// Takes key `i` out of a mono sound's kept keys, the later ones moving down.
 fn remove(keys: &mut [Held; KEYS], i: usize) {
@@ -215,6 +217,8 @@ pub struct Prepared {
     slfo_fbk: [f32; 8],
     /// The filter, its envelope and pan (docs/design.md, 3.7).
     filter: Laws,
+    /// Key-on delay, ms (0: none).
+    delay_ms: f32,
 }
 
 /// What the sound LFO moves: pitch (frequency or detune), level, what the kernels play (form or
@@ -344,6 +348,8 @@ impl Prepared {
             forms: [(0, 0, 0); OPS],
             slfo_fbk: [0.0; 8],
             filter: Laws::new(s, &dests),
+            // shortcut: tempo sync plays the time (no tempo input; the coverage report names it)
+            delay_ms: laws::key_on_delay_ms(i32::from(s.get(Common::KeyOnDelay as usize))) as f32,
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -1085,6 +1091,10 @@ pub struct Engine {
     /// any added to it.
     mono: [f32; BLOCK],
     mono_on: bool,
+    /// Notes waiting out their sound's key-on delay: the sound, the note and the frame it starts at
+    /// (from the block's start); the first `delayed_n` are in use.
+    delayed: [(u8, Held, u32); DELAYED],
+    delayed_n: usize,
 }
 
 impl Engine {
@@ -1117,6 +1127,8 @@ impl Engine {
             alt: 0,
             mono: [0.0; BLOCK],
             mono_on: false,
+            delayed: [(0, Held::default(), 0); DELAYED],
+            delayed_n: 0,
         }
     }
 
@@ -1139,10 +1151,15 @@ impl Engine {
         }
     }
 
-    /// Whether a voice or a kept mono key of `sound` sounds.
+    /// Whether a voice, a kept mono key or a delayed note of `sound` sounds.
     fn busy(&self, sound: usize) -> bool {
         self.lanes.iter().any(|l| l.used != 0 && usize::from(l.sound) == sound)
             || self.keys_n.get(sound).is_some_and(|&n| n > 0)
+            || self
+                .delayed
+                .iter()
+                .take(self.delayed_n)
+                .any(|d| usize::from(d.0) == sound)
     }
 
     /// Sets parameter `id` of `sound` to the raw `value` (unknown ids and values out of range are
@@ -1173,6 +1190,20 @@ impl Engine {
     /// Fades out every voice of `sound` (each ends after its fade); a mono sound's keys kept to
     /// return to end at once.
     pub fn choke(&mut self, sound: usize, end: &mut impl FnMut(NoteEnd)) {
+        while let Some(i) = self
+            .delayed
+            .iter()
+            .take(self.delayed_n)
+            .position(|d| usize::from(d.0) == sound)
+        {
+            if let Some((s, h, _)) = self.undelay(i) {
+                end(NoteEnd {
+                    sound: s,
+                    key: h.key,
+                    id: h.id,
+                });
+            }
+        }
         for l in self.lanes.iter_mut().filter(|l| usize::from(l.sound) == sound) {
             l.ending |= l.used;
         }
@@ -1253,8 +1284,47 @@ impl Engine {
     /// portamento is on and its key is down (legato: the envelopes go on), else the sounding
     /// note fades out as a retrigger and the new one starts; a key still down is returned to when
     /// the newer one is released (last-note priority). With key assign single, a key played again
-    /// retriggers its sounding note.
+    /// retriggers its sounding note. With the sound's key-on delay the note waits that long, to the
+    /// frame (released before then, it never sounds).
     pub fn note_on(&mut self, sound: usize, id: u32, key: u8, velocity: f32, end: &mut impl FnMut(NoteEnd)) {
+        let s8 = sound as u8;
+        let delay = self.sounds.get(sound).map_or(0, |p| {
+            (f64::from(p.delay_ms) * self.rate / 1000.0 + 0.5).min(f64::from(u32::MAX / 2)) as u32
+        });
+        if delay == 0 {
+            return self.play(sound, id, key, velocity, end);
+        }
+        let h = Held { id, key, velocity };
+        match self.delayed.get_mut(self.delayed_n) {
+            Some(d) => {
+                *d = (s8, h, delay.saturating_add(self.at as u32));
+                self.delayed_n = self.delayed_n.wrapping_add(1);
+            }
+            None => end(NoteEnd { sound: s8, key, id }),
+        }
+    }
+
+    /// A delayed note of `sound` whose start is in this block at or after frame `from`, the
+    /// earliest: its place in the list and its frame.
+    fn due(&self, sound: u8, from: usize) -> Option<(usize, usize)> {
+        let d = self.delayed.iter().take(self.delayed_n).enumerate();
+        d.filter(|(_, d)| d.0 == sound && (d.2 as usize) < BLOCK)
+            .map(|(i, d)| (i, (d.2 as usize).max(from)))
+            .min_by_key(|x| x.1)
+    }
+
+    /// Takes delayed note `i` out of the list (the last one moves into its place).
+    fn undelay(&mut self, i: usize) -> Option<(u8, Held, u32)> {
+        let last = self.delayed_n.checked_sub(1)?;
+        let d = *self.delayed.get(i)?;
+        let l = *self.delayed.get(last)?;
+        *self.delayed.get_mut(i)? = l;
+        self.delayed_n = last;
+        Some(d)
+    }
+
+    /// [`Engine::note_on`] now.
+    fn play(&mut self, sound: usize, id: u32, key: u8, velocity: f32, end: &mut impl FnMut(NoteEnd)) {
         let s8 = sound as u8;
         let Some(p) = self.sounds.get(sound).copied() else {
             return end(NoteEnd { sound: s8, key, id });
@@ -1487,6 +1557,19 @@ impl Engine {
     /// with portamento (the released note ends at once), else as a retrigger.
     pub fn note_off(&mut self, sound: usize, id: u32, end: &mut impl FnMut(NoteEnd)) {
         let s8 = sound as u8;
+        // a note still waiting out its key-on delay never sounds
+        let waiting = self
+            .delayed
+            .iter()
+            .take(self.delayed_n)
+            .position(|d| d.0 == s8 && d.1.id == id);
+        if let Some((_, h, _)) = waiting.and_then(|i| self.undelay(i)) {
+            return end(NoteEnd {
+                sound: s8,
+                key: h.key,
+                id,
+            });
+        }
         let pedal = has(u32::from(self.pedal), sound);
         let Some(p) = self.sounds.get(sound).copied() else {
             return;
@@ -1657,13 +1740,23 @@ impl Engine {
             .filter(|l| l.used != 0)
             .fold(0, |m, l| m | bit(usize::from(l.sound)));
         let busy = events.iter().fold(busy, |m, e| m | bit(usize::from(e.sound)));
+        let busy = (self.delayed.iter().take(self.delayed_n)).fold(busy, |m, d| m | bit(usize::from(d.0)));
         for sound in (0..SOUNDS as u8).filter(|&s| has(u32::from(busy), usize::from(s))) {
             let mut from = 0;
-            for e in events.iter().filter(|e| e.sound == sound) {
-                let at = e.frame.clamp(from, BLOCK);
+            let mut ext = events.iter().filter(|e| e.sound == sound).peekable();
+            loop {
+                // the next event, or the next delayed note to start (before an event at its frame)
+                let next = ext.peek().map(|e| e.frame.clamp(from, BLOCK));
+                let due = self.due(sound, from).filter(|d| next.is_none_or(|f| d.1 < f));
+                let Some(at) = due.map(|d| d.1).or(next) else { break };
                 self.render_sound::<V>(sound, out, from, at, end);
                 (from, self.at) = (at, at);
                 let s = usize::from(sound);
+                if let Some((_, h, _)) = due.and_then(|d| self.undelay(d.0)) {
+                    self.play(s, h.id, h.key, h.velocity, end);
+                    continue;
+                }
+                let Some(e) = ext.next() else { break };
                 match e.kind {
                     Kind::On { id, key, velocity } => self.note_on(s, id, key, velocity, end),
                     Kind::Off { id } => self.note_off(s, id, end),
@@ -1679,6 +1772,9 @@ impl Engine {
             for ((l, r), m) in l.iter_mut().zip(r.iter_mut()).zip(self.mono.iter()) {
                 (*l, *r) = (*l + *m, *r + *m);
             }
+        }
+        for d in self.delayed.iter_mut().take(self.delayed_n) {
+            d.2 = d.2.saturating_sub(BLOCK as u32);
         }
         (self.clock, self.at) = (self.clock.wrapping_add(BLOCK as u64), 0);
     }
@@ -3783,7 +3879,7 @@ mod tests {
         // LFO; the filter, its envelope and pan
         let played = |id: u16| {
             [30u16, 31, 209, 212, 213].contains(&id)
-                || (0..=2).contains(&id)
+                || (0..=3).contains(&id)
                 || (6..=29).contains(&id)
                 || (32..=40).contains(&id)
                 || (100..=134).contains(&id)
@@ -4226,6 +4322,53 @@ mod tests {
             wl.iter().any(|&v| v < -60.0) && wr.iter().any(|&v| v < -60.0),
             "{wl:?} {wr:?}"
         );
+    }
+
+    /// Key-on delay: a note with delay 1 (10 blocks of 64 at 44.1 kHz, 697 frames at 48 kHz) plays
+    /// the bits of the same note started at that frame; released before then it never sounds and
+    /// ends at once.
+    #[test]
+    fn key_on_delay() {
+        let at = (10.0 * 64.0 / 44.1 * RATE / 1000.0 + 0.5) as usize;
+        assert_eq!(at, 697);
+        let render = |p: &Prepared, timed: bool| {
+            let mut e = engine(p);
+            let mut x = Vec::new();
+            if !timed {
+                e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            }
+            for b in 0..12 {
+                let ev = [Event {
+                    frame: at % BLOCK,
+                    sound: 0,
+                    kind: Kind::On {
+                        id: 1,
+                        key: 60,
+                        velocity: 100.0,
+                    },
+                }];
+                let mut o = [0.0; BLOCK];
+                let ev: &[Event] = if timed && b == at / BLOCK { &ev } else { &[] };
+                e.render1_events::<Native>(&mut o, ev, &mut |_| {});
+                x.extend_from_slice(&o);
+            }
+            x
+        };
+        let delayed = render(&carrier(1, "key_on_delay=1"), false);
+        assert!(delayed[..at].iter().all(|&v| v == 0.0) && delayed[at + 1..].iter().any(|&v| v != 0.0));
+        let timed = render(&carrier(1, ""), true);
+        assert!(delayed.iter().zip(&timed).all(|(a, b)| a.to_bits() == b.to_bits()));
+        let mut e = engine(&carrier(1, "key_on_delay=1"));
+        let mut ends = Vec::new();
+        e.note_on(0, 7, 60, 100.0, &mut |n| ends.push(n.id));
+        e.render1::<Native>(&mut [0.0; BLOCK], &mut |n| ends.push(n.id));
+        e.note_off(0, 7, &mut |n| ends.push(n.id));
+        assert_eq!(ends, [7]);
+        for _ in 0..8 {
+            let mut o = [0.0; BLOCK];
+            e.render1::<Native>(&mut o, &mut |_| {});
+            assert!(o.iter().all(|&v| v == 0.0));
+        }
     }
 
     /// The same bits on every target and back end (checked on every CI target), sines and forms.
