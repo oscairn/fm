@@ -1,7 +1,7 @@
 # The plugin
 
 `crates/fm-clap` builds the CLAP plugin `org.oscairn.fm2`, "Oscairn FM (preview)", vendor Oscairn,
-version 0.3.0 (the crate's version, which the descriptor reads), AGPL-3.0-or-later. It is a
+version 0.3.1 (the crate's version, which the descriptor reads), AGPL-3.0-or-later. It is a
 `cdylib` (`libfm_clap.so`, `.dylib`, `fm_clap.dll`) with one entry, `clap_entry`; packaging it as a
 `.clap` bundle, signing and publishing are not done here.
 
@@ -63,7 +63,9 @@ Coalescing: parameter values are staged in the core as they arrive and each soun
 prepared once at the start of the next stretch it renders (a stretch is at most 128 frames: a block
 of up to 128 frames is one), so a block's parameter events cost one preparation per sound changed
 (about 17,200 instructions each), not one per event. They take effect at that stretch's start, not
-at their frame.
+at their frame. A value the sound already has prepares nothing, and a box's source (a knob, the
+ribbon, a switch) makes again only what the boxes do (when nothing else of the sound waits), so a
+host that sends its controls' values again each block costs almost nothing.
 
 ## Notes and controllers
 

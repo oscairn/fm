@@ -373,7 +373,8 @@ snapshot) are written there in Rust, and the voice-budget order is the core's (2
   sound without pan) and zeros an active port nothing played into. Note ends are reported at the
   end of the stretch they happen in.
 - Parameter values are staged in the core as they arrive and each sound changed is prepared once
-  at the start of the next stretch (`stage`): at most once a stretch however many values come.
+  at the start of the next stretch (`stage`): at most once a stretch however many values come. A
+  value the sound already has stages nothing; a box's source alone makes `Mods` again at once.
 - Sleep: no note, voice, owed end or queued selection; the engine's clock moves on over skipped
   blocks from `steady_time` (`skip`).
 - Proven: the audio thread's calls allocate nothing (the tests' counting allocator) and reach no
@@ -857,6 +858,51 @@ filter: 27,389 a voice-block (the 28,000 gate met); a voice alone so 44,727. Lan
 2.533 against 2.509 + 2 % (met), two voices 1.967, five sounds 1.888. State: a lane 34 bytes of
 fields more (`latch`, `vol`, `og`, `vol_on`; the 32 bytes of gains read only while one is not 1),
 `Mods` (46 bytes of fields) a sound read once a segment, the sound itself 534 bytes more (the boxes' 267 values: cold).
+
+### 3.10 A shared instance at 0.3.1 (measured)
+
+The case: a host shares one instance among five similar parts of a converted setting (eight
+operators on routing 13, the 24 dB low-pass, controller boxes at rest values), each on its own
+channel and bus; a key starts a voice in three of them. On the device (four Cortex-A53, one 512 KB
+second level shared by every worker), 0.3.0 took about 338 µs a block for one key, 424 for two and
+430 for four (0.1.0: 294, 362, 373), about 40 of each the host's own round trip to a worker. Under
+callgrind through CLAP (the parts' own texts, the device's caches; the 64-byte lines a block touches
+counted from a trace), a block:
+
+| | 0.1.0 | 0.3.0 | 0.3.1 |
+|---|---|---|---|
+| instructions, one key (three voices) | 154,446 | 162,965 | 162,597 |
+| two keys | 231,382 | 257,589 | 255,509 |
+| four keys | 238,342 | 264,261 | 262,469 |
+| lines touched, one key: data + code | 475 + 352 | 490 + 358 | 439 + 343 |
+| two keys | 518 + 402 | 534 + 417 | 484 + 391 |
+| asleep (no voice, no event): instructions, data lines | 1,327, 171 (cold misses) | 1,328, 174 | 1,128, 136 |
+
+The instructions are the three single-voice lanes on the one-wide path, about 54,000 each for this
+plan (a quarter of a four-voice lane of it is about 22,000); at about 0.88 µs a thousand when warm
+they are 136 µs (0.1.0) and 143 µs (0.3.0) of the device's time. The rest is what a block touches
+with the caches cold, since the plugin's worker runs beside many others: about 830 to 850 lines for
+one key (the output ports 96, the form and sine tables about 90, the core's output pairs 24, the
+lanes and the prepared sounds, and some 350 lines of code), which at about 0.14 µs a line (fitted to
+0.1.0's three figures) is the other 115 to 120 µs. 0.3.0's extra 8,500 instructions are its boxes
+playing (knob 3 off centre moves the cutoff every step); its extra 44 µs on the device is more than
+its instructions and lines explain (about 10 µs) and is not explained here. A host sending each
+sound's controls (a knob, the ribbon) every block would have cost 0.3.0 about 104,000 instructions
+and 920 lines more a block (five sounds prepared again), more than that.
+
+Removed in 0.3.1, the same bits: the block's scans over all 40 lanes (which sounds play, each sound's
+lanes, the idle test's count: a cache line a lane), now over a bit mask of the lanes in use; the
+shell making the voice limits from every slot and the whole budget list each block, now only when
+the budget, a selection or the state changes; the shell reading every slot's output bus, now only
+the playing sounds'; a box source's value preparing the whole sound, now `Mods` alone, and a value
+the sound already has staging nothing (ten such events a block: 270,040 → 166,030 instructions,
+1,558 → 635 cold lines). Gates: `hosted-shared` (synthetic sounds of the same kind) 57,558 → 57,464 a
+voice-block and its first-level misses with the device's caches 62.7 → 40.3; `hosted-shared-idle`
+4,016 → 3,405 a block; asleep 1,159 → 958; awake at rest 3,303 → 2,705.
+
+Left: an active port nothing played into is still zeroed each block (16 lines a port; CLAP's
+constant flag would spare most of it where a host honours it), and the core renders into its own
+output pairs, which the shell copies to the ports.
 
 ## 4. Audio-thread safety, and how it is proven
 
