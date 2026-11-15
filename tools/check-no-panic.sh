@@ -4,7 +4,10 @@
 #  1. no panic, bounds-check or unwrap machinery in the release static library's symbol table;
 #  2. a build whose panic handler calls a non-existent symbol still links into a program, because
 #     dead-code removal leaves no path to the handler. Release profile: overflow checks are on, so an
-#     unproven integer overflow is a panic path too.
+#     unproven integer overflow is a panic path too;
+#  3. the plugin (std, so panic machinery is in it): its release build's direct calls and tail
+#     calls, walked from every audio-thread callback of the shell, reach no panic function
+#     (tools/check-no-panic-shell.awk; the renderer must be among what they reach).
 set -e
 cd "$(dirname "$0")/.."
 T=${TMPDIR:-/tmp}/fm-nopanic.$$; mkdir -p "$T"; trap 'rm -rf "$T"' EXIT
@@ -36,3 +39,10 @@ EOC
 ${CC:-cc} -O1 $gc "$T/m.c" "$T/b/release/libfm_nopanic.a" -o "$T/m"
 "$T/m"
 echo "ok: program links against the link-fail-on-panic build, so no panic path is reachable"
+cargo build --release --locked -p fm-clap --lib --target-dir "$T/c"
+lib=$(ls "$T"/c/release/libfm_clap.so "$T"/c/release/libfm_clap.dylib 2>/dev/null | head -n 1)
+objdump -d --no-show-raw-insn "$lib" | awk '
+    /^[0-9a-f]+ <[^>]+>:$/ { f = $2; gsub(/[<>:]/, "", f); next }
+    /\t(bl|b|call|callq|jmp|jmpq)[ \t]/ { if (match($0, /<[^>+]+>$/)) { t = substr($0, RSTART + 1, RLENGTH - 2); if (t != f) print f, t } }' |
+    awk -v want=render_sound -f tools/check-no-panic-shell.awk
+echo "ok: no panic function reachable from the shell's audio-thread callbacks"
