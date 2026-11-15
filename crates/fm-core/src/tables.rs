@@ -60,8 +60,10 @@ const fn window(t: f64) -> f64 {
 
 /// The tables the engine reads at audio rate, the sine and the operator forms, in one block
 /// aligned to the first-level cache's way (8 KB of the device's 32 KB 4-way cache): the sets
-/// their lines fall in do not depend on where the linker places them (tools/cost/cg.sh).
-#[repr(C, align(8192))]
+/// their lines fall in do not depend on where the linker places them (tools/cost/cg.sh). MSVC's
+/// linker refuses a section aligned above its page (4 KB): there a cache line's alignment.
+#[cfg_attr(not(target_env = "msvc"), repr(C, align(8192)))]
+#[cfg_attr(target_env = "msvc", repr(C, align(64)))]
 pub struct Block {
     pub sine: Table,
     pub forms: [Table16; 48],
