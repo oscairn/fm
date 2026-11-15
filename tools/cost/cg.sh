@@ -62,6 +62,11 @@ run fm-s1-v1-pitch 1 e 12 8 native pitch 1
 # the voice LFO on pitch and amplitude and level scaling on every operator of every voice
 run fm-r12-8-mod 32 e 12 8 native mod
 run fm-s1-v1-mod 1 e 12 8 native mod 1
+# the sound LFO on every operator's frequency, level and detune
+run fm-r12-8-slfo 32 e 12 8 native slfo
+run fm-s1-v1-slfo 1 e 12 8 native slfo 1
+# a parameter event every block (the sound prepared again) on one voice: less fm-s1-v1, an event's cost
+run fm-s1-v1-param 1 e 12 8 native sine 1 param
 # voices few a sound: 1 and 2 voices in each of 1, 5 and 8 sounds (a voice-block: by all the voices)
 for s in 1 5 8; do for v in 1 2; do TOTAL=$((s * v)); run "fm-s$s-v$v" "$v" e 12 8 native sine $s; done; done; TOTAL=
 run fm-s1-v5 5 e 12 8 native sine 1

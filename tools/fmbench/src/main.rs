@@ -6,15 +6,17 @@
 //!   fmbench coverage SOUND       the sound's parameters the engine does not play (text or binary form)
 //!   fmbench engine VOICES BLOCKS ROUTING [OPS] [native|scalar] [FORMS] [SOUNDS]
 //!                                VOICES held notes of a sound on ROUTING with OPS operators (default 8)
-//!                                on FORMS (sine, all, odd, res, mixed: eight different tables), in
-//!                                each of SOUNDS sounds (default 1)
+//!                                on FORMS (sine, all, odd, res, mixed: eight different tables; pitch,
+//!                                mod, slfo: sines with modulators, see `case_sound`), in
+//!                                each of SOUNDS sounds (default 1); a last argument `param` sends a
+//!                                parameter event every block
 //!   fmbench VOICES BLOCKS [om|sm] [edges|loop|chain] [sine|table|window] [native|scalar]
 //!                                the voice-kernel spike (docs/design.md, "The spike")
 //!   fmbench footprint 0 x x FORM the spike's bytes a lane touches a block
 //!
 //! Under callgrind, `--toggle-collect='fmbench_render*'` counts only the rendering (tools/cost/cg.sh).
 use fm_core::coverage::not_covered;
-use fm_core::engine::{Engine, NoteEnd, Prepared, BLOCK, VOICES};
+use fm_core::engine::{Engine, Event, Kind, NoteEnd, Prepared, BLOCK, VOICES};
 use fm_core::simd::{scalar, Native, F4};
 use fm_core::sound::Sound;
 use fm_core::spike::{self, footprint, Form, Layout, Routing};
@@ -43,6 +45,12 @@ pub extern "C" fn fmbench_render_engine(e: &mut Engine, out: &mut [f32; BLOCK], 
     }
 }
 
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn fmbench_render_event(e: &mut Engine, out: &mut [f32; BLOCK], ev: &Event) {
+    e.render_events::<Native>(out, core::slice::from_ref(ev), &mut |_: NoteEnd| {});
+}
+
 /// Operator `o`'s (1-8) form, spread and formant in a cost case: `mixed` puts the eight on eight
 /// different tables (the worst case for the cache); `res` is the costliest kernel.
 fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
@@ -60,7 +68,8 @@ fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
 /// every envelope is in a segment that can change: the costlier path), held notes, no portamento;
 /// `pitch`: sines with both pitch envelopes moving and portamento gliding on every voice; `mod`:
 /// sines with the voice LFO on pitch and amplitude (sine, delay, every operator) and level scaling
-/// on every operator.
+/// on every operator; `slfo`: sines with the sound LFO (triangle, delay) on every operator's
+/// frequency, level and detune.
 fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
     let pitch = forms == "pitch";
     let mut t = format!(
@@ -72,6 +81,10 @@ fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
         t += &format!("portamento_time=100 {peg}\n");
     }
     let m = "scaling_low_depth=40 scaling_high_depth=40 scaling_high_curve=2 lfo_pitch_offset=5 lfo_amp_offset=5";
+    if forms == "slfo" {
+        t += "slfo_wave=0 slfo_speed=40 slfo_delay=5 slfo_key_on_reset=1 slfo_dest1=75 slfo_depth1=20 \
+              slfo_dest2=78 slfo_depth2=30 slfo_dest3=77 slfo_depth3=16\n";
+    }
     if forms == "mod" {
         t += "lfo_wave=4 lfo_speed_range=0 lfo_speed=40 lfo_delay=5 lfo_pitch_depth=20 lfo_amp_depth=30\n";
         for o in 1..=8 {
@@ -120,6 +133,7 @@ fn time(blocks: usize) {
         ("eight mixed forms, routing 12", 12, 8, "mixed"),
         ("pitch envelopes, portamento", 12, 8, "pitch"),
         ("voice LFO, level scaling", 12, 8, "mod"),
+        ("sound LFO", 12, 8, "slfo"),
     ];
     let mut rows: Vec<(String, Box<Engine>, usize)> = Vec::new();
     for (name, routing, ops, forms) in cases {
@@ -245,9 +259,28 @@ fn main() {
             let mut out = [0.0f32; BLOCK];
             let mut sum = 0.0f64;
             let t = Instant::now();
-            for _ in 0..blocks {
+            // "param": a parameter event every block (the voice LFO's speed, so the sound is prepared
+            // again and its plan stays)
+            let param = arg(8, "") == "param";
+            for b in 0..blocks {
                 out.fill(0.0);
-                fmbench_render_engine(&mut e, &mut out, scalar);
+                if param {
+                    let kind = Kind::Param {
+                        id: 23,
+                        value: 30 + (b % 2) as i16,
+                    };
+                    fmbench_render_event(
+                        &mut e,
+                        &mut out,
+                        &Event {
+                            frame: 0,
+                            sound: 0,
+                            kind,
+                        },
+                    );
+                } else {
+                    fmbench_render_engine(&mut e, &mut out, scalar);
+                }
                 sum += out.iter().map(|x| f64::from(x.abs())).sum::<f64>();
             }
             let us = t.elapsed().as_secs_f64() * 1e6 / (blocks * voices.max(1)) as f64;
