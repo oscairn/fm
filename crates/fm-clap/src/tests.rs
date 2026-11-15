@@ -62,6 +62,7 @@ enum Ev {
     Note(clap_event_note),
     Param(clap_event_param_value),
     Midi(clap_event_midi),
+    Expr(clap_event_note_expression),
 }
 
 impl Ev {
@@ -70,8 +71,21 @@ impl Ev {
             Ev::Note(e) => &e.header,
             Ev::Param(e) => &e.header,
             Ev::Midi(e) => &e.header,
+            Ev::Expr(e) => &e.header,
         }
     }
+}
+
+fn expression(t: u32, kind: i32, ch: i16, id: i32, value: f64) -> Ev {
+    Ev::Expr(clap_event_note_expression {
+        header: header::<clap_event_note_expression>(t, CLAP_EVENT_NOTE_EXPRESSION),
+        expression_id: kind,
+        note_id: id,
+        port_index: 0,
+        channel: ch,
+        key: -1,
+        value,
+    })
 }
 
 fn header<T>(time: u32, kind: u16) -> clap_event_header {
@@ -568,6 +582,63 @@ fn shared_sounds_play_on_their_own_bus_ports() {
     assert!(
         unsafe { c.get.unwrap()(a.p, 1, &mut info) } && info.selected_channels == 1 << 1 && info.active_voices == 1
     );
+}
+
+/// Each controller reaches the sound its channel selects and no other: expression (CC 11) and a
+/// note's volume expression silence what they address, while the other channel's sound plays the
+/// same bits as without them; the other controllers and pressure leave a sound without routes as
+/// it was.
+#[test]
+fn controllers_reach_their_channels_sound_only() {
+    let run = |events: Vec<Ev>| {
+        let mut a = Inst::new();
+        let x = a.prepare(c"x", LEAD);
+        let y = a.prepare(c"y", c"fm-sound/1\nalgorithm=1\nop1.level=99 op1.coarse=2\n");
+        let c = a.contexts();
+        assert!(unsafe { c.select.unwrap()(a.p, x, 1) && c.select.unwrap()(a.p, y, 2) });
+        a.set_port(1, true);
+        a.set_port(2, true);
+        let first = vec![
+            param(0, BUS_ID, 1, 1.0),
+            param(0, BUS_ID, 2, 2.0),
+            on(0, 1, 60, 1),
+            on(0, 2, 64, 2),
+        ];
+        a.block(BLOCK, first);
+        a.block(BLOCK, events);
+        for _ in 0..4 {
+            a.block(BLOCK, vec![]);
+        }
+        a
+    };
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let plain = run(vec![]);
+    let tail = |a: &Inst, port: usize| a.out[port][0][3 * BLOCK..].to_vec();
+    assert!(peak(&tail(&plain, 1)) > 0.01 && peak(&tail(&plain, 2)) > 0.01);
+    for events in [
+        vec![midi(0, [0xb1, 11, 0])],
+        vec![expression(0, CLAP_NOTE_EXPRESSION_VOLUME, 1, 1, 0.0)],
+        vec![expression(0, CLAP_NOTE_EXPRESSION_VOLUME, -1, 1, 0.0)],
+    ] {
+        let a = run(events);
+        assert_eq!(peak(&tail(&a, 1)), 0.0, "channel 1's sound silenced");
+        assert_eq!(
+            bits(&a.out[2][0]),
+            bits(&plain.out[2][0]),
+            "channel 2's sound untouched"
+        );
+    }
+    let others = vec![
+        midi(0, [0xb1, 1, 100]),
+        midi(0, [0xb1, 2, 100]),
+        midi(0, [0xb1, 4, 100]),
+        midi(0, [0xb1, 67, 127]),
+        midi(0, [0xd1, 90, 0]),
+        midi(0, [0xa1, 60, 90]),
+        expression(0, CLAP_NOTE_EXPRESSION_PRESSURE, 1, -1, 0.5),
+    ];
+    let a = run(others);
+    assert_eq!(bits(&a.out[1][0]), bits(&plain.out[1][0]));
 }
 
 #[test]

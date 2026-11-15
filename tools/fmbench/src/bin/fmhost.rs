@@ -2,8 +2,8 @@
 //! fmhost: the plugin's cost through CLAP, as a host calls it (`fmhost VOICES BLOCKS CASE`): the
 //! plugin made by its entry, a state with the case's sounds loaded, notes started in a first block
 //! that is not counted, then `fmbench_render_hosted` (counted under callgrind) a block each.
-//! CASE: `sleep` (no note, no event: the asleep call), `idle` (no note, one ignored controller a
-//! block: a call that wakes and renders nothing), `voices` (VOICES held notes of one sound),
+//! CASE: `sleep` (no note, no event: the asleep call), `idle` (no note, the mod wheel a block,
+//! which moves nothing in the case's sound: a call that wakes and renders nothing), `voices` (VOICES held notes of one sound),
 //! `sounds` (one note in each of VOICES sounds, each on its own channel); fmbench's routing 12 case
 //! with eight sine operators.
 #[path = "../case.rs"]

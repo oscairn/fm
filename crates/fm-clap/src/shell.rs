@@ -9,7 +9,7 @@ use crate::ffi::{Out, Ports};
 use crate::state::{Saved, State};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU16, AtomicU32, AtomicU8, Ordering::*};
-use fm_core::engine::{Engine, Event, Kind, Limits, NoteEnd, Prepared, BLOCK, SOUNDS};
+use fm_core::engine::{Engine, Event, Kind, Limits, NoteEnd, Prepared, BLOCK, PRESSURE, SOUNDS};
 use fm_core::params::{index_of, COUNT, PARAMS};
 use fm_core::simd::Native;
 use fm_core::sound::Sound;
@@ -780,9 +780,13 @@ impl Plugin {
                 _ => self.choke(a, frame, n.id, n.channel, n.key),
             };
         }
+        if let Some((kind, id, channel, key, value)) = crate::ffi::expression(h) {
+            return self.expression(a, frame, kind, id, channel, key, value);
+        }
         let Some(m) = crate::ffi::midi(h) else { return };
         let ch = i16::from(m[0] & 15);
         let slot = a.selected.get(ch as usize).copied().unwrap_or(0);
+        let control = |a: &mut Audio, cc: u8, value: u8| a.events.push(frame, slot, Kind::Control { cc, value });
         match (m[0] & 0xf0, m[1], m[2]) {
             (0x90, key, v) if v > 0 => self.note_on(a, frame, -1, ch, i16::from(key & 127), f64::from(v), t, out),
             (0x80 | 0x90, key, _) => self.note_off(a, frame, -1, ch, i16::from(key & 127), true),
@@ -800,8 +804,41 @@ impl Plugin {
             }
             (0xb0, 120, _) => self.choke(a, frame, -1, ch, -1),
             (0xb0, 123, _) => self.note_off(a, frame, -1, ch, -1, false),
-            // the others the host forwards (CC 1, 2, 4, 11, 65-67) wait for the controller sets (M7)
+            // the controllers the core takes (CC 65, portamento, is not played)
+            (0xb0, cc @ (1 | 2 | 4 | 11 | 66 | 67), v) => control(a, cc, v & 127),
+            // channel and key pressure: the sound's aftertouch (the latest wins)
+            (0xd0, v, _) | (0xa0, _, v) => control(a, PRESSURE, v & 127),
             _ => {}
+        }
+    }
+
+    /// A note expression: volume on the notes it addresses, pressure as the aftertouch of the
+    /// channel's sound (or of the addressed notes' sounds without a channel); tuning is not played.
+    #[allow(clippy::too_many_arguments)]
+    fn expression(&self, a: &mut Audio, frame: usize, kind: i32, id: i32, channel: i16, key: i16, value: f64) {
+        let Audio {
+            notes,
+            events,
+            selected,
+            ..
+        } = a;
+        if kind == CLAP_NOTE_EXPRESSION_PRESSURE {
+            let value = (value.clamp(0.0, 1.0) * 127.0).round() as u8;
+            let kind = Kind::Control { cc: PRESSURE, value };
+            match selected.get(channel as usize) {
+                Some(&s) if channel >= 0 => events.push(frame, s, kind),
+                _ => {
+                    let slots = notes.matching(id, channel, key).fold(0u8, |m, (_, n)| m | bit(n.slot));
+                    (0..SOUNDS as u8)
+                        .filter(|&s| slots & bit(s) != 0)
+                        .for_each(|s| events.push(frame, s, kind));
+                }
+            }
+        } else if kind == CLAP_NOTE_EXPRESSION_VOLUME {
+            let gain = value as f32;
+            for (i, n) in notes.matching(id, channel, key) {
+                events.push(frame, n.slot, Kind::Volume { id: i, gain });
+            }
         }
     }
 

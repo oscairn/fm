@@ -157,6 +157,13 @@ pub fn note(h: &clap_event_header) -> Option<(u16, NoteRef)> {
         })
 }
 
+/// A note expression on port 0: its kind, note id, channel, key and value.
+pub fn expression(h: &clap_event_header) -> Option<(i32, i32, i16, i16, f64)> {
+    is::<clap_event_note_expression>(h, CLAP_EVENT_NOTE_EXPRESSION)
+        .filter(|e| e.port_index <= 0)
+        .map(|e| (e.expression_id, e.note_id, e.channel, e.key, e.value))
+}
+
 pub fn midi(h: &clap_event_header) -> Option<[u8; 3]> {
     is::<clap_event_midi>(h, CLAP_EVENT_MIDI)
         .filter(|m| m.port_index == 0)

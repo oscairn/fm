@@ -240,6 +240,23 @@ pub extern "C" fn fm_nopanic_engine(
                     value: (pick >> 3) as i16 % 128,
                 },
             },
+            // any controller number and value, any note's volume
+            Event {
+                frame: at(31),
+                sound,
+                kind: Kind::Control {
+                    cc: pick.rotate_left(b) as u8,
+                    value: (pick >> 5) as u8,
+                },
+            },
+            Event {
+                frame: at(37),
+                sound,
+                kind: Kind::Volume {
+                    id: b.wrapping_sub(2),
+                    gain: f32::from_bits(pick.rotate_left(b.wrapping_mul(3))),
+                },
+            },
         ];
         e.render_events::<Native>(out, &events, &mut end);
     }

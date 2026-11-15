@@ -106,7 +106,31 @@ pub enum Kind {
     Param { id: u16, value: i16 },
     /// [`Engine::choke_note`]
     Choke { id: u32 },
+    /// [`Engine::control`]: a controller (its MIDI number, or [`PRESSURE`]) at a value 0-127
+    Control { cc: u8, value: u8 },
+    /// [`Engine::volume`]: a note's volume, linear
+    Volume { id: u32, gain: f32 },
 }
+
+/// The controller number [`Engine::control`] takes for channel or key pressure (aftertouch).
+pub const PRESSURE: u8 = 128;
+
+/// The channel controllers a sound keeps, by their place in [`Engine`]'s `ctl`: the mod wheel
+/// (CC 1), aftertouch, foot controller 1 (CC 11), foot controller 2 (CC 4), breath (CC 2) and
+/// expression (CC 11 too), and their values at rest.
+const CTLS: usize = 6;
+const EXPRESSION: usize = 5;
+const CTL_REST: [u8; CTLS] = [0, 0, 0, 0, 0, 127];
+
+/// What a sound's controllers do to it now, made again when one moves (or the sound is
+/// prepared) and read every control step: whether anything moves, the output gain (expression).
+#[derive(Clone, Copy)]
+struct Mods {
+    on: bool,
+    gain: f32,
+}
+
+const MODS0: Mods = Mods { on: false, gain: 1.0 };
 
 /// A sound's place in the voice budget's order (oscairn.voice-budget): voices it keeps from other
 /// sounds' new notes, its priority (lower gives way first) and its own limit (0: none).
@@ -641,6 +665,8 @@ struct Lane {
     used: u8,
     held: u8,
     sustained: u8,
+    /// Voices whose keys were down when the sostenuto pedal went down (it holds them).
+    latch: u8,
     ending: u8,
     retrig: u8,
     orphan: u8,
@@ -664,6 +690,11 @@ struct Lane {
     sdt: [[f32; W]; OPS],
     /// The filter and pan, read only when its sound has them.
     post: Voices,
+    /// Each note's volume (its expression) and the output gain each voice had at the last step
+    /// (with the sound's expression), read only while one is not 1.
+    vol: [f32; W],
+    og: [f32; W],
+    vol_on: bool,
 }
 
 /// What a lane's increments are made of while a voice's pitch moves (docs/design.md, 2.3), read
@@ -708,6 +739,7 @@ const LANE0: Lane = Lane {
     used: 0,
     held: 0,
     sustained: 0,
+    latch: 0,
     ending: 0,
     retrig: 0,
     orphan: 0,
@@ -737,6 +769,9 @@ const LANE0: Lane = Lane {
     sdt_d: [SDT_NONE; OPS],
     sdt: [[0.0; W]; OPS],
     post: VOICES0,
+    vol: [1.0; W],
+    og: [1.0; W],
+    vol_on: false,
 };
 
 /// No sound LFO detune move held (`Lane::sdt_d`).
@@ -839,6 +874,7 @@ impl Lane {
             &mut self.used,
             &mut self.held,
             &mut self.sustained,
+            &mut self.latch,
             &mut self.ending,
             &mut self.retrig,
             &mut self.orphan,
@@ -847,6 +883,9 @@ impl Lane {
         }
         if let (Some(f), Some(l)) = (self.fade.get_mut(s), self.left.get_mut(s)) {
             (*f, *l) = (0.0, 0.0);
+        }
+        if let (Some(v), Some(g)) = (self.vol.get_mut(s), self.og.get_mut(s)) {
+            (*v, *g) = (1.0, 1.0);
         }
         for op in 0..OPS {
             put(&mut self.gain, op, s, 0.0);
@@ -899,7 +938,14 @@ impl Lane {
         col(&mut self.top, from, to);
         col(&mut self.seg, from, to);
         col(&mut self.count, from, to);
-        for x in [&mut self.fade, &mut self.left, &mut self.vel, &mut self.bound] {
+        for x in [
+            &mut self.fade,
+            &mut self.left,
+            &mut self.vel,
+            &mut self.bound,
+            &mut self.vol,
+            &mut self.og,
+        ] {
             one(x, from, to);
         }
         one(&mut self.key, from, to);
@@ -931,6 +977,7 @@ impl Lane {
             &mut self.used,
             &mut self.held,
             &mut self.sustained,
+            &mut self.latch,
             &mut self.ending,
             &mut self.retrig,
             &mut self.orphan,
@@ -943,6 +990,24 @@ impl Lane {
             *m = (*m & !slot_ops(to)) | w.unwrap_or(0);
         }
         self.free(from);
+    }
+
+    /// The output of a step of `n` frames times each voice's gain (its note's volume times
+    /// `want`), ramped linearly from the last step's.
+    fn out_gain<const L: usize>(&mut self, want: f32, n: usize, y: &mut [[f32; L]; STEP]) {
+        let mut on = false;
+        for ((v, g), s) in self.vol.iter().zip(self.og.iter_mut()).zip(0..L) {
+            let (g0, to) = (*g, want * v);
+            let d = (to - g0) / n as f32;
+            for (x, k) in y.iter_mut().zip(1..=n) {
+                if let Some(x) = x.get_mut(s) {
+                    *x *= g0 + d * k as f32;
+                }
+            }
+            *g = to;
+            on |= to != 1.0;
+        }
+        self.vol_on = on || self.vol.iter().any(|&v| v != 1.0);
     }
 
     fn release(&mut self, p: &Prepared, s: usize, rate: f64) {
@@ -1078,6 +1143,11 @@ pub struct Engine {
     rng: [u32; SOUNDS],
     /// Each sound's pitch bend, -8192..+8191.
     bend: [i16; SOUNDS],
+    /// Each sound's channel controllers (`CTLS`, 0-127), sounds whose sostenuto pedal is down (a
+    /// bit each), and what the controllers do to each sound now.
+    ctl: [[u8; CTLS]; SOUNDS],
+    sost: u8,
+    mods: [Mods; SOUNDS],
     /// Each sound's latest note, where portamento glides from.
     last: [Option<u32>; SOUNDS],
     /// Frames rendered (at the block's start), and the glide clock's period (frames, 2^-16 a
@@ -1127,6 +1197,9 @@ impl Engine {
             age: 0,
             rng: [SEED; SOUNDS],
             bend: [0; SOUNDS],
+            ctl: [CTL_REST; SOUNDS],
+            sost: 0,
+            mods: [MODS0; SOUNDS],
             last: [None; SOUNDS],
             clock: 0,
             tick: ((laws::GLIDE_TICK_MS * rate / 1000.0 * 65536.0 + 0.5) as u64).max(1),
@@ -1160,6 +1233,7 @@ impl Engine {
                 (*d, *r, *l) = (*p, SEED, SLFO0);
                 self.pending &= !bit(sound);
                 self.alt &= !bit(sound);
+                self.refresh(sound);
                 true
             }
             _ => false,
@@ -1217,6 +1291,7 @@ impl Engine {
             if !busy || (n.plan == d.plan && n.mono == d.mono && n.single == d.single) {
                 *d = n;
                 self.pending &= !bit(sound);
+                self.refresh(sound);
             } else {
                 self.pending |= bit(sound);
             }
@@ -1237,6 +1312,8 @@ impl Engine {
         self.lanes = [LANE0; LANES];
         (self.pedal, self.pending, self.staged, self.age, self.alt) = (0, 0, 0, 0, 0);
         (self.rng, self.bend, self.last) = ([SEED; SOUNDS], [0; SOUNDS], [None; SOUNDS]);
+        (self.ctl, self.sost) = ([CTL_REST; SOUNDS], 0);
+        (0..SOUNDS).for_each(|s| self.refresh(s));
         (self.clock, self.at, self.slfo, self.keys_n) = (0, 0, [SLFO0; SOUNDS], [0; SOUNDS]);
         (self.pan_on, self.delayed_n) = (false, 0);
     }
@@ -1589,9 +1666,13 @@ impl Engine {
         lane.used |= b;
         lane.held |= b;
         lane.sustained &= !b;
+        lane.latch &= !b;
         lane.ending &= !b;
         lane.retrig &= !b;
         lane.orphan &= !b;
+        if let Some(v) = lane.vol.get_mut(s) {
+            *v = 1.0;
+        }
         if let (Some(k), Some(i), Some(a), Some(f), Some(bd)) = (
             lane.key.get_mut(s),
             lane.id.get_mut(s),
@@ -1722,7 +1803,7 @@ impl Engine {
         for lane in self.lanes.iter_mut().filter(|l| l.sound == s8 && l.held != 0) {
             for s in 0..W {
                 if has(u32::from(lane.held), s) && lane.id.get(s) == Some(&id) {
-                    if pedal {
+                    if pedal || has(u32::from(lane.latch), s) {
                         lane.held &= !bit(s);
                         lane.sustained |= bit(s);
                     } else {
@@ -1741,26 +1822,98 @@ impl Engine {
         }
     }
 
-    /// The sustain pedal of `sound`: up releases the notes it held.
+    /// The sustain pedal of `sound`: up releases the notes it held (not those the sostenuto
+    /// pedal still holds).
     pub fn pedal(&mut self, sound: usize, down: bool) {
-        let Some(p) = self.sounds.get(sound).copied() else {
-            return;
-        };
         let b = bit(sound);
         self.pedal = if down { self.pedal | b } else { self.pedal & !b };
         if !down {
-            for lane in self
-                .lanes
-                .iter_mut()
-                .filter(|l| usize::from(l.sound) == sound && l.sustained != 0)
-            {
-                for s in 0..W {
-                    if has(u32::from(lane.sustained), s) {
-                        lane.release(&p, s, self.rate);
-                    }
+            self.let_go(sound, |l| l.sustained & !l.latch);
+        }
+    }
+
+    /// Releases the voices of `sound` that `which` names in each lane.
+    fn let_go(&mut self, sound: usize, which: impl Fn(&Lane) -> u8) {
+        let Some(p) = self.sounds.get(sound).copied() else {
+            return;
+        };
+        for lane in self.lanes.iter_mut().filter(|l| usize::from(l.sound) == sound) {
+            let m = which(lane);
+            for s in (0..W).filter(|&s| has(u32::from(m), s)) {
+                lane.release(&p, s, self.rate);
+            }
+        }
+    }
+
+    /// A channel controller of `sound` at `value` (0-127), by its MIDI number: 1 the mod wheel, 2
+    /// breath, 4 foot controller 2, 11 foot controller 1 and expression, 66 the sostenuto pedal,
+    /// [`PRESSURE`] aftertouch; any other is ignored (67, the soft pedal, as the reference does).
+    /// It acts from the next control step (an event's frame).
+    pub fn control(&mut self, sound: usize, cc: u8, value: u8) {
+        let value = value.min(127);
+        if cc == 66 {
+            return self.sostenuto(sound, value >= 64);
+        }
+        let Some(c) = self.ctl.get_mut(sound) else {
+            return;
+        };
+        match cc {
+            1 => c[0] = value,
+            PRESSURE => c[1] = value,
+            11 => (c[2], c[EXPRESSION]) = (value, value),
+            4 => c[3] = value,
+            2 => c[4] = value,
+            _ => return,
+        }
+        self.refresh(sound);
+    }
+
+    /// The sostenuto pedal of `sound`: down holds the notes whose keys are down then until it goes
+    /// up (a pedal already down holds no more); up releases those it held whose keys are up,
+    /// unless the sustain pedal holds them.
+    fn sostenuto(&mut self, sound: usize, down: bool) {
+        let b = bit(sound);
+        if down == (self.sost & b != 0) {
+            return;
+        }
+        self.sost ^= b;
+        if down {
+            for lane in self.lanes.iter_mut().filter(|l| usize::from(l.sound) == sound) {
+                lane.latch = lane.held;
+            }
+            return;
+        }
+        let pedal = self.pedal & b != 0;
+        self.let_go(sound, |l| if pedal { 0 } else { l.sustained & l.latch });
+        for lane in self.lanes.iter_mut().filter(|l| usize::from(l.sound) == sound) {
+            lane.latch = 0;
+        }
+    }
+
+    /// The volume of note `id` of `sound` (its expression), linear 0-4, from the next control
+    /// step, ramped across it.
+    pub fn volume(&mut self, sound: usize, id: u32, gain: f32) {
+        if !(0.0..=4.0).contains(&gain) {
+            return;
+        }
+        for lane in self.lanes.iter_mut().filter(|l| usize::from(l.sound) == sound) {
+            for s in (0..W).filter(|&s| has(u32::from(lane.used), s) && lane.id.get(s) == Some(&id)) {
+                if let Some(v) = lane.vol.get_mut(s) {
+                    (*v, lane.vol_on) = (gain, true);
                 }
             }
         }
+    }
+
+    /// What the controllers of `sound` do to it now ([`Mods`]).
+    fn refresh(&mut self, sound: usize) {
+        let (Some(c), Some(m)) = (self.ctl.get(sound), self.mods.get_mut(sound)) else {
+            return;
+        };
+        // expression: assumed to follow the part volume's measured law, about 40 log10(v / 127) dB
+        let e = f32::from(c[EXPRESSION]) / 127.0;
+        let gain = e * e;
+        *m = Mods { on: gain != 1.0, gain };
     }
 
     /// Starts shedding one note by the platform's voice-budget order, for a new note of `incoming`
@@ -1865,6 +2018,7 @@ impl Engine {
                 *d = Prepared::new(&d.sound);
             }
             self.pending &= !bit(sound);
+            self.refresh(sound);
         }
         let busy = self
             .lanes
@@ -1916,6 +2070,8 @@ impl Engine {
                         Kind::Bend { value } => self.bend(s, value),
                         Kind::Param { id, value } => self.param(s, id, value),
                         Kind::Choke { id } => self.choke_note(s, id, end),
+                        Kind::Control { cc, value } => self.control(s, cc, value),
+                        Kind::Volume { id, gain } => self.volume(s, id, gain),
                     }
                 }
                 self.render_sound::<V>(sound, pair, &mut left, from, frames, end);
@@ -1975,6 +2131,8 @@ impl Engine {
             lfo_hold: (f64::from(p.lfo_hold) * self.rate) as f32,
         };
         let clock = self.clock;
+        // what the controllers do (a sound they leave alone skips it)
+        let m = self.mods.get(usize::from(sound)).filter(|m| m.on);
         // the sound LFO at each step's end, once for all the sound's lanes
         let mut sv = [0.0f32; BLOCK / STEP];
         if let Some(l) = self.slfo.get_mut(usize::from(sound)).filter(|_| p.slfo != 0) {
@@ -2004,8 +2162,8 @@ impl Engine {
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
-                    1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, o, y1, v),
-                    _ => step::<W, V>(lane, p, &c, t, end, o, y4, v),
+                    1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, o, y1, v, m),
+                    _ => step::<W, V>(lane, p, &c, t, end, o, y4, v, m),
                 }
             }
         }
@@ -2234,6 +2392,7 @@ fn step<const L: usize, V: F4<L>>(
     out: Out,
     y: &mut [[[f32; L]; STEP]; OPS],
     sv: f32,
+    m: Option<&Mods>,
 ) {
     let n = match &out {
         Out::Mono(m) => m.len(),
@@ -2286,6 +2445,11 @@ fn step<const L: usize, V: F4<L>>(
     if p.filter.on {
         let lfo = lfo.as_ref().map_or(&[0.0; W], |l| &l.0);
         lane.post.filter::<L, V>(&p.filter, c.rate, sv, lfo, n, &mut vout);
+    }
+    // expression and the notes' volumes (a lane without either skips this)
+    let want = m.map_or(1.0, |m| m.gain);
+    if want != 1.0 || lane.vol_on {
+        lane.out_gain(want, n, &mut vout);
     }
     match out {
         Out::Pan(l, r) => lane.post.mix::<L, V>(&p.filter, sv, &vout, l, r),
@@ -3943,6 +4107,116 @@ mod tests {
         assert_eq!((e.active(), ends), (0, 1));
     }
 
+    /// `blocks` blocks of `e` with `first` applied in the first.
+    fn blocks(e: &mut Engine, first: &[Event], blocks: usize) -> Vec<f32> {
+        let mut out = vec![0.0; blocks * BLOCK];
+        for (b, o) in out.chunks_mut(BLOCK).enumerate() {
+            let o: &mut [f32; BLOCK] = o.try_into().unwrap();
+            e.render1_events::<Native>(o, if b == 0 { first } else { &[] }, &mut |_| {});
+        }
+        out
+    }
+
+    fn control(cc: u8, value: u8) -> Event {
+        let kind = Kind::Control { cc, value };
+        Event {
+            frame: 0,
+            sound: 0,
+            kind,
+        }
+    }
+
+    /// Expression scales the output by (v / 127)^2 (ramped over one step), a note's volume
+    /// expression its own voice; the soft pedal and controllers with no route leave the bits as
+    /// they were, and expression back at 127 plays as never moved.
+    #[test]
+    fn expression_and_note_volume() {
+        // (no portamento: the second note would glide from the first's pitch)
+        let p = carrier(1, "portamento=0 op1.eg_time_decay1=60 op1.eg_level_decay1=0");
+        let held = |events: &[Event]| {
+            let mut e = engine(&p);
+            e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            e.note_on(0, 2, 67, 100.0, &mut |_| {});
+            blocks(&mut e, &[], 2);
+            blocks(&mut e, events, 4)
+        };
+        let plain = held(&[]);
+        let quiet = held(&[control(11, 64)]);
+        let k = (64.0f32 / 127.0).powi(2);
+        // after the first step's ramp, every frame scaled
+        for (a, b) in plain.iter().zip(&quiet).skip(STEP) {
+            assert!((a * k - b).abs() <= 1e-6 * a.abs().max(1e-3), "{a} {b}");
+        }
+        let untouched = [control(1, 90), control(2, 30), control(4, 127), control(67, 127)];
+        let bits = |x: &[f32]| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&held(&untouched)), bits(&plain));
+        // back to 127: the same bits once the ramp is over
+        let mut e = engine(&p);
+        e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        e.note_on(0, 2, 67, 100.0, &mut |_| {});
+        blocks(&mut e, &[control(11, 0)], 2);
+        let back = blocks(&mut e, &[control(11, 127)], 4);
+        assert_eq!(bits(&back[STEP..]), bits(&plain[STEP..]));
+        // a note's volume: half of note 2 alone
+        let alone = |id: u32, gain: f32| {
+            let mut e = engine(&p);
+            e.note_on(0, id, if id == 1 { 60 } else { 67 }, 100.0, &mut |_| {});
+            blocks(&mut e, &[], 2);
+            let kind = Kind::Volume { id, gain };
+            blocks(
+                &mut e,
+                &[Event {
+                    frame: 0,
+                    sound: 0,
+                    kind,
+                }],
+                4,
+            )
+        };
+        let (one, two) = (alone(1, 1.0), alone(2, 0.5));
+        let both = held(&[Event {
+            frame: 0,
+            sound: 0,
+            kind: Kind::Volume { id: 2, gain: 0.5 },
+        }]);
+        for ((a, b), c) in one.iter().zip(&two).zip(&both).skip(STEP) {
+            assert!((a + b - c).abs() < 1e-5, "{a} + {b} against {c}");
+        }
+    }
+
+    /// The sostenuto pedal holds the notes whose keys were down when it went down, not later ones;
+    /// up, it lets them go unless the sustain pedal holds them.
+    #[test]
+    fn sostenuto_holds_the_notes_down_when_it_went_down() {
+        let p = carrier(1, "op1.eg_time_release=0");
+        let run = |e: &mut Engine, n: usize| {
+            let mut ends = 0;
+            for _ in 0..n {
+                e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| ends += 1);
+            }
+            ends
+        };
+        let mut e = engine(&p);
+        e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        e.control(0, 66, 127);
+        e.note_on(0, 2, 64, 100.0, &mut |_| {});
+        e.note_off(0, 1, &mut |_| {});
+        e.note_off(0, 2, &mut |_| {});
+        assert_eq!((run(&mut e, 200), e.active()), (1, 1));
+        e.pedal(0, true);
+        e.control(0, 66, 0);
+        assert_eq!((run(&mut e, 200), e.active()), (0, 1));
+        e.pedal(0, false);
+        assert_eq!((run(&mut e, 200), e.active()), (1, 0));
+        // a note whose key is still down when the pedal goes up keeps sounding until its note off
+        e.note_on(0, 3, 60, 100.0, &mut |_| {});
+        e.control(0, 66, 127);
+        e.control(0, 66, 0);
+        assert_eq!((run(&mut e, 200), e.active()), (0, 1));
+        e.note_off(0, 3, &mut |_| {});
+        assert_eq!((run(&mut e, 200), e.active()), (1, 0));
+    }
+
     /// Which notes survive at the limit: the voice-budget order.
     #[test]
     fn shedding_order() {
@@ -4139,13 +4413,28 @@ mod tests {
                             b.note_off(s, id, &mut |_| {});
                         }
                     }
-                    8 => {
+                    8 if r() % 2 == 0 => {
                         let (s, down) = ((r() % 3) as usize, r() % 2 == 0);
                         if timed {
                             event(s, Kind::Pedal { down });
                         } else {
                             a.pedal(s, down);
                             b.pedal(s, down);
+                        }
+                    }
+                    // a controller (the sostenuto pedal among them) or a note's volume
+                    8 => {
+                        let s = (r() % 3) as usize;
+                        let (cc, value) = ([1, 2, 4, 11, 66, 67, PRESSURE][r() as usize % 7], (r() % 128) as u8);
+                        let (id, gain) = (r() % (next + 1), (r() % 500) as f32 / 100.0);
+                        if timed {
+                            event(s, Kind::Control { cc, value });
+                            event(s, Kind::Volume { id, gain });
+                        } else {
+                            a.control(s, cc, value);
+                            b.control(s, cc, value);
+                            a.volume(s, id, gain);
+                            b.volume(s, id, gain);
                         }
                     }
                     9 if r() % 2 == 0 => {
