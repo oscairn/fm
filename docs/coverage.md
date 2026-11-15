@@ -23,8 +23,16 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 (docs/design.md, 2.3); the pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 
 At M6 the plugin (`docs/plugin.md`) offers every parameter below as a CLAP parameter with its id and
-plays each as the core does; what the plugin itself does not cover (the controllers other than the
-pedal and bend, note expressions, parameter modulation) is listed there.
+plays each as the core does; what the plugin itself does not cover (the tuning expression, CC 65,
+parameter modulation) is listed there.
+
+At M7: the channel controllers (mod wheel, breath, both foot controllers, aftertouch, expression,
+the sostenuto pedal) and each note's volume expression, and the controller boxes (`boxN_*`) on the
+operator level (each operator's `ctrl_setN`), the cutoff and the resonance, evaluated when a source
+moves and ramped across the next control step (docs/design.md, 3.9). A box on any other
+destination, from a source the host does not send, or on a curve not measured (played as linear)
+is reported by `fmbench coverage` beside the parameters, by its `boxN_dst`. Not played yet: the
+controller sensitivities, the key controller sets, micro tuning, the sound LFO's random speed.
 
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|

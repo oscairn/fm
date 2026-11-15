@@ -1,7 +1,7 @@
 # The plugin
 
 `crates/fm-clap` builds the CLAP plugin `org.oscairn.fm2`, "Oscairn FM (preview)", vendor Oscairn,
-version 0.1.0 (the crate's version, which the descriptor reads), AGPL-3.0-or-later. It is a
+version 0.2.0 (the crate's version, which the descriptor reads), AGPL-3.0-or-later. It is a
 `cdylib` (`libfm_clap.so`, `.dylib`, `fm_clap.dll`) with one entry, `clap_entry`; packaging it as a
 `.clap` bundle, signing and publishing are not done here.
 
@@ -32,13 +32,26 @@ the shell has one set of CLAP types and no casts. No framework: the shell is the
 
 | CLAP id | Parameter |
 |---|---|
-| the sound format's id (0-40, 100-134, 200-255, 1000 + 100 op + k) | that sound parameter, raw units, its range and default (`docs/sound-format.md`) |
+| the sound format's id (0-40, 100-134, 200-266, 300-555, 1000 + 100 op + k) | that sound parameter, raw units, its range and default (`docs/sound-format.md`) |
 | 10000 | output bus, 0 (main) to 8 |
 
 Ids never change: a new sound parameter takes the sound format's new id; shell parameters take ids
-from 10000 up. Every parameter is automatable and stepped; none is modulatable yet (the controller
-destinations come with M7). Names are the text form's (`algorithm`, `op3.level`), modules
-`Common`, `Filter`, `Part`, `Operator n`, `Output`. Value text is the integer (the bus: `Main`,
+from 10000 up. Every parameter is automatable and stepped; none is modulatable (`PARAM_MOD` is not
+taken). Names are the text form's (`algorithm`, `op3.level`), modules `Common`, `Filter`, `Part`,
+`Controllers` (ids 256-555), `Operator n`, `Output`.
+
+The controller boxes' sources that a host cannot send as MIDI are sound parameters, named as the
+sibling engines name theirs so that a host and a converter treat the engines alike:
+
+| CLAP id | name | range (default) | box source |
+|---|---|---|---|
+| 256-263 | `knob1`..`knob8` | 0-1023 (512) | assignable knobs 1-8 (sources 8-15): the raw value, 1023 as 1024 |
+| 264 | `ribbon` | 0-127 (0) | the ribbon (source 6), as its controller |
+| 265, 266 | `switch1`, `switch2` | 0-1 (0) | assignable switches 1 and 2 (sources 16, 17): off 0, on 1024 |
+
+Being sound parameters they are saved with the sound and, like every parameter, take effect at the
+start of the stretch after their event (a preparation of the sound, below); the boxes themselves
+(ids 300-555) are the sound's (`docs/coverage.md`, `boxN_*`). Value text is the integer (the bus: `Main`,
 `Bus n`), and text back is the integer.
 
 A `CLAP_EVENT_PARAM_VALUE` acts on the sound its `channel` selects, or with channel -1 on every
@@ -63,9 +76,16 @@ end of the stretch in which it ended; the ends a state load owes go out at the n
 MIDI (port 0): note on and off (a note off releases the oldest held note of its key and channel),
 pitch bend, CC 64 (the sustain pedal of the sound the channel selects), CC 120 (every note of the
 channel choked), CC 123 (every held note of the channel released, and what the pedal holds). The
-part's receive setting is the host's (it filters pedals before they reach the plugin). The other
-controllers the host forwards (CC 1, 2, 4, 11, 65-67) and the note expressions are accepted and not
-played yet (M7; the core has no per-note volume).
+part's receive settings are the host's: as in the sibling engines, the plugin has none.
+
+Controllers, each a timed event of the sound the channel selects, from the next control step at its
+frame: CC 1 (mod wheel, box source 1), CC 2 (breath, 7), CC 4 (foot controller 2, 4), CC 11 (foot
+controller 1, source 3, and expression: the sound's output times (v / 127)^2, ramped over a step),
+CC 66 (the sostenuto pedal: holds the notes whose keys are down when it goes down), channel
+pressure, key pressure and the CLAP pressure expression (aftertouch, source 2, the latest wins for
+the whole sound), the CLAP volume expression (the addressed notes' output, linear, ramped over a
+step). CC 65 (portamento) and CC 67 (the soft pedal, which the reference does not receive) are
+ignored; the tuning expression is not played.
 
 ## Sound contexts and sharing
 
@@ -127,13 +147,16 @@ the entry for the selected sounds: its limit, reserve and priority; past them th
 up at the next block's start in the extension's order, each with a 3 ms fade. `active_voices`
 reports the voices sounding and one voice's cost a block: the running mean of the sounding voices'
 plan costs (instructions a 128-frame block, the plans' cost table), scaled to the block size and
-stated in microseconds at an assumed 1,000 instructions a microsecond (not measured on the device).
+stated in microseconds at 1,000 instructions a microsecond: the device timed the engine at 11-17 µs
+a voice-block for plans of 14,000-20,000 instructions at 32 voices, 0.8-1.0 µs a thousand, and the
+slow end is taken so that the cost is not understated.
 `notes` reports each sounding note's address and loudness (its carriers' gain bound times its fade).
 
 ## Not covered
 
-Note expressions (volume, pressure, tuning) and the controllers other than pedal and bend (M7);
-parameter modulation (`PARAM_MOD`) and modulatable flags (M7); tempo sync; micro tuning; the output
+The tuning expression and per-note bend; CC 65 (portamento switch); parameter modulation
+(`PARAM_MOD`) and modulatable box destinations; the controller boxes' destinations without a law
+(`docs/coverage.md`); tempo sync; micro tuning; the output
 high-pass; preset discovery and `prepare_preset`; the plugin's window; UI roles beyond the output bus,
 envelope views and the FM algorithm view; per-channel bend of notes left on a sound no longer
 selected (bend and pedal go to the channel's selected sound); packaging, signing.

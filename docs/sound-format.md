@@ -13,6 +13,8 @@ coverage report's business (`docs/coverage.md`).
 | 0-40 | part common: pan, key-on delay, pitch, the common pitch envelope, the voice LFO, routing, feedback, macros |
 | 100-134 | the filter and the filter envelope |
 | 200-255 | part parameters that act on the engine: mono, portamento, bend, detune, note shift, tuning, velocity, the sound LFO, part offsets |
+| 256-266 | the controller boxes' own sources: assignable knobs 1-8 (raw 0-1023), the ribbon (0-127), assignable switches 1 and 2 |
+| 300-555 | controller boxes 1-32, eight fields each at 300 + 8 (n - 1): source, destination (the reference's number, 0 off), ratio, polarity, curve bank, curve type, curve parameters 1 and 2 |
 | 1000 + 100 op + k | operator `op` (0-7): k 0-38 its switches (32 controller sets, 4 key-controller sets, 3 sound-LFO destinations), k 40-77 its parameters |
 
 Values are the model's raw values, signed where the model shows a signed value (detune -15 to

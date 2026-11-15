@@ -215,7 +215,7 @@ Control rate, every 16 frames (or fewer where an event splits a block, so a note
 frame), each with a linear ramp to the next step where it reaches the audio. As built:
 `render_events` takes a block's note, pedal, bend and parameter events (since M4: a parameter's
 raw value by its id in the sound format, the shell's route for knobs, macros and every other
-parameter event) with their frames and renders each sound in
+parameter event), and since M7 controller and note volume events (section 3.9), with their frames and renders each sound in
 segments between its own events (the sibling engines' rule), its steps starting again at each
 event; a step shorter than 16 frames moves each envelope that share of a step (the fall times n/16,
 a rise's share 1 - e^(-rate n/16), the hold counted in frames) and ramps the gains over its
@@ -667,8 +667,8 @@ sound LFO (section 3.6). The voice LFO's filter route came with the filter (M5, 
   about 17,200 instructions (a block of one voice with an event at its start, 54,621, against the
   same block without, 37,433), half a voice-block of one voice alone; not redesigned.
 - **Controllers**: the model's fixed routes from controllers to the LFO depths are not part of its
-  M4 parameters (the controller sets decide them, M7), so the core takes no controller events yet;
-  the host's MIDI controllers other than the pedal and bend wait for M7.
+  M4 parameters (the controller sets decide them); the controllers and the boxes came at M7
+  (section 3.9).
 
 Cost, instructions a voice-block (M3 / M4): routing 12 sines at 32 voices 14,581 / 14,646; one voice
 alone 37,007 / 37,237; eight mixed forms 20,317 / 20,383; at rest 1,215 / 1,226 a block; the worst
@@ -908,14 +908,15 @@ Sizes are rough, in working sessions of the size of this round.
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | done (section 3.7) but the output high-pass (it would change every sound's bits: section 8) |
 | M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | done (sections 2.10 and 3.8, `docs/plugin.md`) but a shell fuzz and UI roles beyond the output bus |
 | | **the first converted sound set plays** | after M6, with the converter writing this engine's format | |
-| M7 | everything | controller-set switches and sensitivities (as decided), micro tuning, the partial items of section 1.5 re-measured, the known-differences register | 2–3 |
+| M7 | everything | controller-set switches and sensitivities (as decided), micro tuning, the partial items of section 1.5 re-measured, the known-differences register | in part (section 3.9): the channel controllers, note expressions, the sostenuto pedal and the controller boxes on the operator level, cutoff and resonance; not the sensitivities, the other box destinations, the key controller boxes, micro tuning, the sound LFO's random speed |
 
 ## 8. Open questions
 
-- The 288 controller-set switches and 16 controller sensitivities: as per-operator parameters the
-  platform's control tree can target (one modulatable "operator level offset" and "pitch offset"
-  per operator, the converter folding switches and sensitivities into the targets), or as engine
-  state with in-engine controller boxes?
+- The controller boxes are in the engine (M7, section 3.9). Open: modulatable box destinations
+  (`PARAM_MOD`) beside them, as the sibling engines offer; the box destinations without a law
+  (the operator frequency with the pitch sensitivity, the voice LFO's depths, the envelopes'
+  times): measure them, or play documented guesses; CC 65 (the portamento switch over a stored
+  parameter).
 - Micro tuning: the engine's own scales, or the host's tuning?
 - The deliberate differences of section 1.5 (band-limiting, formant silence above Nyquist, no
   filter overload, no output clip, widened pitch ranges): keep them all?
@@ -925,8 +926,6 @@ Sizes are rough, in working sessions of the size of this round.
 - The lane gate's one-voice ratio: back under its limit at M6 (2.552 against 2.559, section 3.8),
   with a margin of 0.3 % that a change of code layout alone can use up; raise the baseline, or keep
   it?
-- The voice cost the plugin reports: the plans' instructions stated at an assumed 1,000 a
-  microsecond until the device's timing gives the figure (`docs/plugin.md`).
 - The shell's overhead a block (about 6,300-6,800 instructions with voices, 2,100 more than the
   core at rest when awake with nothing to play): worth a pass of its own?
 
@@ -938,8 +937,8 @@ Provisional decisions taken at M1 (conservative defaults, each open to a later r
   the reference's behaviour is known and cheap it is played (fixed frequencies held at 22.04 kHz,
   note shift +-48, fractional part velocities), otherwise the difference is listed in
   `docs/known-differences.md`.
-- The controller-set switches and the pitch and level controller sensitivities have their ids,
-  ranges and defaults in the sound format now; their behaviour waits for M7.
+- The pitch and level controller sensitivities have their ids, ranges and defaults in the sound
+  format; their behaviour waits for a law.
 - Parameter defaults are the model's initial values. Portamento was off until M3 built it; it is
   now the documented default, on (the reference also needs the performance's switch, off by
   default: docs/known-differences.md), so a sound that sets nothing glides full-time at time 64.

@@ -33,8 +33,9 @@ const EVENTS: usize = 1024;
 const QUEUE: u32 = 32;
 /// The selection queue's entry for `choke_retiring`.
 const CHOKE: u32 = u32::MAX;
-/// Instructions a microsecond, to state a voice's cost in time: an assumption until the device's
-/// timing gives the figure (docs/plugin.md).
+/// Instructions a microsecond, to state a voice's cost in time: the device timed the engine at
+/// 11-17 µs a voice-block for plans of 14,000-20,000 instructions (32 voices), 0.8-1.0 µs a
+/// thousand; the slow end, so the cost is not understated (docs/plugin.md).
 const INSTRUCTIONS_A_MICROSECOND: f64 = 1000.0;
 
 /// A sound context: either thread.
