@@ -27,10 +27,13 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: Toolchain (pinned by rust-toolchain.toml)
         run: rustup show active-toolchain
       - name: Format
-        run: cargo fmt --all --check
+        # (our packages: --all would also take the submodule's)
+        run: cargo fmt --check -p fm-core -p fm-clap -p fmbench -p fm-nopanic
       - name: Clippy
         run: |
           cargo clippy --locked -p fm-core -p fm-clap -p fmbench --all-targets -- -D warnings
@@ -45,15 +48,22 @@ jobs:
           rustup target add thumbv7em-none-eabihf
           cargo build --locked -p fm-core --target thumbv7em-none-eabihf
           ! grep -rnE 'extern crate (alloc|std)|alloc::' crates/fm-core/src
-      - name: No panic paths in the block path
+      - name: No panic paths in the block path and the shell's audio-thread callbacks
         if: matrix.unix
         run: sh tools/check-no-panic.sh
+      - name: The plugin builds and loads (its entry, factory, one instance)
+        run: |
+          cargo build --locked --release -p fm-clap
+          lib=$(ls target/release/libfm_clap.so target/release/libfm_clap.dylib target/release/fm_clap.dll 2>/dev/null | head -n 1)
+          python3 tools/load-plugin.py "$lib" || python tools/load-plugin.py "$lib"
 
   cost:
     name: cost gate (aarch64, callgrind)
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - name: valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
       - name: Instructions a voice-block against the gates and the baseline
