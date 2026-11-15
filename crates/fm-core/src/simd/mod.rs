@@ -26,7 +26,7 @@ pub const W: usize = 4;
 
 /// The first `L` of four values.
 #[inline(always)]
-fn first<T: Copy + Default, const L: usize>(a: &[T; W]) -> [T; L] {
+pub(crate) fn first<T: Copy + Default, const L: usize>(a: &[T; W]) -> [T; L] {
     let mut r = [T::default(); L];
     r.iter_mut().zip(a).for_each(|(r, x)| *r = *x);
     r

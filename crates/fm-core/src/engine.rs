@@ -11,7 +11,7 @@ use crate::laws::{self, DOUBLINGS_PER_DB as DPD};
 use crate::params::{op_index, Common, Op, Part, OPS};
 use crate::plan::{Feedback, Plan};
 use crate::routing::routing;
-use crate::simd::{scalar, F4, U4, W};
+use crate::simd::{first, scalar, F4, U4, W};
 use crate::sound::Sound;
 use crate::tables::{offset, read, read16, Table16, SINE};
 
@@ -53,6 +53,25 @@ pub struct NoteEnd {
     pub sound: u8,
     pub key: u8,
     pub id: u32,
+}
+
+/// A note or pedal event at a frame of a block (see [`Engine::render_events`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Event {
+    /// The frame it takes effect at (0 to `BLOCK` - 1).
+    pub frame: usize,
+    pub sound: u8,
+    pub kind: Kind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    /// [`Engine::note_on`]
+    On { id: u32, key: u8, velocity: f32 },
+    /// [`Engine::note_off`]
+    Off { id: u32 },
+    /// [`Engine::pedal`]
+    Pedal { down: bool },
 }
 
 /// A sound's place in the voice budget's order (oscairn.voice-budget): voices it keeps from other
@@ -213,7 +232,7 @@ struct Lane {
     top: [[f32; W]; OPS],
     /// Each voice's gain on everything: 1, falling to 0 while it is shed; 0 in a free slot.
     fade: [f32; W],
-    /// Read only when a segment changes: the segment, steps left of the hold, each segment's rate.
+    /// Read only when a segment changes: the segment, frames left of the hold, each segment's rate.
     seg: [[u8; W]; OPS],
     count: [[u32; W]; OPS],
     rates: [[[f32; W]; 4]; OPS],
@@ -597,7 +616,7 @@ impl Engine {
             let start = (full + p.eg.get(op).map_or(FLOOR, |e| e[3])).max(FLOOR);
             put(&mut lane.lvl, op, s, start);
             let hold = f64::from(p.hold_ms.get(op).copied().unwrap_or(0.0)) * rate / 1000.0 / STEP as f64 + 0.5;
-            put(&mut lane.count, op, s, hold as u32);
+            put(&mut lane.count, op, s, (hold as u32).saturating_mul(STEP as u32));
             lane.enter(&p, op, s, if hold as u32 > 0 { HOLD } else { ATTACK });
         }
     }
@@ -691,20 +710,62 @@ impl Engine {
 
     /// Adds one block of every sounding voice, mono, to `out`; reports the notes that ended.
     pub fn render<V: F4>(&mut self, out: &mut [f32; BLOCK], end: &mut impl FnMut(NoteEnd)) {
+        self.render_events::<V>(out, &[], end);
+    }
+
+    /// [`Engine::render`] with `events` (in frame order) applied at their frames: each sound's
+    /// control steps start again at its own events' frames (a step shorter than 16 frames before
+    /// one), so a note starts on its frame and no sound's output depends on another's events.
+    pub fn render_events<V: F4>(&mut self, out: &mut [f32; BLOCK], events: &[Event], end: &mut impl FnMut(NoteEnd)) {
         while self.keeping(None) > self.limit && self.shed(None, None) {}
         for (sound, lim) in (0..SOUNDS as u8).zip(self.limits).filter(|(_, l)| l.limit > 0) {
             while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
         }
+        let busy = self
+            .lanes
+            .iter()
+            .filter(|l| l.used != 0)
+            .fold(0, |m, l| m | bit(usize::from(l.sound)));
+        let busy = events.iter().fold(busy, |m, e| m | bit(usize::from(e.sound)));
+        for sound in (0..SOUNDS as u8).filter(|&s| has(u32::from(busy), usize::from(s))) {
+            let mut from = 0;
+            for e in events.iter().filter(|e| e.sound == sound) {
+                let at = e.frame.clamp(from, BLOCK);
+                self.render_sound::<V>(sound, out, from, at, end);
+                from = at;
+                let s = usize::from(sound);
+                match e.kind {
+                    Kind::On { id, key, velocity } => self.note_on(s, id, key, velocity, end),
+                    Kind::Off { id } => self.note_off(s, id),
+                    Kind::Pedal { down } => self.pedal(s, down),
+                }
+            }
+            self.render_sound::<V>(sound, out, from, BLOCK, end);
+        }
+    }
+
+    /// Frames `from..to` of the lanes of `sound`, in control steps of 16 frames from `from` (the
+    /// last one shorter).
+    fn render_sound<V: F4>(
+        &mut self,
+        sound: u8,
+        out: &mut [f32; BLOCK],
+        from: usize,
+        to: usize,
+        end: &mut impl FnMut(NoteEnd),
+    ) {
         let shed_step = self.shed_step;
         let (y1, y4) = (&mut self.y1, &mut self.y4);
-        for lane in self.lanes.iter_mut().filter(|l| l.used != 0) {
-            let Some(p) = self.sounds.get(usize::from(lane.sound)) else {
-                continue;
-            };
-            for chunk in out.chunks_exact_mut(STEP) {
-                let Ok(chunk) = <&mut [f32; STEP]>::try_from(chunk) else {
-                    continue;
-                };
+        let Some(p) = self.sounds.get(usize::from(sound)) else {
+            return;
+        };
+        for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
+            let mut f = from;
+            while let Some(chunk) = out.get_mut(f..to.min(f.saturating_add(STEP))) {
+                if chunk.is_empty() {
+                    break;
+                }
+                f = f.saturating_add(chunk.len());
                 lane.compact();
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
@@ -717,23 +778,30 @@ impl Engine {
     }
 }
 
-/// One control step of a lane at width `L` (its voices in its first `L` slots), added to `out`.
+/// One control step of a lane at width `L` (its voices in its first `L` slots), added to `out`
+/// (1 to 16 frames: a shorter step is rendered whole, its phases and feedback history then set
+/// to where its last frame left them).
 #[inline(always)]
 fn step<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
     shed_step: f32,
     end: &mut impl FnMut(NoteEnd),
-    out: &mut [f32; STEP],
+    out: &mut [f32],
     y: &mut [[[f32; L]; STEP]; OPS],
 ) {
-    let (g0, dg) = envelopes::<L, V>(lane, p, shed_step, end);
+    let n = out.len().clamp(1, STEP);
+    let (g0, dg) = envelopes::<L, V>(lane, p, shed_step, n, end);
+    let start = (n < STEP).then(|| (lane.ph, lane.fb[0]));
     let mut vout = [[0.0f32; L]; STEP];
     // a sound with sines only runs the kernels without the forms' branches
     if p.plan.forms {
         ops::<L, V, true>(lane, p, &g0, &dg, y, &mut vout);
     } else {
         ops::<L, V, false>(lane, p, &g0, &dg, y, &mut vout);
+    }
+    if let Some((ph0, fb0)) = start {
+        short(lane, p, n, &ph0, &fb0, y);
     }
     // the voices in pairs, as four-wide (the missing ones' zeros change no bits)
     for (o, v) in out.iter_mut().zip(vout.iter()) {
@@ -746,6 +814,36 @@ fn step<const L: usize, V: F4<L>>(
     }
 }
 
+/// After a step of `n` frames (fewer than 16) rendered whole: the phases `n` increments on from
+/// `ph0`, the feedback history the source's outputs at frames `n - 1` and `n - 2` (`fb0` before).
+#[inline(never)]
+fn short<const L: usize>(
+    lane: &mut Lane,
+    p: &Prepared,
+    n: usize,
+    ph0: &[[u32; W]; OPS],
+    fb0: &[f32; W],
+    y: &[[[f32; L]; STEP]; OPS],
+) {
+    let live = (lane.ph.iter_mut().zip(ph0.iter().zip(lane.inc.iter()))).zip(0..OPS);
+    for ((ph, (p0, inc)), _) in live.filter(|&(_, i)| has(u32::from(p.plan.live), i)) {
+        for (ph, (p0, inc)) in ph.iter_mut().zip(p0.iter().zip(inc.iter())) {
+            *ph = p0.wrapping_add(inc.wrapping_mul(n as u32));
+        }
+    }
+    let src = match p.plan.feedback {
+        Feedback::Own(i) => usize::from(i),
+        Feedback::Loop { from, .. } => usize::from(from),
+        Feedback::None => return,
+    };
+    let Some(ys) = y.get(src) else { return };
+    let y1 = ys.get(n.wrapping_sub(1)).copied().unwrap_or([0.0; L]);
+    let y2 = ys.get(n.wrapping_sub(2)).copied().unwrap_or_else(|| first(fb0));
+    let [f1, f2] = &mut lane.fb;
+    f1.iter_mut().zip(y1).for_each(|(f, y)| *f = y);
+    f2.iter_mut().zip(y2).for_each(|(f, y)| *f = y);
+}
+
 /// One control step of a lane's envelopes: returns each operator's gain at the step's start and
 /// its ramp a frame; moves segments on, fades shed voices, and ends voices (the end rule, a fade's
 /// end).
@@ -754,8 +852,12 @@ fn envelopes<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
     shed_step: f32,
+    n: usize,
     end: &mut impl FnMut(NoteEnd),
 ) -> ([[f32; L]; OPS], [[f32; L]; OPS]) {
+    // a step of `n` frames moves each envelope `k` of a 16-frame step's way
+    let (k, per_frame) = (n as f32 / STEP as f32, V::splat(1.0 / n as f32));
+    let shed_step = shed_step * k;
     // shed voices fade linearly
     for (s, f) in lane.fade.iter_mut().enumerate().take(L) {
         if has(u32::from(lane.ending), s) {
@@ -767,22 +869,33 @@ fn envelopes<const L: usize, V: F4<L>>(
     let mut g0 = [[0.0; L]; OPS];
     let mut dg = [[0.0; L]; OPS];
     let mut bound = V::splat(0.0);
+    // a shorter step's falls, and rises' shares of the deficit (1 - e^-rate)
+    let short;
+    let (falls, rises, min_rise) = if n < STEP {
+        short = (lane.fall.map(|f| (V::load4(&f) * V::splat(k)).store())).map(|f| {
+            let r = V::splat(1.0) - (V::load(f) * V::splat(-core::f32::consts::LOG2_E)).exp2();
+            (f, r.store())
+        });
+        (short.map(|x| x.0), short.map(|x| x.1), MIN_RISE * k)
+    } else {
+        (lane.fall.map(|f| first(&f)), lane.rise.map(|r| first(&r)), MIN_RISE)
+    };
     let ops = (lane.lvl.iter_mut().zip(lane.gain.iter_mut()))
         .zip(g0.iter_mut().zip(dg.iter_mut()))
-        .zip((lane.tgt.iter().zip(lane.fall.iter())).zip(lane.rise.iter().zip(lane.top.iter())))
+        .zip((lane.tgt.iter().zip(falls.iter())).zip(rises.iter().zip(lane.top.iter())))
         .zip(0..OPS);
     for ((((lv, gain), (g, d)), ((t, fall), (rise, top))), i) in ops {
         if !has(u32::from(p.plan.live), i) {
             continue;
         }
         let (l, t) = (V::load4(lv), V::load4(t));
-        let up = ((V::load4(top) - l) * V::load4(rise)).max(V::splat(MIN_RISE)) + l;
-        let l2 = V::select(l.ge(t), (l - V::load4(fall)).max(t), up.min(t));
+        let up = ((V::load4(top) - l) * V::load(*rise)).max(V::splat(min_rise)) + l;
+        let l2 = V::select(l.ge(t), (l - V::load(*fall)).max(t), up.min(t));
         l2.store4(lv);
         let target = l2.exp2() * fade;
         let g_last = V::load4(gain);
         *g = g_last.store();
-        *d = ((target - g_last) * V::splat(1.0 / STEP as f32)).store();
+        *d = ((target - g_last) * per_frame).store();
         target.store4(gain);
         if has(u32::from(p.plan.carriers), i) {
             bound = bound + l2.max(t).exp2();
@@ -799,7 +912,7 @@ fn envelopes<const L: usize, V: F4<L>>(
         let reached = get(&lane.lvl, op, s) == get(&lane.tgt, op, s);
         match seg {
             HOLD => {
-                let c = get(&lane.count, op, s).saturating_sub(1);
+                let c = get(&lane.count, op, s).saturating_sub(n as u32);
                 put(&mut lane.count, op, s, c);
                 if c == 0 {
                     lane.enter(p, op, s, ATTACK);
@@ -1595,25 +1708,54 @@ mod tests {
                     assert!(a.set_sound(s, &p) && b.set_sound(s, &p), "sound {s} still sounding");
                 }
             }
+            // every other block, the notes and pedals as timed events
+            let mut ev = Vec::new();
             for _ in 0..r() % 6 {
+                let (timed, frame) = (block % 2 == 1, (r() % BLOCK as u32) as usize);
+                let mut event = |sound: usize, kind| {
+                    ev.push(Event {
+                        frame,
+                        sound: sound as u8,
+                        kind,
+                    })
+                };
                 match r() % 10 {
                     0..=4 => {
                         let (s, key, vel) = ((r() % 3) as usize, (r() % 128) as u8, (r() % 128) as f32);
                         next += 1;
                         *started.entry(next).or_default() += 1;
-                        a.note_on(s, next, key, vel, &mut |n| record(n, &mut ended));
-                        b.note_on(s, next, key, vel, &mut |_| {});
+                        if timed {
+                            event(
+                                s,
+                                Kind::On {
+                                    id: next,
+                                    key,
+                                    velocity: vel,
+                                },
+                            );
+                        } else {
+                            a.note_on(s, next, key, vel, &mut |n| record(n, &mut ended));
+                            b.note_on(s, next, key, vel, &mut |_| {});
+                        }
                         held.push((s, next));
                     }
                     5..=7 if !held.is_empty() => {
                         let (s, id) = held.swap_remove(r() as usize % held.len());
-                        a.note_off(s, id);
-                        b.note_off(s, id);
+                        if timed {
+                            event(s, Kind::Off { id });
+                        } else {
+                            a.note_off(s, id);
+                            b.note_off(s, id);
+                        }
                     }
                     8 => {
                         let (s, down) = ((r() % 3) as usize, r() % 2 == 0);
-                        a.pedal(s, down);
-                        b.pedal(s, down);
+                        if timed {
+                            event(s, Kind::Pedal { down });
+                        } else {
+                            a.pedal(s, down);
+                            b.pedal(s, down);
+                        }
                     }
                     _ => {
                         let mut lim = [Limits::default(); SOUNDS];
@@ -1630,9 +1772,10 @@ mod tests {
                     }
                 }
             }
+            ev.sort_by_key(|e| e.frame);
             let (mut oa, mut ob) = ([0.0; BLOCK], [0.0; BLOCK]);
-            a.render::<Native>(&mut oa, &mut |n| record(n, &mut ended));
-            b.render::<scalar::F>(&mut ob, &mut |_| {});
+            a.render_events::<Native>(&mut oa, &ev, &mut |n| record(n, &mut ended));
+            b.render_events::<scalar::F>(&mut ob, &ev, &mut |_| {});
             assert!(
                 oa.iter().zip(&ob).all(|(x, y)| x.to_bits() == y.to_bits()),
                 "block {block}: back ends differ"
@@ -1951,6 +2094,83 @@ mod tests {
         lane_widths("one resonant", |o| if o == 1 { "op#.form=5" } else { "" }, false);
         // every operator resonant, formant 60: the neighbours' centres are above Nyquist
         lane_widths("resonant", |_| "op#.form=5 op#.formant=60", true);
+    }
+
+    fn on(frame: usize, sound: u8, id: u32, key: u8) -> Event {
+        let kind = Kind::On {
+            id,
+            key,
+            velocity: 100.0,
+        };
+        Event { frame, sound, kind }
+    }
+
+    /// A note starts on its frame: silence before it, then, for its whole steps in the block, the
+    /// same bits as the note started at a block's start.
+    #[test]
+    fn a_note_starts_on_its_frame() {
+        let p = carrier(12, "");
+        let mut a = engine(&p);
+        let mut x = [0.0; BLOCK];
+        a.render_events::<Native>(&mut x, &[on(37, 0, 1, 60)], &mut |_| {});
+        let mut b = engine(&p);
+        let mut y = [0.0; BLOCK];
+        b.render_events::<Native>(&mut y, &[on(0, 0, 1, 60)], &mut |_| {});
+        assert!(x[..38].iter().all(|&v| v == 0.0) && x[38] != 0.0);
+        let whole = (BLOCK - 37) / STEP * STEP;
+        assert!(x[37..37 + whole]
+            .iter()
+            .zip(&y)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
+        // and the step cut short at the block's end leaves the note where 128 - 37 frames take it
+        let (mut c, mut z) = (engine(&p), [0.0; BLOCK]);
+        c.render_events::<Native>(&mut z, &[on(0, 0, 1, 60)], &mut |_| {});
+        assert!(x[37..].iter().zip(&z).all(|(a, b)| (a - b).abs() < 1e-3));
+    }
+
+    /// A sound's events cut its own control steps only: another sound plays the same bits; a voice
+    /// of the same sound plays on with its steps cut, close to its bits without the cut (the same
+    /// bits while its envelopes stand still; moving, their steps' shares differ by rounding).
+    #[test]
+    fn events_split_their_own_sound_only() {
+        let text: String = (1..=8)
+            .map(|o| {
+                format!(
+                    "op{o}.form=5 op{o}.formant=60 op{o}.eg_level_decay1=0 op{o}.eg_time_decay1=60 op{o}.level=90\n"
+                )
+            })
+            .collect();
+        let p = sound(&format!("algorithm=12 feedback=6\n{text}"));
+        let quiet = sound(&(1..=8).map(|o| format!("op{o}.level=0\n")).collect::<String>());
+        let render = |events: &[Event], other: bool| {
+            let mut e = engine(&p);
+            assert!(e.set_sound(1, if other { &p } else { &quiet }));
+            let mut x = Vec::new();
+            for b in 0..12 {
+                let mut o = [0.0; BLOCK];
+                let ev: Vec<Event> = events
+                    .iter()
+                    .filter(|e| e.frame / BLOCK == b)
+                    .map(|e| Event {
+                        frame: e.frame % BLOCK,
+                        ..*e
+                    })
+                    .collect();
+                e.render_events::<Native>(&mut o, &ev, &mut |_| {});
+                x.extend_from_slice(&o);
+            }
+            x
+        };
+        let base = [on(0, 0, 1, 36)];
+        let alone = render(&base, false);
+        // a silent sound's note at frame 3 * 128 + 37: sound 0's bits unchanged
+        let other = render(&[base[0], on(421, 1, 2, 60)], false);
+        assert!(alone.iter().zip(&other).all(|(a, b)| a.to_bits() == b.to_bits()));
+        // a silent note of the same sound (centred above Nyquist) cuts the voice's steps
+        let same = render(&[base[0], on(421, 0, 2, 96)], false);
+        let peak = alone.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        let diff = alone.iter().zip(&same).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(diff > 0.0 && diff < peak * 1e-3, "{diff} against a peak of {peak}");
     }
 
     const GOLDEN: u64 = 0xee81_582b_c559_a5fe;

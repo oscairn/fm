@@ -5,7 +5,7 @@
 //! survives optimisation (tools/check-no-panic.sh).
 #![no_std]
 
-use fm_core::engine::{Engine, Limits, Prepared, SOUNDS};
+use fm_core::engine::{Engine, Event, Kind, Limits, Prepared, SOUNDS};
 use fm_core::simd::Native;
 use fm_core::sound::Sound;
 use fm_core::spike::{self, Form, Layout, Routing, BLOCK};
@@ -96,7 +96,31 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
             e.note_off(0, 2);
             e.choke(1);
         }
-        e.render::<Native>(out, &mut end);
+        // timed events at frames and for sounds the optimiser cannot see (some out of range)
+        let at = |k: u32| (pick.rotate_left(k) % 160) as usize;
+        let sound = (pick >> 8) as u8 % 10;
+        let events = [
+            Event {
+                frame: at(3),
+                sound,
+                kind: Kind::On {
+                    id: b,
+                    key: key.wrapping_add(b as u8),
+                    velocity,
+                },
+            },
+            Event {
+                frame: at(9),
+                sound,
+                kind: Kind::Pedal { down: pick & 2 != 0 },
+            },
+            Event {
+                frame: at(17),
+                sound,
+                kind: Kind::Off { id: b.wrapping_sub(1) },
+            },
+        ];
+        e.render_events::<Native>(out, &events, &mut end);
     }
     ended
 }
