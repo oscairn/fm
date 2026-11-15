@@ -871,12 +871,12 @@ counted from a trace), a block:
 
 | | 0.1.0 | 0.3.0 | 0.3.1 |
 |---|---|---|---|
-| instructions, one key (three voices) | 154,446 | 162,965 | 162,597 |
-| two keys | 231,382 | 257,589 | 255,509 |
-| four keys | 238,342 | 264,261 | 262,469 |
-| lines touched, one key: data + code | 475 + 352 | 490 + 358 | 439 + 343 |
-| two keys | 518 + 402 | 534 + 417 | 484 + 391 |
-| asleep (no voice, no event): instructions, data lines | 1,327, 171 (cold misses) | 1,328, 174 | 1,128, 136 |
+| instructions, one key (three voices) | 154,446 | 162,965 | 162,436 |
+| two keys | 231,382 | 257,589 | 256,036 |
+| four keys | 238,342 | 264,261 | 262,708 |
+| lines touched, one key: data + code | 475 + 352 | 490 + 358 | 441 + 345 |
+| two keys | 518 + 402 | 534 + 417 | 485 + 395 |
+| asleep (no voice, no event): instructions, data lines | 1,327, 171 (cold misses) | 1,328, 174 | 1,128, 135 |
 
 The instructions are the three single-voice lanes on the one-wide path, about 54,000 each for this
 plan (a quarter of a four-voice lane of it is about 22,000); at about 0.88 µs a thousand when warm
@@ -895,10 +895,11 @@ lanes, the idle test's count: a cache line a lane), now over a bit mask of the l
 shell making the voice limits from every slot and the whole budget list each block, now only when
 the budget, a selection or the state changes; the shell reading every slot's output bus, now only
 the playing sounds'; a box source's value preparing the whole sound, now `Mods` alone, and a value
-the sound already has staging nothing (ten such events a block: 270,040 → 166,030 instructions,
-1,558 → 635 cold lines). Gates: `hosted-shared` (synthetic sounds of the same kind) 57,558 → 57,464 a
-voice-block and its first-level misses with the device's caches 62.7 → 40.3; `hosted-shared-idle`
-4,016 → 3,405 a block; asleep 1,159 → 958; awake at rest 3,303 → 2,705.
+the sound already has staging nothing (ten such events a block: 270,040 → 165,869 instructions,
+1,558 → 587 cold misses). Gates: `hosted-shared` (synthetic sounds of the same kind) 57,558 → 57,400 a
+voice-block and its first-level misses with the device's caches 62.7 → 41.2; `hosted-shared-idle`
+4,016 → 3,416 a block; asleep 1,159 → 958; awake at rest 3,303 → 2,720. Routing 12 at 32 voices of
+one sound 14,962 → 15,011 (+0.3 %: the lane loop's code).
 
 Left: an active port nothing played into is still zeroed each block (16 lines a port; CLAP's
 constant flag would spare most of it where a host honours it), and the core renders into its own
