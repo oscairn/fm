@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The small vector type the kernels are written against: four `f32` or `u32` lanes, one voice a
 //! lane. Three back ends implement it: NEON (aarch64), SSE2 (x86_64) and scalar (any target, and
-//! the reference the other two are tested against). Every operation here is exact IEEE single
+//! the reference the other two are tested against; generic over the lane count, so it also serves
+//! a lane holding one voice, one lane wide). Every operation here is exact IEEE single
 //! precision or exact integer arithmetic, and `mul_add` is a multiply then an add (never fused),
 //! so the three back ends give bit-identical results; `tests` checks that.
 //!
@@ -19,8 +20,17 @@ pub mod neon;
 #[cfg(target_arch = "x86_64")]
 pub mod sse2;
 
-/// Lanes per vector: voices processed together.
+/// Lanes per vector: voices processed together (a lane of voices; narrower vectors serve lanes
+/// holding one or two).
 pub const W: usize = 4;
+
+/// The first `L` of four values.
+#[inline(always)]
+fn first<T: Copy + Default, const L: usize>(a: &[T; W]) -> [T; L] {
+    let mut r = [T::default(); L];
+    r.iter_mut().zip(a).for_each(|(r, x)| *r = *x);
+    r
+}
 
 /// The table index mask: every gather reads within the table whatever the lanes hold.
 const MASK: u32 = (N as u32).wrapping_sub(1);
@@ -28,12 +38,23 @@ const MASK: u32 = (N as u32).wrapping_sub(1);
 const SHIFT: i32 = 32 - BITS as i32;
 
 /// Four `f32` lanes.
-pub trait F4: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> {
-    /// The matching four `u32` lanes.
-    type U: U4<F = Self>;
+/// `L` lanes (four, a lane of voices, unless narrower).
+pub trait F4<const L: usize = W>: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> {
+    /// The matching `u32` lanes.
+    type U: U4<L, F = Self>;
     fn splat(x: f32) -> Self;
-    fn load(a: [f32; W]) -> Self;
-    fn store(self) -> [f32; W];
+    fn load(a: [f32; L]) -> Self;
+    fn store(self) -> [f32; L];
+    /// The first `L` of four lanes kept in memory.
+    #[inline(always)]
+    fn load4(a: &[f32; W]) -> Self {
+        Self::load(first(a))
+    }
+    /// Writes the first `L` of four lanes kept in memory.
+    #[inline(always)]
+    fn store4(self, a: &mut [f32; W]) {
+        a.iter_mut().zip(self.store()).for_each(|(a, x)| *a = x);
+    }
     fn min(self, o: Self) -> Self;
     fn max(self, o: Self) -> Self;
     /// All ones in each lane where `self >= o`.
@@ -73,17 +94,27 @@ pub trait F4: Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self
         p = p.mul_add(f, Self::splat(1.0));
         // p in [1, 2); add (k - 30) to its exponent field
         p.to_bits()
-            .add(k.add(U4::splat(30u32.wrapping_neg())).shl::<23>())
+            .add(k.add(<Self::U as U4<L>>::splat(30u32.wrapping_neg())).shl::<23>())
             .bits_to_f32()
     }
 }
 
-/// Four `u32` lanes; arithmetic wraps.
-pub trait U4: Copy {
-    type F: F4<U = Self>;
+/// `L` `u32` lanes; arithmetic wraps.
+pub trait U4<const L: usize = W>: Copy {
+    type F: F4<L, U = Self>;
     fn splat(x: u32) -> Self;
-    fn load(a: [u32; W]) -> Self;
-    fn store(self) -> [u32; W];
+    fn load(a: [u32; L]) -> Self;
+    fn store(self) -> [u32; L];
+    /// The first `L` of four lanes kept in memory.
+    #[inline(always)]
+    fn load4(a: &[u32; W]) -> Self {
+        Self::load(first(a))
+    }
+    /// Writes the first `L` of four lanes kept in memory.
+    #[inline(always)]
+    fn store4(self, a: &mut [u32; W]) {
+        a.iter_mut().zip(self.store()).for_each(|(a, x)| *a = x);
+    }
     fn add(self, o: Self) -> Self;
     fn mul(self, o: Self) -> Self;
     fn and(self, o: Self) -> Self;
@@ -154,7 +185,7 @@ mod tests {
     fn exp2_accuracy() {
         for i in 0..=300 {
             let x = -(i as f32) * 0.1;
-            let got = scalar::F::splat(x).exp2().store()[0];
+            let got = <scalar::F>::splat(x).exp2().store()[0];
             let want = 2f32.powf(x);
             assert!(((got - want) / want).abs() < 2e-4, "{x}: {got} against {want}");
         }

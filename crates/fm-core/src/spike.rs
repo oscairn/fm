@@ -281,7 +281,7 @@ fn wave<V: F4>(form: Form, ph: V::U, off: V::U) -> V {
         Form::Sine => read(&SINE, ph.add(off)),
         Form::Table => read(&SAW16, ph.add(off)),
         Form::Window { centre } => {
-            read::<V>(&WINDOW, ph.add(off)) * read::<V>(&SINE, ph.mul(V::U::splat(centre)).add(off))
+            read::<W, V>(&WINDOW, ph.add(off)) * read::<W, V>(&SINE, ph.mul(V::U::splat(centre)).add(off))
         }
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The voice engine (docs/design.md, section 2): up to eight prepared sounds, a pool of lanes of
-//! four voices each, a lane holding one sound's voices only; notes on and off, the operator
+//! four voices each, a lane holding one sound's voices only and rendered four-wide, or one-wide
+//! while it holds one voice; notes on and off, the operator
 //! envelopes at control rate, sine operators on the routings, the end rule and whole-note shedding.
 //! Fixed size; nothing here allocates, and the block path (`note_on`, `note_off`, `pedal`,
 //! `render`) has no panic path (tools/check-no-panic.sh).
@@ -10,7 +11,7 @@ use crate::laws::{self, DOUBLINGS_PER_DB as DPD};
 use crate::params::{op_index, Common, Op, Part, OPS};
 use crate::plan::{Feedback, Plan};
 use crate::routing::routing;
-use crate::simd::{F4, U4, W};
+use crate::simd::{scalar, F4, U4, W};
 use crate::sound::Sound;
 use crate::tables::{offset, read, read16, Table16, SINE};
 
@@ -336,6 +337,57 @@ impl Lane {
         self.watch &= !(0x1111_1111u32.checked_shl(s as u32).unwrap_or(0));
     }
 
+    /// Moves the voices in the highest slots into free lower ones, so a lane's voices fill its
+    /// first slots and it renders at the width of its voice count. A voice's state moves whole, so
+    /// its output does not change.
+    fn compact(&mut self) {
+        while self.used & self.used.wrapping_add(1) != 0 {
+            // the lowest free slot is below the highest used one
+            let (to, from) = (
+                (!self.used).trailing_zeros(),
+                7u32.wrapping_sub(self.used.leading_zeros()),
+            );
+            self.mv(from as usize, to as usize);
+        }
+    }
+
+    /// Moves the voice in slot `from` to the free slot `to`, below it.
+    fn mv(&mut self, from: usize, to: usize) {
+        fn col<T: Copy, const K: usize>(a: &mut [[T; W]; K], from: usize, to: usize) {
+            a.iter_mut().for_each(|r| one(r, from, to));
+        }
+        fn one<T: Copy>(a: &mut [T; W], from: usize, to: usize) {
+            if let (Some(x), Some(y)) = (a.get(from).copied(), a.get_mut(to)) {
+                *y = x;
+            }
+        }
+        col(&mut self.ph, from, to);
+        col(&mut self.inc, from, to);
+        col(&mut self.gain, from, to);
+        col(&mut self.fb, from, to);
+        col(&mut self.lvl, from, to);
+        col(&mut self.tgt, from, to);
+        col(&mut self.fall, from, to);
+        col(&mut self.rise, from, to);
+        col(&mut self.top, from, to);
+        col(&mut self.seg, from, to);
+        col(&mut self.count, from, to);
+        self.rates.iter_mut().for_each(|r| col(r, from, to));
+        one(&mut self.fade, from, to);
+        one(&mut self.key, from, to);
+        one(&mut self.id, from, to);
+        one(&mut self.age, from, to);
+        one(&mut self.bound, from, to);
+        let (f, t) = (bit(from), bit(to));
+        for m in [&mut self.used, &mut self.held, &mut self.sustained, &mut self.ending] {
+            *m = if *m & f != 0 { *m | t } else { *m & !t };
+        }
+        let ops = |s: usize| 0x1111_1111u32.checked_shl(s as u32).unwrap_or(0);
+        let w = (self.watch & ops(from)).checked_shr(from.wrapping_sub(to) as u32);
+        self.watch = (self.watch & !ops(to)) | w.unwrap_or(0);
+        self.free(from);
+    }
+
     fn release(&mut self, p: &Prepared, s: usize) {
         self.held &= !bit(s);
         self.sustained &= !bit(s);
@@ -640,26 +692,47 @@ impl Engine {
             let Some(p) = self.sounds.get(usize::from(lane.sound)) else {
                 continue;
             };
-            let mut vout = [[0.0f32; W]; BLOCK];
-            for chunk in vout.chunks_exact_mut(STEP) {
-                let Ok(chunk) = <&mut [[f32; W]; STEP]>::try_from(chunk) else {
+            for chunk in out.chunks_exact_mut(STEP) {
+                let Ok(chunk) = <&mut [f32; STEP]>::try_from(chunk) else {
                     continue;
                 };
-                if lane.used == 0 {
-                    break;
+                lane.compact();
+                // the lane's width follows its voices (kept in its first slots)
+                match lane.used {
+                    0 => break,
+                    1 => step::<1, scalar::F<1>>(lane, p, shed_step, end, chunk),
+                    _ => step::<W, V>(lane, p, shed_step, end, chunk),
                 }
-                let (g0, dg) = envelopes::<V>(lane, p, shed_step, end);
-                // a sound with sines only runs the kernels without the forms' branches
-                if p.plan.forms {
-                    ops::<V, true>(lane, p, &g0, &dg, chunk);
-                } else {
-                    ops::<V, false>(lane, p, &g0, &dg, chunk);
-                }
-            }
-            for (o, v) in out.iter_mut().zip(vout.iter()) {
-                *o += (v[0] + v[1]) + (v[2] + v[3]);
             }
         }
+    }
+}
+
+/// One control step of a lane at width `L` (its voices in its first `L` slots), added to `out`.
+#[inline(always)]
+fn step<const L: usize, V: F4<L>>(
+    lane: &mut Lane,
+    p: &Prepared,
+    shed_step: f32,
+    end: &mut impl FnMut(NoteEnd),
+    out: &mut [f32; STEP],
+) {
+    let (g0, dg) = envelopes::<L, V>(lane, p, shed_step, end);
+    let mut vout = [[0.0f32; L]; STEP];
+    // a sound with sines only runs the kernels without the forms' branches
+    if p.plan.forms {
+        ops::<L, V, true>(lane, p, &g0, &dg, &mut vout);
+    } else {
+        ops::<L, V, false>(lane, p, &g0, &dg, &mut vout);
+    }
+    // the voices in pairs, as four-wide (the missing ones' zeros change no bits)
+    for (o, v) in out.iter_mut().zip(vout.iter()) {
+        *o += match v.as_slice() {
+            [a] => *a,
+            [a, b] => *a + *b,
+            [a, b, c, d] => (*a + *b) + (*c + *d),
+            _ => 0.0,
+        };
     }
 }
 
@@ -667,22 +740,22 @@ impl Engine {
 /// its ramp a frame; moves segments on, fades shed voices, and ends voices (the end rule, a fade's
 /// end).
 #[inline(always)]
-fn envelopes<V: F4>(
+fn envelopes<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
     shed_step: f32,
     end: &mut impl FnMut(NoteEnd),
-) -> ([[f32; W]; OPS], [[f32; W]; OPS]) {
+) -> ([[f32; L]; OPS], [[f32; L]; OPS]) {
     // shed voices fade linearly
-    for (s, f) in lane.fade.iter_mut().enumerate() {
+    for (s, f) in lane.fade.iter_mut().enumerate().take(L) {
         if has(u32::from(lane.ending), s) {
             // (to 0 on the last step, whatever the rounding of the steps before)
             *f = if *f > shed_step * 1.5 { *f - shed_step } else { 0.0 };
         }
     }
-    let fade = V::load(lane.fade) * V::splat(16.0); // 2^HEAD
-    let mut g0 = [[0.0; W]; OPS];
-    let mut dg = [[0.0; W]; OPS];
+    let fade = V::load4(&lane.fade) * V::splat(16.0); // 2^HEAD
+    let mut g0 = [[0.0; L]; OPS];
+    let mut dg = [[0.0; L]; OPS];
     let mut bound = V::splat(0.0);
     for i in (0..OPS).filter(|&i| has(u32::from(p.plan.live), i)) {
         let (Some(lv), Some(&t), Some(&fall), Some(&rise), Some(&top), Some(gain), Some(g), Some(d)) = (
@@ -697,19 +770,20 @@ fn envelopes<V: F4>(
         ) else {
             continue;
         };
-        let (l, t) = (V::load(*lv), V::load(t));
-        let up = ((V::load(top) - l) * V::load(rise)).max(V::splat(MIN_RISE)) + l;
-        let l2 = V::select(l.ge(t), (l - V::load(fall)).max(t), up.min(t));
-        *lv = l2.store();
+        let (l, t) = (V::load4(lv), V::load4(&t));
+        let up = ((V::load4(&top) - l) * V::load4(&rise)).max(V::splat(MIN_RISE)) + l;
+        let l2 = V::select(l.ge(t), (l - V::load4(&fall)).max(t), up.min(t));
+        l2.store4(lv);
         let target = l2.exp2() * fade;
-        *g = *gain;
-        *d = ((target - V::load(*gain)) * V::splat(1.0 / STEP as f32)).store();
-        *gain = target.store();
+        let g_last = V::load4(gain);
+        *g = g_last.store();
+        *d = ((target - g_last) * V::splat(1.0 / STEP as f32)).store();
+        target.store4(gain);
         if has(u32::from(p.plan.carriers), i) {
             bound = bound + l2.max(t).exp2();
         }
     }
-    lane.bound = (bound * V::splat(16.0)).store();
+    (bound * V::splat(16.0)).store4(&mut lane.bound);
     // segment changes, read from memory only for the envelopes that can change
     let mut w = lane.watch;
     while w != 0 {
@@ -732,7 +806,7 @@ fn envelopes<V: F4>(
         }
     }
     // the end rule (released voices only) and the end of a fade
-    for s in 0..W {
+    for s in 0..L {
         let released = has(u32::from(lane.used & !(lane.held | lane.sustained)), s);
         let quiet = lane.bound.get(s).is_some_and(|&b| b < END_GAIN);
         let faded = has(u32::from(lane.ending), s) && lane.fade.get(s).is_some_and(|&f| f <= 0.0);
@@ -746,26 +820,26 @@ fn envelopes<V: F4>(
 /// One control step of a lane's operators, in ascending order (every modulation edge runs
 /// upwards), each a whole step at a time, except a feedback loop through several operators,
 /// whose operators are interleaved sample by sample; carriers summed into `vout`.
-fn ops<V: F4, const FORMS: bool>(
+fn ops<const L: usize, V: F4<L>, const FORMS: bool>(
     lane: &mut Lane,
     p: &Prepared,
-    g0: &[[f32; W]; OPS],
-    dg: &[[f32; W]; OPS],
-    vout: &mut [[f32; W]; STEP],
+    g0: &[[f32; L]; OPS],
+    dg: &[[f32; L]; OPS],
+    vout: &mut [[f32; L]; STEP],
 ) {
     let plan = &p.plan;
-    let mut y = [[[0.0f32; W]; STEP]; OPS];
+    let mut y = [[[0.0f32; L]; STEP]; OPS];
     let (lo, hi) = match plan.feedback {
         Feedback::Loop { to, from } => (usize::from(to), usize::from(from)),
         _ => (OPS, OPS),
     };
     for i in (0..OPS).filter(|&i| has(u32::from(plan.live), i)) {
         if FORMS && i == lo && plan.loop_forms {
-            interleaved_forms::<V>(lane, p, g0, dg, &mut y, lo, hi);
+            interleaved_forms::<L, V>(lane, p, g0, dg, &mut y, lo, hi);
         } else if i == lo {
-            interleaved::<V, false>(lane, p, g0, dg, &mut y, lo, hi);
+            interleaved::<L, V, false>(lane, p, g0, dg, &mut y, lo, hi);
         } else if i < lo || i > hi {
-            single::<V, FORMS>(lane, p, g0, dg, &mut y, i);
+            single::<L, V, FORMS>(lane, p, g0, dg, &mut y, i);
         }
         if has(u32::from(plan.carriers), i) {
             if let Some(out) = y.get(i) {
@@ -778,12 +852,12 @@ fn ops<V: F4, const FORMS: bool>(
 }
 
 /// Operator `i` over a whole step: its modulation input summed first, then its samples.
-fn single<V: F4, const FORMS: bool>(
+fn single<const L: usize, V: F4<L>, const FORMS: bool>(
     lane: &mut Lane,
     p: &Prepared,
-    g0: &[[f32; W]; OPS],
-    dg: &[[f32; W]; OPS],
-    y: &mut [[[f32; W]; STEP]; OPS],
+    g0: &[[f32; L]; OPS],
+    dg: &[[f32; L]; OPS],
+    y: &mut [[[f32; L]; STEP]; OPS],
     i: usize,
 ) {
     let Some((done, rest)) = y.split_at_mut_checked(i) else {
@@ -799,7 +873,7 @@ fn single<V: F4, const FORMS: bool>(
     ) else {
         return;
     };
-    let mut input = [[0.0f32; W]; STEP];
+    let mut input = [[0.0f32; L]; STEP];
     for (j, src) in done.iter().enumerate() {
         if has(u32::from(mods), j) {
             for (m, s) in input.iter_mut().zip(src.iter()) {
@@ -807,72 +881,74 @@ fn single<V: F4, const FORMS: bool>(
             }
         }
     }
-    let (inc, d) = (V::U::load(inc), V::load(d));
-    let (mut ph_v, mut g) = (V::U::load(*ph), V::load(g));
+    let (inc, d) = (V::U::load4(&inc), V::load(d));
+    let (mut ph_v, mut g) = (V::U::load4(ph), V::load(g));
     let wave = p.plan.waves.get(i).copied().unwrap_or(Wave::Sine);
     if FORMS && wave != Wave::Sine {
         let own = (p.plan.feedback == Feedback::Own(i as u8)).then_some((&mut lane.fb, p.fbk));
-        form_step::<V>(wave, own, cur, &input, inc, g, d, &mut ph_v);
+        form_step::<L, V>(wave, own, cur, &input, inc, g, d, &mut ph_v);
     } else if p.plan.feedback == Feedback::Own(i as u8) {
         // self-feedback: sample by sample within this operator
         let fbk = V::splat(p.fbk);
-        let (mut y1, mut y2) = (V::load(lane.fb[0]), V::load(lane.fb[1]));
+        let [f1, f2] = &mut lane.fb;
+        let (mut y1, mut y2) = (V::load4(f1), V::load4(f2));
         for (out, m) in cur.iter_mut().zip(input.iter()) {
-            let v = read::<V>(&SINE, ph_v.add(offset((y1 + y2).mul_add(fbk, V::load(*m))))) * g;
+            let v = read::<L, V>(&SINE, ph_v.add(offset((y1 + y2).mul_add(fbk, V::load(*m))))) * g;
             *out = v.store();
             (y2, y1) = (y1, v);
             g = g + d;
             ph_v = ph_v.add(inc);
         }
-        lane.fb = [y1.store(), y2.store()];
+        y1.store4(f1);
+        y2.store4(f2);
     } else {
         for (out, m) in cur.iter_mut().zip(input.iter()) {
-            *out = (read::<V>(&SINE, ph_v.add(offset(V::load(*m)))) * g).store();
+            *out = (read::<L, V>(&SINE, ph_v.add(offset(V::load(*m)))) * g).store();
             g = g + d;
             ph_v = ph_v.add(inc);
         }
     }
-    *ph = ph_v.store();
+    ph_v.store4(ph);
 }
 
 /// A non-sine operator's step, kept out of line so the sine kernels compile as they do alone.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn form_step<V: F4>(
+fn form_step<const L: usize, V: F4<L>>(
     wave: Wave,
     own: Option<(&mut [[f32; W]; 2], f32)>,
-    cur: &mut [[f32; W]; STEP],
-    input: &[[f32; W]; STEP],
+    cur: &mut [[f32; L]; STEP],
+    input: &[[f32; L]; STEP],
     inc: V::U,
     g: V,
     d: V,
     ph: &mut V::U,
 ) {
-    let (g, d) = nyquist::<V>(wave, inc, g, d);
+    let (g, d) = nyquist::<L, V>(wave, inc, g, d);
     // one loop for each form, the match outside it
     match wave {
-        Wave::Table(t) => run::<V>(|q, o| read16(t, q.add(o)), own, cur, input, inc, g, d, ph),
-        Wave::Odd(t) => run::<V>(|q, o| odd(t, q, o), own, cur, input, inc, g, d, ph),
-        Wave::Resonant(t, c) => run::<V>(|q, o| resonant(t, c, q, o), own, cur, input, inc, g, d, ph),
-        Wave::Sine => run::<V>(|q, o| read(&SINE, q.add(o)), own, cur, input, inc, g, d, ph),
+        Wave::Table(t) => run::<L, V>(|q, o| read16(t, q.add(o)), own, cur, input, inc, g, d, ph),
+        Wave::Odd(t) => run::<L, V>(|q, o| odd(t, q, o), own, cur, input, inc, g, d, ph),
+        Wave::Resonant(t, c) => run::<L, V>(|q, o| resonant(t, c, q, o), own, cur, input, inc, g, d, ph),
+        Wave::Sine => run::<L, V>(|q, o| read(&SINE, q.add(o)), own, cur, input, inc, g, d, ph),
     }
 }
 
 /// An odd form: E(2t + m) sin(t + m).
 #[inline(always)]
-fn odd<V: F4>(t: &Table16, ph: V::U, off: V::U) -> V {
-    read16::<V>(t, ph.add(ph).add(off)) * read::<V>(&SINE, ph.add(off))
+fn odd<const L: usize, V: F4<L>>(t: &Table16, ph: V::U, off: V::U) -> V {
+    read16::<L, V>(t, ph.add(ph).add(off)) * read::<L, V>(&SINE, ph.add(off))
 }
 
 /// A resonant form: window(t + m) sin(centre t + m).
 #[inline(always)]
-fn resonant<V: F4>(t: &Table16, centre: u32, ph: V::U, off: V::U) -> V {
-    read16::<V>(t, ph.add(off)) * read::<V>(&SINE, ph.mul(V::U::splat(centre)).add(off))
+fn resonant<const L: usize, V: F4<L>>(t: &Table16, centre: u32, ph: V::U, off: V::U) -> V {
+    read16::<L, V>(t, ph.add(off)) * read::<L, V>(&SINE, ph.mul(V::U::splat(centre)).add(off))
 }
 
 /// An operator's output at phase `ph` and modulation offset `off`.
 #[inline(always)]
-fn wave<V: F4>(w: Wave, ph: V::U, off: V::U) -> V {
+fn wave<const L: usize, V: F4<L>>(w: Wave, ph: V::U, off: V::U) -> V {
     match w {
         Wave::Sine => read(&SINE, ph.add(off)),
         Wave::Table(t) => read16(t, ph.add(off)),
@@ -884,7 +960,7 @@ fn wave<V: F4>(w: Wave, ph: V::U, off: V::U) -> V {
 /// A resonant form is silent while its centre is at or above Nyquist (its gain and ramp zero for
 /// the step); the other forms as they are.
 #[inline(always)]
-fn nyquist<V: F4>(w: Wave, inc: V::U, g: V, d: V) -> (V, V) {
+fn nyquist<const L: usize, V: F4<L>>(w: Wave, inc: V::U, g: V, d: V) -> (V, V) {
     let Wave::Resonant(_, c) = w else { return (g, d) };
     // centre x increment >= 2^31, in units of 2^8 (exact below 2^24)
     let above = inc
@@ -898,20 +974,20 @@ fn nyquist<V: F4>(w: Wave, inc: V::U, g: V, d: V) -> (V, V) {
 /// feeds back on itself sample by sample (the history and the amount).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn run<V: F4>(
+fn run<const L: usize, V: F4<L>>(
     r: impl Fn(V::U, V::U) -> V,
     own: Option<(&mut [[f32; W]; 2], f32)>,
-    cur: &mut [[f32; W]; STEP],
-    input: &[[f32; W]; STEP],
+    cur: &mut [[f32; L]; STEP],
+    input: &[[f32; L]; STEP],
     inc: V::U,
     mut g: V,
     d: V,
     ph: &mut V::U,
 ) {
     let mut ph_v = *ph;
-    if let Some((fb, k)) = own {
+    if let Some(([f1, f2], k)) = own {
         let fbk = V::splat(k);
-        let (mut y1, mut y2) = (V::load(fb[0]), V::load(fb[1]));
+        let (mut y1, mut y2) = (V::load4(f1), V::load4(f2));
         for (out, m) in cur.iter_mut().zip(input.iter()) {
             let v = r(ph_v, offset((y1 + y2).mul_add(fbk, V::load(*m)))) * g;
             *out = v.store();
@@ -919,7 +995,8 @@ fn run<V: F4>(
             g = g + d;
             ph_v = ph_v.add(inc);
         }
-        *fb = [y1.store(), y2.store()];
+        y1.store4(f1);
+        y2.store4(f2);
     } else {
         for (out, m) in cur.iter_mut().zip(input.iter()) {
             *out = (r(ph_v, offset(V::load(*m))) * g).store();
@@ -932,48 +1009,48 @@ fn run<V: F4>(
 
 /// [`interleaved`] with non-sine forms, out of line (as [`form_step`]).
 #[inline(never)]
-fn interleaved_forms<V: F4>(
+fn interleaved_forms<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
-    g0: &[[f32; W]; OPS],
-    dg: &[[f32; W]; OPS],
-    y: &mut [[[f32; W]; STEP]; OPS],
+    g0: &[[f32; L]; OPS],
+    dg: &[[f32; L]; OPS],
+    y: &mut [[[f32; L]; STEP]; OPS],
     lo: usize,
     hi: usize,
 ) {
-    interleaved::<V, true>(lane, p, g0, dg, y, lo, hi);
+    interleaved::<L, V, true>(lane, p, g0, dg, y, lo, hi);
 }
 
 /// Operators `lo..=hi` (the live ones) sample by sample: each sample's input reads the outputs
 /// already written for that sample (sources below `lo` were written for the whole step before).
-fn interleaved<V: F4, const MIXED: bool>(
+fn interleaved<const L: usize, V: F4<L>, const MIXED: bool>(
     lane: &mut Lane,
     p: &Prepared,
-    g0: &[[f32; W]; OPS],
-    dg: &[[f32; W]; OPS],
-    y: &mut [[[f32; W]; STEP]; OPS],
+    g0: &[[f32; L]; OPS],
+    dg: &[[f32; L]; OPS],
+    y: &mut [[[f32; L]; STEP]; OPS],
     lo: usize,
     hi: usize,
 ) {
     let plan = &p.plan;
-    let mut ph = lane.ph.map(V::U::load);
-    let inc = lane.inc.map(V::U::load);
+    let mut ph = lane.ph.map(|a| V::U::load4(&a));
+    let inc = lane.inc.map(|a| V::U::load4(&a));
     let mut g = g0.map(V::load);
     let mut dg = dg.map(V::load);
     if MIXED {
         for ((gk, dk), (&w, &i)) in g.iter_mut().zip(dg.iter_mut()).zip(plan.waves.iter().zip(inc.iter())) {
-            (*gk, *dk) = nyquist::<V>(w, i, *gk, *dk);
+            (*gk, *dk) = nyquist::<L, V>(w, i, *gk, *dk);
         }
     }
     let fbk = V::splat(p.fbk);
-    let (mut y1, mut y2) = (V::load(lane.fb[0]), V::load(lane.fb[1]));
+    let (mut y1, mut y2) = (V::load4(&lane.fb[0]), V::load4(&lane.fb[1]));
     for s in 0..STEP {
         for k in (lo..=hi).filter(|&k| has(u32::from(plan.live), k)) {
             let mods = plan.mods.get(k).copied().unwrap_or(0);
             let mut m = V::splat(0.0);
             for (j, yj) in y.iter().enumerate().take(k) {
                 if has(u32::from(mods), j) {
-                    m = m + V::load(yj.get(s).copied().unwrap_or_default());
+                    m = m + V::load(yj.get(s).copied().unwrap_or([0.0; L]));
                 }
             }
             if k == lo {
@@ -984,9 +1061,9 @@ fn interleaved<V: F4, const MIXED: bool>(
                 continue;
             };
             let v = if MIXED {
-                wave::<V>(plan.waves.get(k).copied().unwrap_or(Wave::Sine), *pk, offset(m))
+                wave::<L, V>(plan.waves.get(k).copied().unwrap_or(Wave::Sine), *pk, offset(m))
             } else {
-                read::<V>(&SINE, pk.add(offset(m)))
+                read::<L, V>(&SINE, pk.add(offset(m)))
             } * *gk;
             *gk = *gk + dgk;
             *pk = pk.add(inck);
@@ -1000,10 +1077,12 @@ fn interleaved<V: F4, const MIXED: bool>(
     }
     for k in lo..=hi {
         if let (Some(d), Some(v)) = (lane.ph.get_mut(k), ph.get(k)) {
-            *d = v.store();
+            v.store4(d);
         }
     }
-    lane.fb = [y1.store(), y2.store()];
+    let [f1, f2] = &mut lane.fb;
+    y1.store4(f1);
+    y2.store4(f2);
 }
 
 #[cfg(test)]
@@ -1727,6 +1806,104 @@ mod tests {
         assert_eq!(h, GOLDEN, "render hash {h:#x}");
         let h = golden(|o| format!("op{o}.form={} op{o}.spread={} op{o}.formant={}", o % 7, o % 8, 5 * o));
         assert_eq!(h, GOLDEN_FORMS, "render hash with forms {h:#x}");
+    }
+
+    /// A voice's state, read from whichever slot holds note `id`.
+    fn voice(e: &Engine, id: u32) -> Vec<u32> {
+        let (l, s) = e
+            .lanes
+            .iter()
+            .find_map(|l| (0..W).find(|&s| l.used >> s & 1 != 0 && l.id[s] == id).map(|s| (l, s)))
+            .expect("the voice sounds");
+        let mut v: Vec<u32> = (0..OPS)
+            .flat_map(|o| [l.ph[o][s], l.inc[o][s], l.gain[o][s].to_bits(), l.lvl[o][s].to_bits()])
+            .collect();
+        v.extend([l.fb[0][s].to_bits(), l.fb[1][s].to_bits(), l.bound[s].to_bits()]);
+        v
+    }
+
+    /// Note 0 (key 36) played alone, in a pair, in a full lane, and while neighbours (key 96, fast
+    /// release) start and end around it, so it moves to another slot and between the narrow and
+    /// four-wide paths: its state after every block, and the output, are the same bits whichever
+    /// path renders it. With `silent`, the neighbours are silent (a resonant form centred above
+    /// Nyquist), so the output is the voice's alone.
+    fn lane_widths(name: &str, forms: impl Fn(i32) -> &'static str, silent: bool) {
+        let text: String = (1..=8)
+            .map(|o| {
+                format!(
+                    "op{o}.detune={} {} op{o}.eg_time_release=0 op{o}.level=90\n",
+                    o - 4,
+                    forms(o)
+                )
+                .replace('#', &o.to_string())
+            })
+            .collect();
+        let p = sound(&format!("algorithm=12 feedback=6\n{text}"));
+        // (block, note id, on): note 0 is the voice followed
+        let scenes: [&[(usize, u32, bool)]; 4] = [
+            &[(0, 0, true)],
+            &[(0, 1, true), (0, 0, true)],
+            &[(0, 1, true), (0, 2, true), (0, 0, true), (0, 3, true)],
+            &[
+                (0, 1, true),
+                (0, 0, true),
+                (0, 2, true),
+                (2, 1, false),
+                (2, 2, false),
+                (8, 3, true),
+                (12, 3, false),
+                (13, 4, true),
+                (14, 5, true),
+                (17, 4, false),
+            ],
+        ];
+        let mut want: Option<(Vec<Vec<u32>>, Vec<f32>)> = None;
+        let mut widths = Vec::new();
+        for scene in scenes {
+            let mut e = engine(&p);
+            let (mut states, mut out) = (Vec::new(), Vec::new());
+            for b in 0..24 {
+                for &(_, id, on) in scene.iter().filter(|x| x.0 == b) {
+                    if on {
+                        e.note_on(0, id, if id == 0 { 36 } else { 96 }, 100.0, &mut |_| {});
+                    } else {
+                        e.note_off(0, id);
+                    }
+                }
+                let mut o = [0.0; BLOCK];
+                e.render::<Native>(&mut o, &mut |_| {});
+                out.extend_from_slice(&o);
+                states.push(voice(&e, 0));
+                widths.push(e.lanes[0].used);
+            }
+            assert!(out.iter().any(|x| x.abs() > 1e-3), "{name}: the voice sounds");
+            match &want {
+                None => want = Some((states, out)),
+                Some((s, o)) => {
+                    assert_eq!(&states, s, "voice state, {name}");
+                    if silent {
+                        assert!(
+                            out.iter().zip(o).all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "output, {name}"
+                        );
+                    }
+                }
+            }
+        }
+        // the moving scene went narrow (the voice alone, moved to the first slot) and back
+        let moving = &widths[72..];
+        assert!(
+            moving.contains(&1) && moving.contains(&3) && moving.contains(&7),
+            "{moving:?}"
+        );
+    }
+
+    #[test]
+    fn a_voice_is_the_same_at_every_lane_width() {
+        lane_widths("sines", |_| "", false);
+        lane_widths("one resonant", |o| if o == 1 { "op#.form=5" } else { "" }, false);
+        // every operator resonant, formant 60: the neighbours' centres are above Nyquist
+        lane_widths("resonant", |_| "op#.form=5 op#.formant=60", true);
     }
 
     const GOLDEN: u64 = 0xee81_582b_c559_a5fe;

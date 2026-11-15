@@ -65,7 +65,7 @@ pub static WINDOW: Table = build(Form::Window);
 /// Linear interpolation in `t` at 32-bit phase `p`: the top `BITS` bits index, the next 16 are the
 /// fraction.
 #[inline(always)]
-pub fn read<V: F4>(t: &Table, p: V::U) -> V {
+pub fn read<const L: usize, V: F4<L>>(t: &Table, p: V::U) -> V {
     let f = p.shr::<{ 16 - BITS as i32 }>().fraction16();
     let (a, b) = V::gather2(t, p);
     (b - a).mul_add(f, a)
@@ -73,7 +73,7 @@ pub fn read<V: F4>(t: &Table, p: V::U) -> V {
 
 /// [`read`] of a Q14 table.
 #[inline(always)]
-pub fn read16<V: F4>(t: &Table16, p: V::U) -> V {
+pub fn read16<const L: usize, V: F4<L>>(t: &Table16, p: V::U) -> V {
     let f = p.shr::<{ 16 - BITS as i32 }>().fraction16();
     let (a, b) = V::gather2_q14(t, p);
     (b - a).mul_add(f, a)
@@ -82,7 +82,7 @@ pub fn read16<V: F4>(t: &Table16, p: V::U) -> V {
 /// A modulation input in cycles as a 32-bit phase offset (2^-24 cycle resolution; inputs clamped to
 /// +-127 cycles so the conversion is exact on every back end).
 #[inline(always)]
-pub fn offset<V: F4>(m: V) -> V::U {
+pub fn offset<const L: usize, V: F4<L>>(m: V) -> V::U {
     (m.min(V::splat(127.0)).max(V::splat(-127.0)) * V::splat(16_777_216.0))
         .to_i32()
         .shl::<8>()
