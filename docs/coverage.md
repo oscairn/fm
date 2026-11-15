@@ -12,10 +12,11 @@ FM plugin profile's measured accuracy against the reference (docs/design.md, sec
 the laws here reuse; "the engine" figures are this repository's tests. Known differences from the
 reference: docs/known-differences.md.
 
-At M3: the laws below are played on every routing, the operator forms and pitch included; nothing
-else. Pitch that moves (both pitch envelopes, portamento, bend) is evaluated every 16 frames, the
-increments ramped linearly across a step while an envelope moves them (docs/design.md, 2.3); the
-pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
+At M4 (in part: the sound LFO is not built yet): the laws below are played on every routing, the
+operator forms, pitch, the voice LFO, the macros, level scaling and the part's envelope offsets
+included; nothing else. Pitch that moves (both pitch envelopes, portamento, bend, the voice LFO) is
+evaluated every 16 frames, the increments ramped linearly across a step while something moves them
+(docs/design.md, 2.3); the pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|

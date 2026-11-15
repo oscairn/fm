@@ -213,7 +213,9 @@ feedback, wave reads, operator gains (a linear ramp a frame), filter states, the
 
 Control rate, every 16 frames (or fewer where an event splits a block, so a note starts on its
 frame), each with a linear ramp to the next step where it reaches the audio. As built:
-`render_events` takes a block's note and pedal events with their frames and renders each sound in
+`render_events` takes a block's note, pedal, bend and parameter events (since M4: a parameter's
+raw value by its id in the sound format, the shell's route for knobs, macros and every other
+parameter event) with their frames and renders each sound in
 segments between its own events (the sibling engines' rule), its steps starting again at each
 event; a step shorter than 16 frames moves each envelope that share of a step (the fall times n/16,
 a rise's share 1 - e^(-rate n/16), the hold counted in frames) and ramps the gains over its
@@ -230,7 +232,7 @@ several sounds (they are summed sound by sound, no longer lane by lane).
 |---|---|
 | Amplitude envelopes (8 a voice), level scaling, velocity, voice and sound LFO amplitude, macros on levels | a target gain a step, ramped linearly a frame (implemented in the spike). 16 frames is 0.33 ms at 48 kHz: the sibling engine measured its reference with no artefact at 16/32/64-sample periods above −55 dB and its own 16-frame ramps at −68 dB on the fastest sweep. Exception to check: segments faster than a step (instant times) become one ramp; the reference's own fastest segments read slower than the existing tables, so a per-segment check is a gate of M1 |
 | Operator and common pitch envelopes, key follow, bend, portamento, voice and sound LFO pitch, random pitch, detune, ratio shift | as built at M3: what a note keeps (key follow, velocity, random pitch, detune) is in its increments from note-on, on the grid; what moves is evaluated a step, each increment its note's times 2 to the octaves that move it (one vector `exp2` an operator, 0.15 cent at worst). While a pitch envelope moves, the increments ramp linearly across the step from their value at its start to the law's at its end (kernels instantiated with and without the ramp; a lane whose pitch stands still runs them without it and skips the pitch work after a test of three flags); bend and portamento change at a step's start (an event's frame, the glide clock's tick), as their laws step. Against the per-sample law: the ramp's frequency is within 1.2 cents at the fastest operator pitch envelope (times 0-2, 387 cents/ms, 129 cents a step), within 0.65 cent from time 3, within 0.002 cent at the fastest common one (14 cents/ms) (computed from the chord of the exponential); the fastest sweep (4800 cents in 12 ms, key 93) leaves the phase 0.0022 cycles off the law's (0.26 cycles with a staircase instead of the ramp: a test). On a modulator at the highest index (4 pi) the momentary frequency error is the same share (at most 7e-4) and that phase error becomes a carrier phase offset of at most 4 pi × 0.0022 × 2 pi ≈ 0.17 rad after the fastest 4-octave sweep, constant once it ends. Within the existing profile's 1-cent pitch tolerance except during the fastest operator pitch envelope segments (12 ms at most), so no per-sample pitch is paid for |
-| Sound and voice LFOs | evaluated a step. At 48 kHz that is 3,000 values a second: up to about 150 Hz that is 20 a cycle. The extended speed range reaches higher; its top rate is to be read from the measured rate table at M4, and above 150 Hz the LFO moves to audio rate for that sound (a plan choice) |
+| Sound and voice LFOs | evaluated a step. At 48 kHz that is 3,000 values a second: up to about 150 Hz that is 20 a cycle. As built at M4 (voice LFO): its value at a step's end moves the pitch through the increments' ramp (as the pitch envelopes) and the amplitude through the gains' ramp. The extended range's top rate is 1,357 Hz (the measured table); above about 150 Hz the LFO is under-sampled: the audio-rate LFO for those speeds is not built (docs/known-differences.md). Against the per-sample law (computed from the chord of each wave between step ends, T = 1/3000 s): a sine of rate f and swing A is within A (pi f T)^2 / 2, at the fastest normal speed (49.8 Hz) 0.13 % of the swing (3.3 cents at the deepest, 2400 cents; 0.13 dB of a 96 dB amplitude swing); a triangle's corner is cut by up to 2 A f T for one step (at 49.8 Hz and 2400 cents 80 cents, at 6 Hz and 93 cents 0.37 cent); a square's or sample and hold's edge is a 16-frame ramp. Measured: the pitch route at 1 Hz, 93 cents, within 0.2 cent of the per-sample law's mean frequency over every 8 cycles (a test; the vector exp2 alone is within 0.15 cent) |
 | Filter coefficients and the filter envelope | a step, coefficients ramped (the existing profile: once per 64 samples, its instant envelope segments then take 1.45 ms; the reference's arrive about 2 ms after them) |
 | Pan (random, alternate, scaling, sound LFO pan) | per note, and the LFO's a step, ramped |
 | Feedback level, operator wave choice (band-limit version) | per step, from the increment (the existing profile chooses the wave version at note-on only, a shortcut) |
@@ -619,6 +621,45 @@ by unrelated cases read within 3 % of each other at every case. The aligned plac
 higher than the earlier lucky ones (sines at one voice 11.0 against 2.0; mixed forms 83.9 to 142.4
 against 55.5 to 105.8); the device's own placement is not known either way.
 
+### 3.5 Modulators at M4, in part (measured)
+
+Same tool and settings. Built: the voice LFO (pitch and amplitude routes, per-operator offsets),
+the seven macros, level scaling, the part's four envelope offsets, and timed parameter events. Not
+built: the sound LFO (every row of it stays M4 in `docs/coverage.md`), the voice LFO's filter route
+(M5, with the filter).
+
+- **Per sound, once** (`Prepared::new`): the macros and the part's offsets move the operators' raw
+  values before the laws (depth on modulators' levels, divided by 1 + feedback on the operator that
+  feeds back; attack, decay, sustain and release on modulators' envelope values; ratio on
+  ratio-mode modulators' ratios; texture on the forms; the offsets on every operator), so they cost
+  nothing in the block path. Level scaling is added at note-on (the six-operator model's documented
+  curves; not measured).
+- **Voice LFO**: one a voice, evaluated at each step's end (`voice_lfo`): its pitch share moves the
+  increments through the pitch envelopes' ramp, its amplitude share each operator's gain through
+  the bend's grid (`laws::amp_loss_log2`, 90 values, 360 bytes, read only by a sound with an
+  amplitude depth); a sound without one tests two flags a step. Lane state: phase, frames since the
+  note started and the sample-and-hold source, 48 bytes a lane (12 a voice): a lane is 1,732 bytes,
+  the hot set 9,416 bytes (computed from the structures; the first-level budget test: at most
+  16 KB).
+- **Parameter events** (`Kind::Param`, `Engine::param`): the raw value set in the sound's raw values
+  (now kept in `Prepared`) and the sound prepared again at the event's frame; a change of what is
+  rendered (the plan), mono or key assign waits until the sound is silent (a voice's state stays
+  valid). The cost of a preparation in the block path is not measured.
+- **Controllers**: the model's fixed routes from controllers to the LFO depths are not part of its
+  M4 parameters (the controller sets decide them, M7), so the core takes no controller events yet;
+  the host's MIDI controllers other than the pedal and bend wait for M7.
+
+Cost, instructions a voice-block (M3 / M4): routing 12 sines at 32 voices 14,581 / 14,646; one voice
+alone 37,007 / 37,237; eight mixed forms 20,317 / 20,383; at rest 1,215 / 1,226 a block; the worst
+eight-operator plan 23,021 / 23,021 (gate 28,000); the lane gate's ratios 2.538 / 2.542, 1.959 /
+1.959, 1.894 / 1.896 (baselines 2.509, 1.956, 1.881, 2 % allowed). Sounds that use no M4 feature
+render the same bits (the golden hashes unchanged) and cost 0.3-0.9 % more (the flags a step and
+the larger lane). New cases, the voice LFO on pitch and amplitude and level scaling on every
+operator of every voice: 19,081 at 32 voices (30 % over sines: the ramped kernels, the increments
+made each step, the bend) and 48,230 for one voice alone. Data misses with the device's caches:
+sines 2.0, 0.3, 0.4, 2.8 first-level a voice-block at 1, 8, 25 and 64 voices; mixed forms 57.0,
+47.9, 59.2, 85.1 (the baseline's 102.0, 83.9, 96.7, 142.4: the layout moved again, section 3.4).
+
 ## 4. Audio-thread safety, and how it is proven
 
 - **No allocation**, by construction: the core is `#![no_std]` and does not link the `alloc` crate;
@@ -693,7 +734,7 @@ Sizes are rough, in working sessions of the size of this round.
 | M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | done (section 3.1); frame-exact note starts since (section 2.3) |
 | M2 | waves | the six forms with spread and formant, tables from the measured amplitudes and phases, `i16` (Q14) storage, cost re-measured | done (section 3.2); a lane's cost follows its voice count in part (one voice one lane wide), the lane gate's targets open (section 3.3) |
 | M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | done (section 3.4) |
-| M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | 2–3 |
+| M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | in part (section 3.5): the sound LFO to come |
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | 2–3 |
 | M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | 3 |
 | | **the first converted sound set plays** | after M6, with the converter writing this engine's format | |

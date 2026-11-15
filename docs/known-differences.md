@@ -7,7 +7,7 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 
 ## Open: for a ruling
 
-| What | The reference | The engine (M3) | Why |
+| What | The reference | The engine (M4, in part) | Why |
 |---|---|---|---|
 | Output clipping | not measured whether the part's output clips | no clip (the platform's mixer clips) | the existing profile's choice, unmeasured either way |
 | Envelope resolution | per sample (as far as measured) | every 16 frames (0.33 ms at 48 kHz; a step is cut short where an event of the voice's sound falls), exact at the steps, gains ramped linearly between; a segment shorter than a step becomes one ramp; the hold in whole steps | the design's control rate; the fastest decay (time 0) moves 5.2 dB a step, the fastest attack about 18 dB |
@@ -25,6 +25,13 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 | Mono legato | measured with portamento: the envelopes go on | the amplitude envelopes, the common pitch envelope and the phases go on; the operator pitch envelopes start again; the new note's velocity sets its pitch velocity, not its levels; a key returned to draws a new random pitch | the existing profile's choices, unmeasured |
 | Mono keys kept | not measured | the 16 newest keys still down are returned to; an older one's note ends when a seventeenth is kept | a fixed size |
 | Key assign single | not measured | a key played again fades its sounding note as a mono retrigger does (13.3 ms) | as the existing profile, unmeasured |
+| Voice LFO resolution | per sample (as far as measured) | every 16 frames: the increments and the gains ramp linearly across each step to the LFO's value at its end; a square or sample-and-hold edge becomes a 16-frame ramp; past about 150 Hz (extended speeds above about 320) the LFO is under-sampled and aliases | the design's control rate; an audio-rate LFO for the fastest speeds (design 2.3) is not built |
+| Voice LFO key-on reset off | each note a phase of its own, no pattern found | a note takes the sound's free-running phase, counted from the engine's clock at the note's block | the reference's is not modelled (as the existing profile) |
+| Voice LFO on fixed-mode operators | not measured | no pitch modulation on fixed-mode operators | as the existing profile, unmeasured |
+| Voice LFO amplitude bend | measured at envelope level 99 on a lone carrier | the bend acts on the LFO's loss alone, on modulators as on carriers | as the existing profile, unmeasured |
+| Level scaling | not measured | the six-operator model's documented curves in dB, a level raised to level 99's at most | documented, not measured (as the existing profile) |
+| Ratio macro on fixed-mode operators | not measured | not moved | as the existing profile, unmeasured |
+| A parameter changed while a sound plays | not measured | from the next control step for what moves, the next note for what a note keeps; a change of the operators heard, their forms, the feedback path, mono or key assign waits until the sound is silent | a voice's state stays valid |
 
 ## Adopted from the reference where the existing profile departs from it
 
