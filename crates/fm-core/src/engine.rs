@@ -1069,6 +1069,8 @@ pub struct Engine {
     pedal: u8,
     /// Sounds with a parameter change waiting until none of their voices sounds, a bit each.
     pending: u8,
+    /// Sounds with parameter values set by [`Engine::stage`] and not yet prepared, a bit each.
+    staged: u8,
     age: u32,
     /// Each sound's random source (xorshift32), started again when the sound is installed.
     rng: [u32; SOUNDS],
@@ -1119,6 +1121,7 @@ impl Engine {
             limit: VOICES,
             pedal: 0,
             pending: 0,
+            staged: 0,
             age: 0,
             rng: [SEED; SOUNDS],
             bend: [0; SOUNDS],
@@ -1178,23 +1181,115 @@ impl Engine {
     /// what is rendered (the operators heard, their forms, the feedback path) or of mono or key
     /// assign waits until no voice of the sound sounds.
     pub fn param(&mut self, sound: usize, id: u16, value: i16) {
-        let Some(mut s) = self.sounds.get(sound).map(|p| p.sound) else {
-            return;
-        };
-        if s.set(id, value).is_err() {
-            return;
+        if self.stage(sound, id, value) {
+            self.apply(sound);
         }
-        let n = Prepared::new(&s);
+    }
+
+    /// Sets parameter `id` of `sound` to the raw `value` as [`Engine::param`] does, but prepares
+    /// the sound only at the start of the next render, once for every value staged before it;
+    /// whether the value was taken.
+    pub fn stage(&mut self, sound: usize, id: u16, value: i16) -> bool {
+        let ok = self
+            .sounds
+            .get_mut(sound)
+            .is_some_and(|d| d.sound.set(id, value).is_ok());
+        if ok {
+            self.staged |= bit(sound);
+        }
+        ok
+    }
+
+    /// The sounds with staged values, a bit each (each is prepared once at the next render).
+    pub fn staged(&self) -> u8 {
+        self.staged
+    }
+
+    /// Prepares `sound` from its raw values: now, or when none of its voices sounds if what is
+    /// rendered, mono or key assign changed.
+    fn apply(&mut self, sound: usize) {
+        self.staged &= !bit(sound);
         let busy = self.busy(sound);
         if let Some(d) = self.sounds.get_mut(sound) {
+            let n = Prepared::new(&d.sound);
             if !busy || (n.plan == d.plan && n.mono == d.mono && n.single == d.single) {
                 *d = n;
                 self.pending &= !bit(sound);
             } else {
-                d.sound = s;
                 self.pending |= bit(sound);
             }
         }
+    }
+
+    /// Every voice ends at once, silently (no note end is reported), and the sounds' running state
+    /// (random sources, sound LFOs, pedal, bend, the clock) starts again: the engine then plays as
+    /// a new one with the same sounds and limits.
+    pub fn reset(&mut self) {
+        for s in 0..SOUNDS {
+            if has(u32::from(self.staged | self.pending), s) {
+                if let Some(d) = self.sounds.get_mut(s) {
+                    *d = Prepared::new(&d.sound);
+                }
+            }
+        }
+        self.lanes = [LANE0; LANES];
+        (self.pedal, self.pending, self.staged, self.age, self.alt) = (0, 0, 0, 0, 0);
+        (self.rng, self.bend, self.last) = ([SEED; SOUNDS], [0; SOUNDS], [None; SOUNDS]);
+        (self.clock, self.at, self.slfo, self.keys_n) = (0, 0, [SLFO0; SOUNDS], [0; SOUNDS]);
+        (self.pan_on, self.delayed_n) = (false, 0);
+    }
+
+    /// Moves the engine's clock on by `frames` not rendered (blocks a host skipped while nothing
+    /// sounded): the glide clock's phase then is what rendering them would have left. Nothing else
+    /// runs free while no voice sounds (a sound LFO moves only while its sound plays).
+    pub fn skip(&mut self, frames: u64) {
+        self.clock = self.clock.wrapping_add(frames);
+    }
+
+    /// Fades out the note `id` of `sound` as a shed note (a note still waiting out its key-on
+    /// delay, or a mono key kept to return to, ends at once).
+    pub fn choke_note(&mut self, sound: usize, id: u32, end: &mut impl FnMut(NoteEnd)) {
+        let s8 = sound as u8;
+        if let Some((_, h, _)) = self
+            .waiting(|d| d.0 == s8 && d.1.id == id)
+            .and_then(|i| self.undelay(i))
+        {
+            return end(NoteEnd {
+                sound: s8,
+                key: h.key,
+                id,
+            });
+        }
+        if let (Some(keys), Some(n)) = (self.keys.get_mut(sound), self.keys_n.get_mut(sound)) {
+            let kept = keys.get(..usize::from(*n)).unwrap_or(&[]);
+            if let Some(i) = kept.iter().position(|h| h.id == id) {
+                let key = kept.get(i).map_or(0, |h| h.key);
+                remove(keys, i);
+                *n = n.saturating_sub(1);
+                return end(NoteEnd { sound: s8, key, id });
+            }
+        }
+        for l in self.lanes.iter_mut().filter(|l| l.sound == s8) {
+            for s in (0..W).filter(|&s| l.id.get(s) == Some(&id)) {
+                l.ending |= l.used & bit(s);
+            }
+        }
+    }
+
+    /// Each voice sounding: its sound, its note and its loudness now (the end rule's bound on its
+    /// carriers' gain, times its fade).
+    pub fn voices(&self, mut f: impl FnMut(u8, u32, f32)) {
+        for l in self.lanes.iter().filter(|l| l.used != 0) {
+            for s in (0..W).filter(|&s| has(u32::from(l.used), s)) {
+                let (id, b, g) = (l.id.get(s), l.bound.get(s), l.fade.get(s));
+                f(l.sound, id.copied().unwrap_or(0), b.zip(g).map_or(0.0, |(b, g)| b * g));
+            }
+        }
+    }
+
+    /// The estimated cost of a voice of `sound` a block, in instructions (its plan's).
+    pub fn cost(&self, sound: usize) -> u32 {
+        self.sounds.get(sound).map_or(0, |p| p.plan.cost())
     }
 
     /// Fades out every voice of `sound` (each ends after its fade); a mono sound's keys kept to
@@ -1753,6 +1848,12 @@ impl Engine {
     ) -> Written {
         let frames = frames.min(BLOCK);
         let mut w = Written::default();
+        // values staged since the last block, each sound prepared once
+        for sound in 0..if self.staged != 0 { SOUNDS } else { 0 } {
+            if has(u32::from(self.staged), sound) {
+                self.apply(sound);
+            }
+        }
         // parameter changes that waited for their sound to fall silent
         for sound in 0..if self.pending != 0 { SOUNDS } else { 0 } {
             if !has(u32::from(self.pending), sound) || self.busy(sound) {
@@ -4928,5 +5029,77 @@ mod tests {
         assert_eq!(whole.len(), parts.len());
         assert!(whole.iter().zip(&parts).all(|(a, b)| a.to_bits() == b.to_bits()));
         assert!(whole.iter().any(|&x| x != 0.0));
+    }
+
+    #[test]
+    fn staged_values_prepare_once_as_events_at_the_block_start() {
+        let ids = [(1042u16, 2i16), (1042, 3), (1043, 40), (2, 40)];
+        let mut a = engine(&carrier(1, ""));
+        let mut b = engine(&carrier(1, ""));
+        for e in [&mut a, &mut b] {
+            e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            e.render::<Native>(&mut [[0.0; BLOCK]; 2], &mut |_| {});
+        }
+        let events: Vec<Event> = ids
+            .iter()
+            .map(|&(id, value)| Event {
+                frame: 0,
+                sound: 0,
+                kind: Kind::Param { id, value },
+            })
+            .collect();
+        for &(id, value) in &ids {
+            b.stage(0, id, value);
+        }
+        assert_eq!(b.staged(), 1);
+        assert!(!b.stage(0, 1042, 1000), "a value out of range is refused");
+        let (mut oa, mut ob) = ([[0.0; BLOCK]; 2], [[0.0; BLOCK]; 2]);
+        for blk in 0..3 {
+            a.render_events::<Native>(&mut oa, if blk == 0 { &events } else { &[] }, &mut |_| {});
+            b.render_events::<Native>(&mut ob, &[], &mut |_| {});
+            assert_eq!(b.staged(), 0);
+            assert!(oa
+                .as_flattened()
+                .iter()
+                .zip(ob.as_flattened())
+                .all(|(x, y)| x.to_bits() == y.to_bits()));
+        }
+    }
+
+    #[test]
+    fn a_choked_note_fades_and_a_reset_engine_plays_as_new() {
+        let mut e = two_sounds();
+        e.note_on(0, 3, 67, 100.0, &mut |_| {});
+        let mut ended = Vec::new();
+        e.choke_note(0, 3, &mut |n| ended.push(n.id));
+        for _ in 0..2 {
+            e.render::<Native>(&mut [[0.0; BLOCK]; 2], &mut |n| ended.push(n.id));
+        }
+        assert_eq!(ended, vec![3], "only the choked note ends, after its fade");
+        let mut n = 0;
+        e.voices(|s, id, loud| {
+            n += 1;
+            assert!((s, id) == (1, 2) || (s, id) == (0, 1) && loud > 0.1, "{s} {id} {loud}");
+        });
+        assert_eq!(n, 2);
+        // reset: no voice, no end reported, and the next notes play as on a new engine
+        e.render::<Native>(&mut [[0.0; BLOCK]; 2], &mut |_| {});
+        e.reset();
+        assert_eq!(e.active(), 0);
+        let mut f = Engine::new(RATE);
+        f.set_sound(0, &carrier(1, ""));
+        f.set_sound(1, &carrier(5, "alternate_pan=40"));
+        for g in [&mut e, &mut f] {
+            g.note_on(1, 9, 50, 70.0, &mut |_| {});
+        }
+        let (mut a, mut b) = ([[0.0; BLOCK]; 2], [[0.0; BLOCK]; 2]);
+        e.render::<Native>(&mut a, &mut |_| panic!("no end"));
+        f.render::<Native>(&mut b, &mut |_| {});
+        assert!(a
+            .as_flattened()
+            .iter()
+            .zip(b.as_flattened())
+            .all(|(x, y)| x.to_bits() == y.to_bits()));
+        assert_eq!(e.cost(0), carrier(1, "").plan.cost());
     }
 }
