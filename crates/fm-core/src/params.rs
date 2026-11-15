@@ -341,12 +341,30 @@ pub fn index_of(id: u16) -> Option<usize> {
 /// Part-wide parameters the engine reads, by index.
 #[derive(Clone, Copy)]
 pub enum Common {
+    PitchVelocity = 6,
+    RandomPitch = 7,
+    PitchKeyFollow = 8,
+    PitchKeyCentre = 9,
+    PegLevel = 10, // five levels from here: initial, attack, decay 1, decay 2, release
+    PegTime = 15,  // four times from here: attack, decay 1, decay 2, release
+    PegVelocity = 19,
+    PegDepth = 20,
+    PegTimeKeyFollow = 21,
     Algorithm = 30,
     Feedback = 31,
 }
 
 #[derive(Clone, Copy)]
 pub enum Part {
+    MonoPoly = COMMON.len() as isize + FILTER.len() as isize,
+    KeyAssign = COMMON.len() as isize + FILTER.len() as isize + 1,
+    Portamento = COMMON.len() as isize + FILTER.len() as isize + 2,
+    PortamentoTime = COMMON.len() as isize + FILTER.len() as isize + 3,
+    PortamentoMode = COMMON.len() as isize + FILTER.len() as isize + 4,
+    PortamentoTimeMode = COMMON.len() as isize + FILTER.len() as isize + 5,
+    BendUp = COMMON.len() as isize + FILTER.len() as isize + 6,
+    BendDown = COMMON.len() as isize + FILTER.len() as isize + 7,
+    Detune = COMMON.len() as isize + FILTER.len() as isize + 8,
     NoteShift = COMMON.len() as isize + FILTER.len() as isize + 9,
     VelocityDepth = COMMON.len() as isize + FILTER.len() as isize + 12,
     VelocityOffset = COMMON.len() as isize + FILTER.len() as isize + 13,
@@ -360,11 +378,15 @@ pub enum Op {
     Coarse = 2,
     Fine = 3,
     Detune = 4,
+    FixedKeyFollow = 5,
+    PitchVelocity = 6,
     Form = 7,
     Spread = 8,
     Formant = 9,
-    EgLevel = 14, // four levels from here: attack, decay 1, decay 2, release (hold)
-    EgTime = 18,  // four times from here, then the hold time
+    PegLevel = 10, // initial, attack
+    PegTime = 12,  // attack, decay
+    EgLevel = 14,  // four levels from here: attack, decay 1, decay 2, release (hold)
+    EgTime = 18,   // four times from here, then the hold time
     EgHold = 22,
     EgTimeKeyFollow = 23,
     Level = 24,
@@ -393,6 +415,15 @@ mod tests {
         assert_eq!(PARAMS[Common::Algorithm as usize].name, "algorithm");
         assert_eq!(PARAMS[Part::NoteShift as usize].name, "note_shift");
         assert_eq!(PARAMS[Part::VelocityOffset as usize].name, "velocity_offset");
+        assert_eq!(PARAMS[Part::MonoPoly as usize].name, "mono_poly");
+        assert_eq!(PARAMS[Part::Detune as usize].name, "detune");
+        assert_eq!(PARAMS[Common::PegLevel as usize].name, "pitch_eg_level_initial");
+        assert_eq!(
+            PARAMS[Common::PegTimeKeyFollow as usize].name,
+            "pitch_eg_time_key_follow"
+        );
+        assert_eq!(PARAMS[op_index(1, Op::FixedKeyFollow, 0)].name, "fixed_key_follow");
+        assert_eq!(PARAMS[op_index(1, Op::PegTime, 1)].name, "pitch_eg_time_decay");
         let level7 = &PARAMS[op_index(7, Op::Level, 0)];
         assert_eq!((level7.id, level7.name, level7.default), (1764, "level", 85));
         assert_eq!(PARAMS[op_index(2, Op::EgHold, 0)].name, "eg_time_hold");

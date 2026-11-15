@@ -38,6 +38,8 @@ const END_GAIN: f32 = 1.584_893e-5;
 const SHED_MS: f64 = 3.0;
 /// The smallest rise a rising segment makes in a control step (log2), so it reaches its target.
 const MIN_RISE: f32 = 4e-6;
+/// Where each sound's random source starts.
+const SEED: u32 = 0x2545_f491;
 
 // envelope segments
 const HOLD: u8 = 0;
@@ -106,6 +108,14 @@ pub struct Prepared {
     detune: [i8; OPS],
     note_shift: i8,
     velocity: (u8, u8),
+    /// Pitch a note keeps: key follow and its centre, random pitch depth, the part's pitch
+    /// velocity and detune (cents), each fixed-mode operator's key follow and velocity.
+    key_follow: (u8, u8),
+    random_pitch: u8,
+    pitch_velocity: i8,
+    detune_cents: f32,
+    fixed_key_follow: [u8; OPS],
+    fixed_velocity: [i8; OPS],
 }
 
 impl Prepared {
@@ -132,6 +142,15 @@ impl Prepared {
                 s.get(Part::VelocityDepth as usize) as u8,
                 s.get(Part::VelocityOffset as usize) as u8,
             ),
+            key_follow: (
+                s.get(Common::PitchKeyFollow as usize) as u8,
+                s.get(Common::PitchKeyCentre as usize) as u8,
+            ),
+            random_pitch: s.get(Common::RandomPitch as usize) as u8,
+            pitch_velocity: s.get(Common::PitchVelocity as usize) as i8,
+            detune_cents: laws::part_detune_cents(i32::from(s.get(Part::Detune as usize))) as f32,
+            fixed_key_follow: core::array::from_fn(|op| o(op, Op::FixedKeyFollow, 0) as u8),
+            fixed_velocity: core::array::from_fn(|op| o(op, Op::PitchVelocity, 0) as i8),
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -446,6 +465,8 @@ pub struct Engine {
     /// Sounds whose sustain pedal is down, a bit each.
     pedal: u8,
     age: u32,
+    /// Each sound's random source (xorshift32), started again when the sound is installed.
+    rng: [u32; SOUNDS],
     rate: f64,
     shed_step: f32,
     /// The operators' outputs in a step, at each width (each is written before it is read, so
@@ -466,6 +487,7 @@ impl Engine {
             limit: VOICES,
             pedal: 0,
             age: 0,
+            rng: [SEED; SOUNDS],
             rate,
             shed_step: (1.0 / steps) as f32,
             y1: [[[0.0; 1]; STEP]; OPS],
@@ -477,9 +499,9 @@ impl Engine {
     /// [`Engine::choke`]); whether it was installed.
     pub fn set_sound(&mut self, sound: usize, p: &Prepared) -> bool {
         let busy = self.lanes.iter().any(|l| l.used != 0 && usize::from(l.sound) == sound);
-        match self.sounds.get_mut(sound) {
-            Some(d) if !busy => {
-                *d = *p;
+        match (self.sounds.get_mut(sound), self.rng.get_mut(sound)) {
+            (Some(d), Some(r)) if !busy => {
+                (*d, *r) = (*p, SEED);
                 true
             }
             _ => false,
@@ -571,6 +593,18 @@ impl Engine {
         }
         let rate = self.rate;
         let key = i32::from(key) + i32::from(p.note_shift);
+        // pitch the note keeps, in cents: every operator's, then ratio-mode and fixed-mode ones'
+        let r = self.rng.get_mut(sound).map_or(0, |r| {
+            *r ^= *r << 13;
+            *r ^= *r >> 17;
+            *r ^= *r << 5;
+            *r
+        });
+        let all = laws::pitch_velocity_cents(i32::from(p.pitch_velocity), v);
+        let ratio_cents = all
+            + laws::pitch_key_follow_cents(i32::from(p.key_follow.0), key, i32::from(p.key_follow.1))
+            + laws::random_pitch_cents(i32::from(p.random_pitch), r)
+            + f64::from(p.detune_cents);
         for op in 0..OPS {
             put(&mut lane.gain, op, s, 0.0);
             if !has(u32::from(p.plan.live), op) {
@@ -580,6 +614,12 @@ impl Engine {
             let at = |a: &[i8; OPS]| i32::from(a.get(op).copied().unwrap_or(0));
             // pitch: the grid's steps, then the frequency
             let fixed = has(u32::from(p.fixed), op);
+            let cents = if fixed {
+                let kf = i32::from(p.fixed_key_follow.get(op).copied().unwrap_or(0));
+                all + laws::fixed_key_follow_cents(kf, key) + laws::fixed_pitch_velocity_cents(at(&p.fixed_velocity), v)
+            } else {
+                ratio_cents
+            };
             // (each term far inside the i32 range)
             let steps = p
                 .steps
@@ -587,7 +627,8 @@ impl Engine {
                 .copied()
                 .unwrap_or(0)
                 .wrapping_add(laws::detune_steps(at(&p.detune), key))
-                .wrapping_add(if fixed { 0 } else { laws::key_steps(key) });
+                .wrapping_add(if fixed { 0 } else { laws::key_steps(key) })
+                .wrapping_add(laws::cents_steps(cents));
             let hz = laws::steps_hz(steps);
             let hz = if fixed { hz.min(laws::FIXED_MAX_HZ) } else { hz };
             put(&mut lane.inc, op, s, (hz / rate * 4_294_967_296.0) as u32);
@@ -1492,6 +1533,56 @@ mod tests {
         e.note_on(0, 1, 60, 100.0, &mut |_| {});
         let hz = f64::from(e.lanes[0].inc[0][0]) / 4_294_967_296.0 * RATE;
         assert!((hz - laws::FIXED_MAX_HZ).abs() < 0.01, "{hz}");
+    }
+
+    /// The pitch a note keeps: key follow about its centre, the part's velocity sensitivity and
+    /// detune, a fixed-mode operator's key follow and velocity, on the grid; random pitch in whole
+    /// 18.75-cent steps.
+    #[test]
+    fn pitch_offsets() {
+        let cents = |got: f64, want: f64| 1200.0 * (got / want).log2();
+        let ratio = |key: i32, c: f64| laws::steps_hz(laws::key_steps(key) + laws::cents_steps(c));
+        let fixed = |c: f64| laws::steps_hz(laws::fixed_steps(16, 0) + laws::cents_steps(c));
+        for (text, key, want) in [
+            ("pitch_key_follow=64", 72, ratio(72, -1200.0)),
+            ("pitch_key_follow=127 pitch_key_centre=48", 60, ratio(60, 1200.0)),
+            ("pitch_velocity=63", 69, ratio(69, 1189.4)),
+            ("detune=127", 57, ratio(57, 49.63)),
+            ("op1.mode=1 op1.coarse=16 op1.fixed_key_follow=99", 72, fixed(1200.0)),
+            (
+                "op1.mode=1 op1.coarse=16 op1.pitch_velocity=-7 pitch_velocity=-64",
+                60,
+                fixed(-1504.05 - 1189.46),
+            ),
+            // fixed-mode operators do not follow key follow or the part's detune
+            (
+                "op1.mode=1 op1.coarse=16 pitch_key_follow=0 detune=-128",
+                40,
+                fixed(0.0),
+            ),
+        ] {
+            let x = play::<Native>(&carrier(1, text), key as u8, 127.0, 1000, 100);
+            let c = cents(zero_crossing_hz(&x[BLOCK * 4..]), want);
+            assert!(c.abs() < 0.05, "{text} key {key}: {c} cents");
+        }
+        let p = carrier(1, "random_pitch=127");
+        let mut e = engine(&p);
+        let base = f64::from(e.sounds[0].steps[0] + laws::key_steps(60));
+        let mut seen = std::collections::BTreeSet::new();
+        for id in 0..200 {
+            e.note_on(0, id, 60, 100.0, &mut |_| {});
+            let l = e.lanes.iter().find(|l| l.id.contains(&id)).unwrap();
+            let s = l.id.iter().position(|&i| i == id).unwrap();
+            let hz = f64::from(l.inc[0][s]) / 4_294_967_296.0 * RATE;
+            let c = cents(hz, laws::steps_hz(base as i32));
+            let k = (c / 18.75).round();
+            assert!((c - k * 18.75).abs() < 0.6 && k.abs() <= 31.0, "{c} cents");
+            seen.insert(k as i32);
+            e.note_off(0, id);
+            e.choke(0);
+            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+        }
+        assert!(seen.len() > 40, "{} values", seen.len());
     }
 
     #[test]
