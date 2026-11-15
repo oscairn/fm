@@ -3,7 +3,7 @@
 //! it. `docs/coverage.md` is the same table with each law's accuracy, and a test ties the two.
 //! A sound's report lists its parameters at non-default values that the engine does not play.
 
-use crate::params::{Param, Part, PARAMS};
+use crate::params::{Param, Part, BOX_BASE, BOX_FIELDS, PARAMS};
 use crate::sound::Sound;
 
 /// Played, or why not (the milestone that brings it).
@@ -94,7 +94,13 @@ pub fn status(p: &Param) -> &'static str {
         // M4: the sound LFO, its destinations (those not played: `slfo_destination`), boxes and
         // ratios
         PLAYED
-    } else if starts(&["ctrl_set", "key_ctrl_set", "tuning_"]) || n.ends_with("_ctrl_sens") {
+    } else if (op && starts(&["ctrl_set"])) || (!op && starts(&["box", "knob", "ribbon", "switch"])) {
+        // M7: the controller boxes, their sources and the operators' switches for them (a box the
+        // engine does not play: `crate::boxes::not_played`)
+        PLAYED
+    } else if n.ends_with("_ctrl_sens") {
+        "M7 (unmeasured)"
+    } else if starts(&["key_ctrl_set", "tuning_"]) {
         "M7 (controllers, tuning)"
     } else if starts(&[
         "pitch_",
@@ -150,6 +156,13 @@ pub fn not_covered(s: &Sound, mut f: impl FnMut(&'static Param, i16, &'static st
             f(p, dest, why);
         }
     }
+    // each controller box not played, by its destination
+    for n in 0..crate::boxes::BOXES {
+        let i = BOX_BASE + BOX_FIELDS * n + 1;
+        if let (Some(why), Some(p)) = (crate::boxes::not_played(s, n), PARAMS.get(i)) {
+            f(p, s.get(i), why);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -169,10 +182,11 @@ mod tests {
             .collect();
         let mut seen = std::collections::HashSet::new();
         for p in PARAMS.iter() {
-            let name = if p.op.is_some() {
-                format!("`opN.{}`", p.name)
-            } else {
-                format!("`{}`", p.name)
+            // operator parameters once as `opN.name`, the boxes' fields once as `boxN_field`
+            let name = match (p.op, p.name.strip_prefix("box").and_then(|r| r.split_once('_'))) {
+                (Some(_), _) => format!("`opN.{}`", p.name),
+                (None, Some((_, field))) => format!("`boxN_{field}`"),
+                _ => format!("`{}`", p.name),
             };
             if !seen.insert(name.clone()) {
                 continue;
@@ -194,8 +208,8 @@ mod tests {
     fn report() {
         let s = Sound::from_text(
             "fm-sound/1\nrandom_pan=3 key_on_delay=4 key_on_delay_sync=1 algorithm=5 filter_type=18 slfo_depth1=3 slfo_dest2=72 \
-             slfo_depth2=9 slfo_dest3=75 slfo_depth3=1 slfo_tempo_sync=1\nop2.level=50 op2.pitch_velocity=3 \
-             op2.scaling_low_depth=3\n",
+             slfo_depth2=9 slfo_dest3=75 slfo_depth3=1 slfo_tempo_sync=1 box1_dst=106 box1_ratio=9 box2_dst=90 \
+             box2_ratio=9\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
         )
         .unwrap();
         let mut got = Vec::new();
@@ -207,7 +221,12 @@ mod tests {
                 (4, 1, NO_TEMPO),
                 (100, 18, NO_TYPE),
                 (217, 1, NO_TEMPO),
-                (224, 2, effect)
+                (224, 2, effect),
+                (
+                    309,
+                    90,
+                    "not covered (a destination without a law, or not the engine's)"
+                )
             ]
         );
         let mut n = 0;

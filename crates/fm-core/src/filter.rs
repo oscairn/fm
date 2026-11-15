@@ -945,7 +945,8 @@ impl Voices {
 
     /// The filter over a step of `n` frames of the lane's first `L` voices' outputs `y`, in place:
     /// each voice's envelope and coefficients at the step's end (`sv` the sound LFO there, `lfo` each
-    /// voice's LFO share), ramped from the last step's across its frames.
+    /// voice's LFO share), ramped from the last step's across its frames; `bx` the controller boxes'
+    /// cutoff values and resonance steps.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn filter<const L: usize, V: F4<L>>(
         &mut self,
@@ -955,6 +956,7 @@ impl Voices {
         lfo: &[f32; W],
         n: usize,
         y: &mut [[f32; L]; STEP],
+        bx: (f32, f32),
     ) {
         let n = n.clamp(1, STEP);
         let inv = 1.0 / n as f32;
@@ -969,14 +971,18 @@ impl Voices {
             return;
         }
         let rt = Rate::new(rate);
-        let hz = if f.slfo_cut != 0.0 {
-            f.cutoffs(sv * f.slfo_cut)
+        // the boxes' cutoff within the cutoff's range
+        let hz = if f.slfo_cut != 0.0 || bx.0 != 0.0 {
+            f.cutoffs(sv * f.slfo_cut + bx.0.clamp(-f.value, 1023.0 - f.value))
         } else {
             f.hz
         };
-        // the sound LFO's resonance steps: the damping times 2^(-steps / 16)
-        let dscale = if f.slfo_res != 0.0 {
-            let res = f.resonance.saturating_add((sv * f.slfo_res) as i32).clamp(0, 127);
+        // the sound LFO's and the boxes' resonance steps: the damping times 2^(-steps / 16)
+        let dscale = if f.slfo_res != 0.0 || bx.1 != 0.0 {
+            let res = f
+                .resonance
+                .saturating_add((sv * f.slfo_res + bx.1) as i32)
+                .clamp(0, 127);
             scalar::F::<1>::splat((f.resonance as f32 - res as f32) / 16.0 - 8.0)
                 .exp2()
                 .0[0]
@@ -1427,7 +1433,7 @@ mod tests {
             for (i, y) in y.iter_mut().enumerate() {
                 y[0] = 0.1 * (2.0 * core::f64::consts::PI * hz * (b * STEP + i) as f64 / RATE).sin() as f32;
             }
-            v.filter::<1, scalar::F<1>>(l, RATE, 0.0, &[0.0; W], STEP, &mut y);
+            v.filter::<1, scalar::F<1>>(l, RATE, 0.0, &[0.0; W], STEP, &mut y, (0.0, 0.0));
             if b >= 2 * n / STEP {
                 for (i, y) in y.iter().enumerate() {
                     let t = 2.0 * core::f64::consts::PI * hz * (b * STEP + i) as f64 / RATE;
@@ -1559,7 +1565,9 @@ mod tests {
                 }
                 let sv = r() as f32 / u32::MAX as f32 * 2.0 - 1.0;
                 let lfo = [sv, -sv, 1.0, -1.0];
-                v.filter::<W, Native>(&l, RATE, sv, &lfo, 1 + (r() as usize % STEP), &mut y);
+                // the controller boxes' cutoff and resonance at any value within their spans
+                let bx = ((r() % 2049) as f32 - 1024.0, (r() % 257) as f32 - 128.0);
+                v.filter::<W, Native>(&l, RATE, sv, &lfo, 1 + (r() as usize % STEP), &mut y, bx);
                 assert!(
                     y.iter().flatten().all(|x| x.is_finite() && x.abs() <= 64.0),
                     "case {case} block {b}"
@@ -1577,7 +1585,7 @@ mod tests {
         v.start(&l, 0, 60, 100.0, 0.0, true, RATE);
         for b in 0..20_000 {
             let mut y = [[if b == 0 { 1.0 } else { 0.0 }; 1]; STEP];
-            v.filter::<1, scalar::F<1>>(&l, RATE, 0.0, &[0.0; W], STEP, &mut y);
+            v.filter::<1, scalar::F<1>>(&l, RATE, 0.0, &[0.0; W], STEP, &mut y, (0.0, 0.0));
             assert!(
                 y.iter().all(|x| x[0] == 0.0 || x[0].abs() >= f32::MIN_POSITIVE),
                 "block {b}"

@@ -539,6 +539,7 @@ unsafe extern "C" fn params_info(_: *const clap_plugin, i: u32, info: *mut clap_
                 (Some(o), _) => format!("Operator {}", o + 1),
                 (None, 0..100) => "Common".into(),
                 (None, 100..200) => "Filter".into(),
+                (None, 256..1000) => "Controllers".into(),
                 _ => "Part".into(),
             };
             let name = p.op.map_or(p.name.to_string(), |o| format!("op{}.{}", o + 1, p.name));

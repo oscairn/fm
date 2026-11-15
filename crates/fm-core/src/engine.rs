@@ -6,6 +6,7 @@
 //! Fixed size; nothing here allocates, and the block path (`note_on`, `note_off`, `pedal`,
 //! `render`) has no panic path (tools/check-no-panic.sh).
 
+use crate::boxes::{self, SOURCES};
 use crate::filter::{Laws, Voices, VOICES0};
 use crate::forms::Wave;
 use crate::laws::{self, DOUBLINGS_PER_DB as DPD};
@@ -123,14 +124,28 @@ const EXPRESSION: usize = 5;
 const CTL_REST: [u8; CTLS] = [0, 0, 0, 0, 0, 127];
 
 /// What a sound's controllers do to it now, made again when one moves (or the sound is
-/// prepared) and read every control step: whether anything moves, the output gain (expression).
+/// prepared) and read every control step: whether anything moves, the output gain (expression);
+/// from the controller boxes (docs/design.md, 3.9) each operator's level against the level it was
+/// prepared at (log2, at most 0) and whether any operator has one, the cutoff's values and the
+/// resonance's steps.
 #[derive(Clone, Copy)]
 struct Mods {
     on: bool,
     gain: f32,
+    lvl_on: bool,
+    lvl: [f32; OPS],
+    cut: f32,
+    res: f32,
 }
 
-const MODS0: Mods = Mods { on: false, gain: 1.0 };
+const MODS0: Mods = Mods {
+    on: false,
+    gain: 1.0,
+    lvl_on: false,
+    lvl: [0.0; OPS],
+    cut: 0.0,
+    res: 0.0,
+};
 
 /// A sound's place in the voice budget's order (oscairn.voice-budget): voices it keeps from other
 /// sounds' new notes, its priority (lower gives way first) and its own limit (0: none).
@@ -254,6 +269,10 @@ pub struct Prepared {
     filter: Laws,
     /// Key-on delay, ms (0: none).
     delay_ms: f32,
+    /// Each operator's level (with the depth macro) and the level it is prepared at (the top its
+    /// controller boxes reach); whether the sound has a box the engine plays.
+    levels: [(u8, u8); OPS],
+    boxed: bool,
 }
 
 /// What the sound LFO moves: pitch (frequency or detune), level, what the kernels play (form or
@@ -384,6 +403,8 @@ impl Prepared {
             forms: [(0, 0, 0); OPS],
             slfo_fbk: [0.0; 8],
             filter: Laws::new(s, &dests),
+            levels: [(0, 0); OPS],
+            boxed: false,
             // shortcut: tempo sync plays the time (no tempo input; the coverage report names it)
             delay_ms: laws::key_on_delay_ms(i32::from(s.get(Common::KeyOnDelay as usize))) as f32,
         };
@@ -399,6 +420,8 @@ impl Prepared {
         let sustain_off = laws::aeg_sustain_steps(part(Part::SustainOffset));
         let mut audible = 0u8;
         let mut forms = [(0, 0, 0); OPS];
+        p.boxed = boxes::boxes(s).next().is_some();
+        let up = if p.boxed { boxes::reach(s) } else { [0; OPS] };
         for op in 0..OPS {
             let bit = 1u8 << op;
             let carrier = r.carriers & bit != 0;
@@ -410,6 +433,13 @@ impl Prepared {
                 1
             };
             let level = (o(op, Op::Level, 0) + m(Common::MacroDepth) / fb_div).clamp(0, 99);
+            // an operator that boxes can raise is prepared at the top they reach; the boxes' steps
+            // lower it from there (docs/design.md, 3.9)
+            let top = (level + up.get(op).copied().unwrap_or(0)).min(99);
+            if let Some(l) = p.levels.get_mut(op) {
+                *l = (level as u8, top as u8);
+            }
+            let level = top;
             let (form, spread, formant) = (o(op, Op::Form, 0), o(op, Op::Spread, 0), o(op, Op::Formant, 0));
             let (form, spread, formant, texture_db) =
                 laws::texture(c(Common::MacroTexture), !carrier, form, spread, formant)
@@ -1820,6 +1850,10 @@ impl Engine {
         if let Some(b) = self.bend.get_mut(sound) {
             *b = value.clamp(-8192, 8191);
         }
+        // the bend is a box source too
+        if self.sounds.get(sound).is_some_and(|p| p.boxed) {
+            self.refresh(sound);
+        }
     }
 
     /// The sustain pedal of `sound`: up releases the notes it held (not those the sostenuto
@@ -1907,13 +1941,46 @@ impl Engine {
 
     /// What the controllers of `sound` do to it now ([`Mods`]).
     fn refresh(&mut self, sound: usize) {
-        let (Some(c), Some(m)) = (self.ctl.get(sound), self.mods.get_mut(sound)) else {
+        let (Some(c), Some(m), Some(p), Some(&b)) = (
+            self.ctl.get(sound),
+            self.mods.get_mut(sound),
+            self.sounds.get(sound),
+            self.bend.get(sound),
+        ) else {
             return;
         };
         // expression: assumed to follow the part volume's measured law, about 40 log10(v / 127) dB
         let e = f32::from(c[EXPRESSION]) / 127.0;
-        let gain = e * e;
-        *m = Mods { on: gain != 1.0, gain };
+        *m = Mods { gain: e * e, ..MODS0 };
+        if p.boxed {
+            let mut src = [0.0; SOURCES];
+            boxes::own(&p.sound, &mut src);
+            src[0] = boxes::bend(b);
+            for (&k, &v) in [1usize, 2, 3, 4, 7].iter().zip(c.iter()) {
+                if let Some(x) = src.get_mut(k) {
+                    *x = boxes::controller(v);
+                }
+            }
+            let t = boxes::steps(&p.sound, &src);
+            let carriers = u32::from(p.plan.carriers);
+            for (op, ((&(level, top), st), l)) in p.levels.iter().zip(t.level).zip(m.lvl.iter_mut()).enumerate() {
+                if level == top && st == 0 {
+                    continue;
+                }
+                let db = |l: i32| {
+                    if has(carriers, op) {
+                        laws::carrier_level_db(l)
+                    } else {
+                        laws::modulator_level_db(l)
+                    }
+                };
+                let now = (i32::from(level) + st).clamp(0, 99);
+                *l = ((db(now) - db(i32::from(top))) * DPD).max(f64::from(FLOOR) * 2.0) as f32;
+                m.lvl_on = true;
+            }
+            (m.cut, m.res) = (t.cutoff as f32, t.resonance as f32);
+        }
+        m.on = m.gain != 1.0 || m.lvl_on || m.cut != 0.0 || m.res != 0.0;
     }
 
     /// Starts shedding one note by the platform's voice-budget order, for a new note of `incoming`
@@ -2409,7 +2476,8 @@ fn step<const L: usize, V: F4<L>>(
         };
         voice_lfo::<L>(lane, p, c, n, inc)
     });
-    let (g0, dg) = envelopes::<L, V>(lane, p, c, n, end, lfo.as_ref().map(|l| &l.1), sv);
+    let bx = m.filter(|m| m.lvl_on).map(|m| &m.lvl);
+    let (g0, dg) = envelopes::<L, V>(lane, p, c, n, end, lfo.as_ref().map(|l| &l.1), sv, bx);
     // the sound LFO's pitch (a sound without it skips this)
     let sp = (p.slfo & SLFO_PITCH != 0).then(|| slfo_pitch::<L>(lane, p, sv));
     // a lane whose pitch does not move skips this
@@ -2444,7 +2512,8 @@ fn step<const L: usize, V: F4<L>>(
     // the filter and pan (docs/design.md, 3.7)
     if p.filter.on {
         let lfo = lfo.as_ref().map_or(&[0.0; W], |l| &l.0);
-        lane.post.filter::<L, V>(&p.filter, c.rate, sv, lfo, n, &mut vout);
+        let bx = m.map_or((0.0, 0.0), |m| (m.cut, m.res));
+        lane.post.filter::<L, V>(&p.filter, c.rate, sv, lfo, n, &mut vout, bx);
     }
     // expression and the notes' volumes (a lane without either skips this)
     let want = m.map_or(1.0, |m| m.gain);
@@ -2711,7 +2780,9 @@ fn incs<const L: usize, V: F4<L>>(
 /// One control step of a lane's envelopes: returns each operator's gain at the step's start and
 /// its ramp a frame (with the voice LFO's amplitude share `lfo`, each operator's loss through the
 /// bend, and the sound LFO's at its value `sv`, straight in dB); moves segments on, fades shed
-/// voices, and ends voices (the end rule, a fade's end: the bound leaves the LFOs' losses out).
+/// voices, and ends voices (the end rule, a fade's end: the bound leaves the LFOs' losses out);
+/// `bx` the controller boxes' levels, when they move any.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn envelopes<const L: usize, V: F4<L>>(
     lane: &mut Lane,
@@ -2721,6 +2792,7 @@ fn envelopes<const L: usize, V: F4<L>>(
     end: &mut impl FnMut(NoteEnd),
     lfo: Option<&[f32; W]>,
     sv: f32,
+    bx: Option<&[f32; OPS]>,
 ) -> ([[f32; L]; OPS], [[f32; L]; OPS]) {
     let amp = lfo.filter(|_| p.lfo_amp_on);
     // the sound LFO's level destination: none lost at its top, all at its bottom
@@ -2778,6 +2850,11 @@ fn envelopes<const L: usize, V: F4<L>>(
         };
         let heard = match slfo_amp {
             Some(u) => (heard - V::splat(u * at(&p.slfo_amp, i))).max(V::splat(FLOOR)),
+            None => heard,
+        };
+        // the controller boxes' level
+        let heard = match bx {
+            Some(b) => (heard + V::splat(at(b, i))).max(V::splat(FLOOR)),
             None => heard,
         };
         let target = heard.exp2() * fade;
@@ -4182,6 +4259,80 @@ mod tests {
         for ((a, b), c) in one.iter().zip(&two).zip(&both).skip(STEP) {
             assert!((a + b - c).abs() < 1e-5, "{a} + {b} against {c}");
         }
+    }
+
+    /// A controller box plays its destination as the static value it moves it to: the mod wheel
+    /// through a +16 box on operator 1's level (24 steps at full travel, 12 at 64) and a +8 box on
+    /// the cutoff (128 values), set before the note or moved under a held one; an operator whose
+    /// switch for the box is off keeps its level; the knobs and the bend reach their boxes.
+    #[test]
+    fn boxes_play_their_destinations() {
+        let at = |l1: i32, l2: i32, cut: i32| {
+            format!(
+                "algorithm=24 portamento=0 filter_type=0 resonance=40 filter_eg_depth=0 cutoff={cut} \
+                 op1.level={l1} op2.level={l2} op2.coarse=2"
+            )
+        };
+        let base = at(60, 70, 300);
+        // box 1 reaches operator 1 only (every operator's switch is on by default)
+        let off = |ops: &[usize]| ops.iter().map(|o| format!(" op{o}.ctrl_set1=0")).collect::<String>();
+        let only1 = off(&[2, 3, 4, 5, 6, 7, 8]);
+        let boxed = |extra: &str| {
+            sound(&format!(
+                "{base} {extra} box1_dst=106 box1_ratio=16 box2_dst=102 box2_ratio=8{only1}"
+            ))
+        };
+        let fixed = |l1: i32, l2: i32, cut: i32| sound(&at(l1, l2, cut));
+        let play = |p: &Prepared, before: &[Event], during: &[Event]| {
+            let mut e = engine(p);
+            blocks(&mut e, before, 1);
+            e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            blocks(&mut e, during, 1);
+            blocks(&mut e, &[], 6)
+        };
+        let near = |a: &[f32], b: &[f32]| {
+            let peak = a.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+            assert!(peak > 0.01);
+            let worst = a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs())) / peak;
+            assert!(worst <= 2e-5, "{worst} of the peak {peak}");
+            true
+        };
+        let reference = |l1, cut| play(&fixed(l1, 70, cut), &[], &[]);
+        let wheel = |v| Event {
+            frame: 0,
+            sound: 0,
+            kind: Kind::Control { cc: 1, value: v },
+        };
+        // the wheel before the note: at rest, at 64 and at the top
+        assert!(near(&play(&boxed(""), &[], &[]), &reference(60, 300)));
+        assert!(near(&play(&boxed(""), &[wheel(64)], &[]), &reference(72, 364)));
+        assert!(near(&play(&boxed(""), &[wheel(127)], &[]), &reference(84, 428)));
+        // moved under a held note: the same from the step after its ramp
+        let moved = play(&boxed(""), &[], &[wheel(127)]);
+        assert!(near(&moved[STEP..], &reference(84, 428)[STEP..]));
+        // operator 2's switch on instead: it moves operator 2 and leaves operator 1
+        let two = sound(&format!(
+            "{base} box1_dst=106 box1_ratio=16{}",
+            off(&[1, 3, 4, 5, 6, 7, 8])
+        ));
+        assert!(near(
+            &play(&two, &[wheel(127)], &[]),
+            &play(&fixed(60, 94, 300), &[], &[])
+        ));
+        // a knob's stored value, the bend at its top (a bipolar box: 11.99 steps at 8191, toward 0)
+        assert!(near(
+            &play(&boxed("box1_src=8 knob1=1023"), &[], &[]),
+            &reference(84, 300)
+        ));
+        let bend = Event {
+            frame: 0,
+            sound: 0,
+            kind: Kind::Bend { value: 8191 },
+        };
+        let p = sound(&format!(
+            "{base} box1_src=0 box1_dst=106 box1_ratio=16 box1_pol=1 bend_up=0{only1}"
+        ));
+        assert!(near(&play(&p, &[bend], &[]), &reference(71, 300)));
     }
 
     /// The sostenuto pedal holds the notes whose keys were down when it went down, not later ones;

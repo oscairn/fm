@@ -4,8 +4,10 @@
 //! change and are never reused: a new parameter takes a new id, and its default is the behaviour
 //! sounds had before it existed. `docs/coverage.md` says, for each, whether the engine plays it.
 //!
-//! Id ranges: 0-40 part common, 100-134 filter and filter envelope, 200-255 part parameters,
-//! 1000 + 100 op + k for operator `op` (0-7): switches at k 0-38, parameters at k 40-77.
+//! Id ranges: 0-40 part common, 100-134 filter and filter envelope, 200-266 part parameters
+//! (256-266 the controller boxes' own sources), 300-555 the controller boxes (box n's eight fields
+//! at 300 + 8 (n - 1)), 1000 + 100 op + k for operator `op` (0-7): switches at k 0-38, parameters
+//! at k 40-77.
 
 /// One parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +106,7 @@ const FILTER: [Row; 35] = [
     ("hpf_key_follow", -64, 63, 0),
 ];
 
-const PART: [Row; 56] = [
+const PART: [Row; 67] = [
     ("mono_poly", 0, 1, 1),
     ("key_assign", 0, 1, 1),
     ("portamento", 0, 1, 1),
@@ -161,7 +163,39 @@ const PART: [Row; 56] = [
     ("filter_eg_depth_offset", -64, 63, 0),
     ("cutoff_offset", -64, 63, 0),
     ("resonance_offset", -64, 63, 0),
+    // the controller boxes' sources the host sends as parameters: the assignable knobs (raw),
+    // the ribbon (as its controller) and the two assignable switches
+    ("knob1", 0, 1023, 512),
+    ("knob2", 0, 1023, 512),
+    ("knob3", 0, 1023, 512),
+    ("knob4", 0, 1023, 512),
+    ("knob5", 0, 1023, 512),
+    ("knob6", 0, 1023, 512),
+    ("knob7", 0, 1023, 512),
+    ("knob8", 0, 1023, 512),
+    ("ribbon", 0, 127, 0),
+    ("switch1", 0, 1, 0),
+    ("switch2", 0, 1, 0),
 ];
+
+/// The controller boxes 1-32 (the model's controller sets), raw: source, destination (the
+/// reference's number; 0: off), ratio, polarity (bipolar), curve bank, curve type and its two
+/// parameters.
+macro_rules! boxes {
+    ($($n:literal)*) => {[$(
+        (concat!("box", $n, "_src"), 0, 41, 1),
+        (concat!("box", $n, "_dst"), 0, 413, 0),
+        (concat!("box", $n, "_ratio"), -128, 127, 0),
+        (concat!("box", $n, "_pol"), 0, 1, 0),
+        (concat!("box", $n, "_bank"), 0, 25, 0),
+        (concat!("box", $n, "_curve"), 0, 31, 0),
+        (concat!("box", $n, "_p1"), 0, 127, 5),
+        (concat!("box", $n, "_p2"), 0, 127, 0),
+    )*]};
+}
+const BOX: [Row; 256] = boxes!(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32);
+/// Fields a box has, in [`BOX`]'s order.
+pub const BOX_FIELDS: usize = 8;
 
 /// Per-operator switches (k 0-38): 32 controller-set switches, 4 key-controller-set switches,
 /// 3 sound-LFO destination switches; all on by default.
@@ -253,7 +287,9 @@ pub const OPS: usize = 8;
 /// Parameters an operator has: switches and parameters.
 pub const PER_OP: usize = SWITCH_NAMES.len() + OP.len();
 /// Index of operator 0's first switch in [`PARAMS`].
-pub const OP_BASE: usize = COMMON.len() + FILTER.len() + PART.len();
+pub const OP_BASE: usize = BOX_BASE + BOX.len();
+/// Index of box 1's first field in [`PARAMS`].
+pub const BOX_BASE: usize = COMMON.len() + FILTER.len() + PART.len();
 /// All parameters.
 pub const COUNT: usize = OP_BASE + OPS * PER_OP;
 
@@ -272,7 +308,7 @@ const fn build() -> [Param; COUNT] {
     };
     let mut t = [zero; COUNT];
     let mut n = 0;
-    let groups: [(&[Row], u16); 3] = [(&COMMON, 0), (&FILTER, 100), (&PART, 200)];
+    let groups: [(&[Row], u16); 4] = [(&COMMON, 0), (&FILTER, 100), (&PART, 200), (&BOX, 300)];
     let mut g = 0;
     while g < groups.len() {
         let (rows, base) = groups[g];
@@ -405,6 +441,9 @@ pub enum Part {
     FegDepthOffset = COMMON.len() as isize + FILTER.len() as isize + 53,
     CutoffOffset = COMMON.len() as isize + FILTER.len() as isize + 54,
     ResonanceOffset = COMMON.len() as isize + FILTER.len() as isize + 55,
+    Knob = COMMON.len() as isize + FILTER.len() as isize + 56, // eight knobs from here
+    Ribbon = COMMON.len() as isize + FILTER.len() as isize + 64,
+    Switch = COMMON.len() as isize + FILTER.len() as isize + 65, // two switches from here
 }
 
 /// The filter and its envelope's parameters, by index (ids 100-134, in order).
@@ -465,6 +504,11 @@ pub const fn op_index(op: usize, k: Op, offset: usize) -> usize {
     OP_BASE + op * PER_OP + SWITCH_NAMES.len() + k as usize + offset
 }
 
+/// The index of operator `op`'s controller set switch `n` (0-31).
+pub const fn ctrl_set_index(op: usize, n: usize) -> usize {
+    OP_BASE.wrapping_add(op.wrapping_mul(PER_OP)).wrapping_add(n)
+}
+
 /// The index of operator `op`'s sound LFO destination box `d` (0-2).
 pub const fn slfo_box_index(op: usize, d: usize) -> usize {
     (OP_BASE + 36).wrapping_add(op.wrapping_mul(PER_OP)).wrapping_add(d)
@@ -476,7 +520,17 @@ mod tests {
 
     #[test]
     fn table_is_sorted_unique_and_sane() {
-        assert_eq!(COUNT, 41 + 35 + 56 + 8 * 77);
+        assert_eq!(COUNT, 41 + 35 + 67 + 256 + 8 * 77);
+        assert_eq!(
+            (PARAMS[Part::Knob as usize].id, PARAMS[Part::Knob as usize].name),
+            (256, "knob1")
+        );
+        assert_eq!(PARAMS[Part::Ribbon as usize].name, "ribbon");
+        assert_eq!(PARAMS[Part::Switch as usize + 1].name, "switch2");
+        assert_eq!((PARAMS[BOX_BASE].id, PARAMS[BOX_BASE].name), (300, "box1_src"));
+        let last = &PARAMS[OP_BASE - 1];
+        assert_eq!((last.id, last.name), (555, "box32_p2"));
+        assert_eq!(PARAMS[ctrl_set_index(2, 31)].name, "ctrl_set32");
         for w in PARAMS.windows(2) {
             assert!(w[0].id < w[1].id, "{} then {}", w[0].id, w[1].id);
         }
