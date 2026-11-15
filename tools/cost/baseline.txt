@@ -1,30 +1,38 @@
 # Instructions a voice-block (rest: a block) under callgrind, aarch64, -C target-cpu=cortex-a53, the
 # pinned toolchain; tools/cost/cg.sh check fails a case more than 10 % over its figure here.
-rest 638
-om-edges-table 14195
-om-edges-window 19827
-om-chain-table 13557
-om-loop-table 17299
-om-loop-window 23027
-fm-rest 1277
-fm-r12-8 18910
-fm-r14-8 17534
-fm-r80-8 15260
-fm-r8-8 14834
-fm-r1-8 14928
-fm-r12-8-v8 19031
-fm-r1-1 2950
-fm-r12-8-scalar 21383
-fm-r12-8-all 21454
-fm-r12-8-odd 27478
-fm-r12-8-res 27636
-fm-r12-8-mixed 25288
-fm-r80-8-res 22976
-fm-r1-8-res 22712
-fm-r12-8-mixed-v8 25409
-fm-s1-v1 72948
-fm-s1-v2 37110
-fm-s5-v1 71915
-fm-s5-v2 36595
-fm-s8-v1 71818
-fm-s8-v2 36546
+rest 624
+om-edges-table 14178
+om-edges-window 19811
+om-chain-table 13540
+om-loop-table 17292
+om-loop-window 23021
+fm-rest 1186
+fm-r12-8 14626
+fm-r14-8 14466
+fm-r80-8 14404
+fm-r8-8 13978
+fm-r1-8 14072
+fm-r12-8-v8 14762
+fm-r1-1 2721
+fm-r12-8-scalar 16585
+fm-r12-8-all 16618
+fm-r12-8-odd 22642
+fm-r12-8-res 22466
+fm-r12-8-mixed 20358
+fm-r80-8-res 22200
+fm-r1-8-res 21932
+fm-r12-8-mixed-v8 20494
+fm-s1-v1 36693
+fm-s1-v2 28613
+fm-s5-v1 35746
+fm-s5-v2 28139
+fm-s8-v1 35665
+fm-s8-v2 28099
+fm-s1-v5 19004
+# The lane gate (tools/cost/cg.sh check, at most 2 % over): one voice alone and two voices of a sound
+# against a voice of 32 (fm-s1-v1, fm-s1-v2 against fm-r12-8), one voice in each of five sounds
+# against five voices in one (fm-s5-v1 against fm-s1-v5). Reached, not the targets (1.5, 1.25 and
+# 1.6: open, docs/design.md).
+ratio-s1-v1 2.509
+ratio-s1-v2 1.956
+ratio-s5-v1 1.881

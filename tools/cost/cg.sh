@@ -12,7 +12,9 @@
 # misses: tools/cost/cache-baseline.txt, 10 % and half a miss) or over the absolute gates: at most
 # 2,000 a block at rest, at most 28,000 a voice-block for the worst plan with all eight operators
 # (the engine's cases, fm-*-8, and the spike's operator-major cases on its non-sine forms; the
-# spike's sample-major cases are kept as the measured alternative).
+# spike's sample-major cases are kept as the measured alternative); and the lane gate: a voice's
+# cost with few voices a sound against its cost at 32 voices of one sound, each ratio at most 2 %
+# over its "ratio-" line in tools/cost/baseline.txt (docs/design.md, "Lanes": the targets).
 set -e
 SRC=$1; OUT=$2; MODE=$3
 BLOCKS=64
@@ -54,6 +56,7 @@ run fm-r1-8-res 32 e 1 8 native res
 run fm-r12-8-mixed-v8 8 e 12 8 native mixed
 # voices few a sound: 1 and 2 voices in each of 1, 5 and 8 sounds (a voice-block: by all the voices)
 for s in 1 5 8; do for v in 1 2; do TOTAL=$((s * v)); run "fm-s$s-v$v" "$v" e 12 8 native sine $s; done; done; TOTAL=
+run fm-s1-v5 5 e 12 8 native sine 1
 for f in table window; do echo "footprint $f: $("$B" footprint 0 x x $f)"; done
 } | tee "$OUT/summary.txt"
 cache() {  # name voices forms: the device's caches, routing 12 with eight operators
@@ -73,8 +76,19 @@ if [ "$MODE" = check ]; then
   if [ "$(awk -v r="$rest" -v w="$worst" 'BEGIN {print (r > 2000 || w > 28000)}')" = 1 ]; then
     echo "GATE: rest $rest (at most 2000 a block), worst eight-operator voice $worst (at most 28000 a voice-block)"; fail=1
   else echo "ok gates: rest $rest, worst eight-operator voice $worst"; fi
+  # the lane gate: one voice alone and two voices against 32, one voice in each of five sounds
+  # against five in one
+  ir() { awk -v n="$1" '$1==n {print $5}' "$OUT/summary.txt"; }
+  for r in "s1-v1 $(ir fm-s1-v1) $(ir fm-r12-8)" "s1-v2 $(ir fm-s1-v2) $(ir fm-r12-8)" "s5-v1 $(ir fm-s5-v1) $(ir fm-s1-v5)"; do
+    set -- $r
+    base=$(awk -v n="ratio-$1" '$1==n {print $2}' "$SRC/tools/cost/baseline.txt")
+    got=$(awk -v a="$2" -v b="$3" 'BEGIN {printf "%.3f", a / b}')
+    if [ -z "$base" ] || [ "$(awk -v g="$got" -v b="$base" 'BEGIN {print (g > b * 1.02)}')" = 1 ]; then
+      echo "LANE GATE ratio-$1: $got, baseline $base (+2 % allowed)"; fail=1
+    else echo "ok ratio-$1: $got (baseline $base)"; fi
+  done
   while read -r name base; do
-    case "$name" in ''|'#'*) continue;; esac
+    case "$name" in ''|'#'*|ratio-*) continue;; esac
     got=$(awk -v n="$name" '$1==n {print $5}' "$OUT/summary.txt")
     if [ -z "$got" ] || [ "$(awk -v g="$got" -v b="$base" 'BEGIN {print (g > b * 1.10)}')" = 1 ]; then
       echo "REGRESSION $name: $got, baseline $base (+10 % allowed)"; fail=1

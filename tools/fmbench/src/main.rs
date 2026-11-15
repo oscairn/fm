@@ -104,12 +104,11 @@ fn time(blocks: usize) {
             rows.push((name.to_string(), engine(routing, ops, voices, forms, 1), voices));
         }
     }
-    // few voices a sound: a lane costs the same with one voice in it as with four
-    for sounds in [1usize, 5, 8] {
-        for voices in [1usize, 2] {
-            let name = format!("routing 12, {sounds} sounds");
-            rows.push((name, engine(12, 8, voices, "sine", sounds), voices * sounds));
-        }
+    // few voices a sound (the lane gate's cases, docs/design.md): one and two voices in each of 1, 5
+    // and 8 sounds, and five in one sound
+    for (sounds, voices) in [(1usize, 1usize), (1, 2), (5, 1), (5, 2), (8, 1), (8, 2), (1, 5)] {
+        let name = format!("routing 12, {sounds} sounds");
+        rows.push((name, engine(12, 8, voices, "sine", sounds), voices * sounds));
     }
     for (name, mut e, voices) in rows {
         let mut out = [0.0f32; BLOCK];
