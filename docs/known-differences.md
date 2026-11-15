@@ -68,7 +68,7 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 | Aftertouch | channel and key pressure (key pressure per key: not measured) | one value a sound, the latest of channel pressure, key pressure and the pressure expression | as the sibling engines; per-voice boxes would cost a box evaluation a voice |
 | Sostenuto pedal | received | holds the notes whose keys are down when it goes down (not those the sustain pedal holds then); later notes not held | the reference's rule not measured |
 | Soft pedal (CC 67), portamento switch (CC 65) | the soft pedal not received; CC 65 switches portamento | both ignored | CC 65 waits for a ruling (the sound's switch is a stored parameter) |
-| Box sources the host cannot send | the foot switch, the motion sequencer lanes, the envelope followers | not played (reported) | the host sends neither |
+| Box sources the host cannot send | the foot switch, the stepped modulation lanes, the envelope followers | not played (reported) | the host sends neither |
 | Knob, ribbon and switch changes (the plugin) | at their time | sound parameters: at the start of the stretch after their event (a preparation, about 17,200 instructions) | one route for every parameter |
 | Pedal and bend after a sound change (the plugin) | per part | sent to the sound the channel selects now; notes left sounding on the previous sound keep its last values | the channel addresses one sound at a time |
 | Note-on velocity 0 (the plugin) | MIDI velocity 0 is a note off (as here) | a CLAP note on with velocity 0 plays at velocity 1 | a CLAP note on is always a note |
