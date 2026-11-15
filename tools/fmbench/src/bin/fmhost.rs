@@ -8,7 +8,9 @@
 //! with eight sine operators. `shared` and `shared-idle`: as a host shares one instance among five
 //! parts (case.rs's `shared_text`, controller boxes at rest values), each sound in its own slot on
 //! its own channel and output bus (buses 1-5 activated): one note in each of the first VOICES
-//! sounds, or (`shared-idle`) none and the ignored controller every block.
+//! sounds, or (`shared-idle`) none and the ignored controller every block. A fourth argument
+//! `time` prints the wall-clock time of a block (microseconds: mean, median, p99, max) for the
+//! device (pin it to an idle core with taskset).
 #[path = "../case.rs"]
 mod case;
 
@@ -74,10 +76,14 @@ fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let num = |i: usize, d: usize| a.get(i).and_then(|x| x.parse().ok()).unwrap_or(d);
     let case = a.get(2).map_or("voices", String::as_str);
-    println!("hosted {case}: output sum {:.3}", run(num(0, 8), num(1, 100), case));
+    let time = a.get(3).is_some_and(|x| x == "time");
+    println!(
+        "hosted {case}: output sum {:.3}",
+        run(num(0, 8), num(1, 100), case, time)
+    );
 }
 
-fn run(voices: usize, blocks: usize, case: &str) -> f64 {
+fn run(voices: usize, blocks: usize, case: &str, time: bool) -> f64 {
     let host = clap_host {
         clap_version: CLAP_VERSION,
         host_data: std::ptr::null_mut(),
@@ -168,6 +174,7 @@ fn run(voices: usize, blocks: usize, case: &str) -> f64 {
         data: [0xb0, 65, 64],
     })];
     let mut sum = 0.0f64;
+    let mut t = Vec::with_capacity(if time { blocks } else { 0 });
     for b in 0..=blocks {
         let mut events = match (b, case) {
             (0, _) => notes.clone(),
@@ -198,7 +205,11 @@ fn run(voices: usize, blocks: usize, case: &str) -> f64 {
         if b == 0 {
             unsafe { (*p).process.expect("process")(p, &pr) };
         } else {
+            let s = time.then(std::time::Instant::now);
             fmbench_render_hosted(unsafe { &*p }, &pr);
+            if let Some(s) = s {
+                t.push(s.elapsed().as_secs_f64() * 1e6);
+            }
         }
         // (main, or the first shared sound's bus)
         sum += unsafe { std::slice::from_raw_parts(ptrs[usize::from(shared)][0], fm_core::engine::BLOCK) }
@@ -210,6 +221,17 @@ fn run(voices: usize, blocks: usize, case: &str) -> f64 {
         (*p).stop_processing.expect("stop")(p);
         (*p).deactivate.expect("deactivate")(p);
         (*p).destroy.expect("destroy")(p);
+    }
+    if !t.is_empty() {
+        t.sort_by(f64::total_cmp);
+        let at = |q: f64| t[((t.len() - 1) as f64 * q) as usize];
+        let mean = t.iter().sum::<f64>() / t.len() as f64;
+        println!(
+            "{case}, {voices} voices: a block {mean:.2} mean, {:.2} median, {:.2} p99, {:.2} max (µs)",
+            at(0.5),
+            at(0.99),
+            at(1.0)
+        );
     }
     sum
 }

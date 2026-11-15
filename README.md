@@ -33,7 +33,8 @@ What exists:
   width), tables, the operator forms (`forms`: Q14 tables written by the build script
   from the measured data), and the M0 voice-kernel spike (`spike`).
 - `tools/fmbench`: the engine's and the spike's cost cases, `fmbench time` (the device timing
-  tool), `fmbench check`, `fmbench coverage SOUND`; `fmhost`, the plugin's cost through CLAP.
+  tool), `fmbench check`, `fmbench coverage SOUND`; `fmhost`, the plugin's cost through CLAP
+  (`fmhost 3 2000 shared time`: a shared instance's block timed on the device).
 - `tools/cost/cg.sh`: instructions a voice-block on aarch64 under callgrind, and data misses with
   the device's caches, gated against `tools/cost/baseline.txt` and `cache-baseline.txt`, and the
   lane gate (a voice's cost with few voices a sound).

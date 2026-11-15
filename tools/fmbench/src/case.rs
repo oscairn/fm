@@ -18,7 +18,9 @@ fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
 /// parts vary): eight operators on routing 13, two of them on a non-sine form, decaying
 /// envelopes, level scaling and velocity, the 24 dB low-pass with its envelope, and two controller
 /// boxes at rest values: the mod wheel at 0 on the voice LFO's amplitude depth (moving nothing)
-/// and knob 3 a little off centre on the cutoff (moving it a little).
+/// and knob 3 a little off centre on the cutoff (moving it a little). Fmhost's only: fmbench left
+/// as it was, since its layout moves the cache gate's counts.
+#[allow(dead_code)]
 pub fn shared_text(n: usize) -> String {
     let mut t = format!(
         "fm-sound/1\nalgorithm=13 feedback=6 lfo_speed={} lfo_key_on_reset=1 lfo_pitch_depth=1 random_pitch=3 \
