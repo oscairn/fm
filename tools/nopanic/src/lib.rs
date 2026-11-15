@@ -75,6 +75,25 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
             1049 + 100 * op,
             (pick.wrapping_mul(7).wrapping_add(u32::from(op) * 13) % 100) as i16,
         );
+        // operator pitch envelopes over the picks
+        let _ = s.set(
+            1050 + 100 * op,
+            ((pick / 13).wrapping_add(u32::from(op)) % 101) as i16 - 50,
+        );
+        let _ = s.set(1052 + 100 * op, ((pick / 17).wrapping_add(u32::from(op)) % 100) as i16);
+    }
+    // the common pitch envelope, key follow, random pitch, the part's detune
+    for (id, v) in [
+        (10, (pick % 101) as i16 - 50),
+        (11, (pick / 7 % 101) as i16 - 50),
+        (15, (pick % 100) as i16),
+        (16, (pick / 3 % 100) as i16),
+        (20, (pick % 4) as i16),
+        (7, (pick % 128) as i16),
+        (8, (pick / 11 % 128) as i16),
+        (208, (pick % 256) as i16 - 128),
+    ] {
+        let _ = s.set(id, v);
     }
     let mut e = Engine::new(48000.0);
     e.set_sound(0, &Prepared::new(&s));

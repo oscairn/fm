@@ -297,7 +297,7 @@ pub fn cents_steps(c: f64) -> i32 {
 /// the key's own pitch, straight in cents.
 pub fn pitch_key_follow_cents(v: i32, key: i32, centre: i32) -> f64 {
     let pct = KEY_FOLLOW_PERCENT.get(v.clamp(0, 127) as usize).copied().unwrap_or(100);
-    f64::from((i32::from(pct) - 100) * (key.clamp(-256, 383) - centre.clamp(0, 127)))
+    (f64::from(pct) - 100.0) * (f64::from(key.clamp(-256, 383)) - f64::from(centre.clamp(0, 127)))
 }
 
 /// Random pitch 0-127 with a uniform 32-bit draw: whole steps of 18.75 cents within depth / 4
@@ -330,22 +330,24 @@ pub fn fixed_pitch_velocity_cents(sens: i32, velocity: f64) -> f64 {
 
 /// Fixed-mode key follow 0-99 at a key: cents off its frequency, about key 60.
 pub fn fixed_key_follow_cents(sens: i32, key: i32) -> f64 {
-    interpolate(&FKF_X, &FKF_CENTS, f64::from(sens.clamp(0, 99))) * f64::from(key.clamp(-256, 383) - 60)
+    interpolate(&FKF_X, &FKF_CENTS, f64::from(sens.clamp(0, 99))) * (f64::from(key.clamp(-256, 383)) - 60.0)
 }
 
 /// The part's detune -128..+127 (documented as tenths of a hertz): cents, the same at every key;
 /// nothing within 2 of 0, straight between the measured values.
 pub fn part_detune_cents(d: i32) -> f64 {
-    let raw = d.clamp(-128, 127) + 128;
+    // (every integer below within 0-255)
+    let raw = d.clamp(-128, 127).wrapping_add(128);
     let t = |i: i32| at(&PART_DETUNE_CENTS, i);
     match raw {
         126..=130 => 0.0,
-        121..=125 => t(15) * f64::from(126 - raw) / 6.0,
-        131..=135 => t(17) * f64::from(raw - 130) / 6.0,
+        121..=125 => t(15) * f64::from(126i32.wrapping_sub(raw)) / 6.0,
+        131..=135 => t(17) * f64::from(raw.wrapping_sub(130)) / 6.0,
         255 => t(32),
         _ => {
             let i = raw / 8;
-            t(i) + (t(i + 1) - t(i)) * f64::from(raw - 8 * i) / if i == 31 { 7.0 } else { 8.0 }
+            let frac = f64::from(raw.wrapping_sub(i.wrapping_mul(8))) / if i == 31 { 7.0 } else { 8.0 };
+            t(i) + (t(i.wrapping_add(1)) - t(i)) * frac
         }
     }
 }
@@ -382,22 +384,27 @@ pub fn part_peg_cents_per_ms(t: i32) -> f64 {
 pub fn part_peg_velocity_scale(sens: i32, velocity: f64) -> f64 {
     let lost = f64::from(PART_PEG_LOST.get(sens.clamp(0, 7) as usize).copied().unwrap_or(0));
     // (truncation of a non-negative number is its floor)
-    f64::from(128 - (lost * (127.0 - velocity.clamp(1.0, 127.0)) / 126.0) as i32) / 128.0
+    (128.0 - f64::from((lost * (127.0 - velocity.clamp(1.0, 127.0)) / 126.0) as i32)) / 128.0
 }
 
 /// The common pitch envelope's time key follow 0-7 at a key: the factor on its rates,
 /// 1 + s (key - 3) / 33 (keys below 3 as key 3).
 pub fn part_peg_key_scale(sens: i32, key: i32) -> f64 {
-    1.0 + f64::from(sens.clamp(0, 7) * (key.clamp(3, 383) - 3)) / 33.0
+    1.0 + f64::from(sens.clamp(0, 7)) * (f64::from(key.clamp(3, 383)) - 3.0) / 33.0
 }
 
 /// Pitch bend -8192..+8191 with the part's ranges (the pitch at full bend up and at full bend
 /// down, semitones -48..+24 each): whole cents, then whole steps, each cut towards 0.
 pub fn bend_steps(bend: i32, up: i32, down: i32) -> i32 {
-    let b = bend.clamp(-8192, 8191);
-    let (range, full) = if b >= 0 { (up, 8191) } else { (-down, 8192) };
-    let cents = b * range.clamp(-48, 48) * 100 / full;
-    cents * 2048 / 1200
+    let b = f64::from(bend.clamp(-8192, 8191));
+    let (range, full) = if b >= 0.0 {
+        (up, 8191.0)
+    } else {
+        (down.saturating_neg(), 8192.0)
+    };
+    // (exact in f64; truncation of the quotient is the integer division's)
+    let cents = (b * f64::from(range.clamp(-48, 48)) * 100.0 / full) as i32;
+    cents.wrapping_mul(2048) / 1200
 }
 
 /// Portamento moves in steps this far apart (440 samples at 44.1 kHz).
@@ -415,7 +422,8 @@ pub fn portamento_rate(time: i32, mode: i32, semitones: f64) -> f64 {
     }
     let i = PORTA_TIMES.iter().rposition(|&x| x <= t).unwrap_or(0);
     let (x0, y0) = (at(&PORTA_TIMES, i as i32), at(&PORTA_RATE, i as i32));
-    let (x1, y1) = (at(&PORTA_TIMES, i as i32 + 1), at(&PORTA_RATE, i as i32 + 1));
+    let j = (i as i32).wrapping_add(1);
+    let (x1, y1) = (at(&PORTA_TIMES, j), at(&PORTA_RATE, j));
     let rate = if x1 > x0 {
         y0 * exp2(log2(y1 / y0) * (t - x0) / (x1 - x0))
     } else {

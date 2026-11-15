@@ -116,6 +116,18 @@ pub struct Prepared {
     detune_cents: f32,
     fixed_key_follow: [u8; OPS],
     fixed_velocity: [i8; OPS],
+    /// The common pitch envelope (ratio-mode operators): its five levels (octaves, at its depth),
+    /// its four rates (octaves a millisecond; infinite when instant), its velocity sensitivity and
+    /// time key follow, and whether any level is away from 0.
+    peg: [f32; 5],
+    peg_rate: [f32; 4],
+    peg_velocity: u8,
+    peg_key: u8,
+    peg_on: bool,
+    /// Each operator's pitch envelope: initial and attack levels (octaves), attack and decay rates
+    /// (octaves a millisecond); the operators whose levels are away from 0.
+    opeg: [[f32; 4]; OPS],
+    opeg_on: u8,
 }
 
 impl Prepared {
@@ -151,6 +163,29 @@ impl Prepared {
             detune_cents: laws::part_detune_cents(i32::from(s.get(Part::Detune as usize))) as f32,
             fixed_key_follow: core::array::from_fn(|op| o(op, Op::FixedKeyFollow, 0) as u8),
             fixed_velocity: core::array::from_fn(|op| o(op, Op::PitchVelocity, 0) as i8),
+            peg: core::array::from_fn(|i| {
+                let c = |k: Common, i| i32::from(s.get(k as usize + i));
+                (laws::part_peg_cents(c(Common::PegLevel, i), c(Common::PegDepth, 0)) / 1200.0) as f32
+            }),
+            peg_rate: core::array::from_fn(|i| {
+                let r = laws::part_peg_cents_per_ms(i32::from(s.get(Common::PegTime as usize + i))) / 1200.0;
+                if r > 0.0 {
+                    r as f32
+                } else {
+                    f32::INFINITY
+                }
+            }),
+            peg_velocity: s.get(Common::PegVelocity as usize) as u8,
+            peg_key: s.get(Common::PegTimeKeyFollow as usize) as u8,
+            peg_on: (0..5).any(|i| s.get(Common::PegLevel as usize + i) != 0),
+            opeg: core::array::from_fn(|op| {
+                let c = |i| (laws::peg_cents(o(op, Op::PegLevel, i)) / 1200.0) as f32;
+                let r = |i| (laws::peg_cents_per_ms(o(op, Op::PegTime, i)) / 1200.0) as f32;
+                [c(0), c(1), r(0), r(1)]
+            }),
+            opeg_on: (0..OPS)
+                .filter(|&op| o(op, Op::PegLevel, 0) != 0 || o(op, Op::PegLevel, 1) != 0)
+                .fold(0, |m, op| m | bit(op)),
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -267,6 +302,31 @@ struct Lane {
     age: [u32; W],
     /// The carriers' gain bound at the last step: the end rule's measure, and loudness for shedding.
     bound: [f32; W],
+    pt: Pitch,
+}
+
+/// What a lane's increments are made of while a voice's pitch moves (docs/design.md, 2.3), read
+/// only when it does: `inc` is `base` times 2 to the octaves that move it.
+#[derive(Clone, Copy)]
+struct Pitch {
+    /// Each operator's increment from the pitch the note keeps.
+    base: [[u32; W]; OPS],
+    /// The operators' pitch envelopes: level (octaves); those in their attack and in their decay,
+    /// bit 4 op + slot.
+    op: [[f32; W]; OPS],
+    op_attack: u32,
+    op_decay: u32,
+    /// The common pitch envelope: level (octaves), segment (`ATTACK` to `RELEASE`, `HOLD` once at
+    /// decay 2's level, `DONE`), the note's factors on its levels and on its rates.
+    c: [f32; W],
+    c_seg: [u8; W],
+    c_scale: [f32; W],
+    c_rate: [f32; W],
+    /// Voices whose pitch moves; the bend (octaves) the increments hold; whether the increments
+    /// are to be made again at the next step's start (something jumped).
+    moving: u8,
+    bend: f32,
+    jump: bool,
 }
 
 const LANE0: Lane = Lane {
@@ -292,6 +352,19 @@ const LANE0: Lane = Lane {
     id: [0; W],
     age: [0; W],
     bound: [0.0; W],
+    pt: Pitch {
+        base: [[0; W]; OPS],
+        op: [[0.0; W]; OPS],
+        op_attack: 0,
+        op_decay: 0,
+        c: [0.0; W],
+        c_seg: [DONE; W],
+        c_scale: [0.0; W],
+        c_rate: [0.0; W],
+        moving: 0,
+        bend: 0.0,
+        jump: false,
+    },
 };
 
 /// Bit `i` of `m` (false past the end; no shift can overflow).
@@ -306,6 +379,27 @@ fn has(m: u32, i: usize) -> bool {
 #[inline(always)]
 fn bit(i: usize) -> u8 {
     u32::try_from(i).ok().and_then(|i| 1u8.checked_shl(i)).unwrap_or(0)
+}
+
+#[inline(always)]
+fn at<const N: usize>(a: &[f32; N], i: usize) -> f32 {
+    a.get(i).copied().unwrap_or(0.0)
+}
+
+/// The next draw of a random source (xorshift32).
+fn next_random(r: Option<&mut u32>) -> u32 {
+    r.map_or(0, |r| {
+        *r ^= *r << 13;
+        *r ^= *r >> 17;
+        *r ^= *r << 5;
+        *r
+    })
+}
+
+/// Slot `s`'s bits in a mask of bit 4 op + slot.
+#[inline(always)]
+fn slot_ops(s: usize) -> u32 {
+    0x1111_1111u32.checked_shl(s as u32).unwrap_or(0)
 }
 
 /// `a[op][s] = x` when both are in range.
@@ -370,7 +464,13 @@ impl Lane {
         for op in 0..OPS {
             put(&mut self.gain, op, s, 0.0);
         }
-        self.watch &= !(0x1111_1111u32.checked_shl(s as u32).unwrap_or(0));
+        let ops = !slot_ops(s);
+        (self.watch, self.pt.op_attack, self.pt.op_decay) =
+            (self.watch & ops, self.pt.op_attack & ops, self.pt.op_decay & ops);
+        self.pt.moving &= !b;
+        if let Some(c) = self.pt.c_seg.get_mut(s) {
+            *c = DONE;
+        }
     }
 
     /// Moves the voices in the highest slots into free lower ones, so a lane's voices fill its
@@ -415,13 +515,27 @@ impl Lane {
         one(&mut self.id, from, to);
         one(&mut self.age, from, to);
         one(&mut self.bound, from, to);
+        let pt = &mut self.pt;
+        col(&mut pt.base, from, to);
+        col(&mut pt.op, from, to);
+        for x in [&mut pt.c, &mut pt.c_scale, &mut pt.c_rate] {
+            one(x, from, to);
+        }
+        one(&mut pt.c_seg, from, to);
         let (f, t) = (bit(from), bit(to));
-        for m in [&mut self.used, &mut self.held, &mut self.sustained, &mut self.ending] {
+        for m in [
+            &mut self.used,
+            &mut self.held,
+            &mut self.sustained,
+            &mut self.ending,
+            &mut pt.moving,
+        ] {
             *m = if *m & f != 0 { *m | t } else { *m & !t };
         }
-        let ops = |s: usize| 0x1111_1111u32.checked_shl(s as u32).unwrap_or(0);
-        let w = (self.watch & ops(from)).checked_shr(from.wrapping_sub(to) as u32);
-        self.watch = (self.watch & !ops(to)) | w.unwrap_or(0);
+        for m in [&mut self.watch, &mut pt.op_attack, &mut pt.op_decay] {
+            let w = (*m & slot_ops(from)).checked_shr(from.wrapping_sub(to) as u32);
+            *m = (*m & !slot_ops(to)) | w.unwrap_or(0);
+        }
         self.free(from);
     }
 
@@ -431,6 +545,89 @@ impl Lane {
         for op in (0..OPS).filter(|&op| has(u32::from(p.plan.live), op)) {
             self.enter(p, op, s, RELEASE, rate);
         }
+        if p.peg_on {
+            if let Some(c) = self.pt.c_seg.get_mut(s) {
+                *c = RELEASE;
+            }
+            self.pt.moving |= bit(s);
+        }
+    }
+
+    /// Slot `s`'s pitch for `key` (note shift applied) and velocity `v`, `r` its random draw:
+    /// each live operator's increment from the pitch the note keeps (key follow, velocity, random
+    /// pitch and detune, in cents, on the grid), its pitch envelope from the start, and with
+    /// `common` the common pitch envelope too.
+    #[allow(clippy::too_many_arguments)]
+    fn tune(&mut self, p: &Prepared, s: usize, key: i32, v: f64, r: u32, rate: f64, common: bool) {
+        // cents: every operator's, then ratio-mode ones'
+        let all = laws::pitch_velocity_cents(i32::from(p.pitch_velocity), v);
+        let ratio_cents = all
+            + laws::pitch_key_follow_cents(i32::from(p.key_follow.0), key, i32::from(p.key_follow.1))
+            + laws::random_pitch_cents(i32::from(p.random_pitch), r)
+            + f64::from(p.detune_cents);
+        let pt = &mut self.pt;
+        let ops = slot_ops(s);
+        (pt.op_attack, pt.op_decay) = (pt.op_attack & !ops, pt.op_decay & !ops);
+        for op in (0..OPS).filter(|&op| has(u32::from(p.plan.live), op)) {
+            let at = |a: &[i8; OPS]| i32::from(a.get(op).copied().unwrap_or(0));
+            let fixed = has(u32::from(p.fixed), op);
+            let cents = if fixed {
+                let kf = i32::from(p.fixed_key_follow.get(op).copied().unwrap_or(0));
+                all + laws::fixed_key_follow_cents(kf, key) + laws::fixed_pitch_velocity_cents(at(&p.fixed_velocity), v)
+            } else {
+                ratio_cents
+            };
+            // the grid's steps, then the frequency (each term far inside the i32 range)
+            let steps = p
+                .steps
+                .get(op)
+                .copied()
+                .unwrap_or(0)
+                .wrapping_add(laws::detune_steps(at(&p.detune), key))
+                .wrapping_add(if fixed { 0 } else { laws::key_steps(key) })
+                .wrapping_add(laws::cents_steps(cents));
+            let hz = laws::steps_hz(steps);
+            let hz = if fixed { hz.min(laws::FIXED_MAX_HZ) } else { hz };
+            let inc = (hz / rate * 4_294_967_296.0) as u32;
+            put(&mut pt.base, op, s, inc);
+            put(&mut self.inc, op, s, inc);
+            let e = p.opeg.get(op).copied().unwrap_or([0.0; 4]);
+            put(
+                &mut pt.op,
+                op,
+                s,
+                if has(u32::from(p.opeg_on), op) { e[0] } else { 0.0 },
+            );
+            if has(u32::from(p.opeg_on), op) {
+                pt.op_attack |= 1u32.checked_shl(op.wrapping_mul(4).wrapping_add(s) as u32).unwrap_or(0);
+            }
+        }
+        if common {
+            let vs = laws::part_peg_velocity_scale(i32::from(p.peg_velocity), v);
+            let ks = laws::part_peg_key_scale(i32::from(p.peg_key), key);
+            if let (Some(c), Some(seg), Some(sc), Some(rt)) = (
+                pt.c.get_mut(s),
+                pt.c_seg.get_mut(s),
+                pt.c_scale.get_mut(s),
+                pt.c_rate.get_mut(s),
+            ) {
+                *sc = vs as f32;
+                *rt = (vs * ks) as f32;
+                (*c, *seg) = if p.peg_on {
+                    (p.peg[0] * *sc, ATTACK)
+                } else {
+                    (0.0, HOLD)
+                };
+            }
+        }
+        let moves = pt.op_attack & ops != 0 || pt.c_seg.get(s).is_some_and(|&c| c != HOLD && c != DONE);
+        if moves {
+            pt.moving |= bit(s);
+        } else {
+            pt.moving &= !bit(s);
+        }
+        // the increments hold what moves from the next step on
+        pt.jump |= moves || pt.bend != 0.0;
     }
 
     fn end(&mut self, s: usize, end: &mut impl FnMut(NoteEnd)) {
@@ -590,18 +787,11 @@ impl Engine {
         }
         let rate = self.rate;
         let key = i32::from(key) + i32::from(p.note_shift);
-        // pitch the note keeps, in cents: every operator's, then ratio-mode and fixed-mode ones'
-        let r = self.rng.get_mut(sound).map_or(0, |r| {
-            *r ^= *r << 13;
-            *r ^= *r >> 17;
-            *r ^= *r << 5;
-            *r
-        });
-        let all = laws::pitch_velocity_cents(i32::from(p.pitch_velocity), v);
-        let ratio_cents = all
-            + laws::pitch_key_follow_cents(i32::from(p.key_follow.0), key, i32::from(p.key_follow.1))
-            + laws::random_pitch_cents(i32::from(p.random_pitch), r)
-            + f64::from(p.detune_cents);
+        let r = next_random(self.rng.get_mut(sound));
+        if lane.used == b {
+            lane.pt.bend = 0.0; // (a lane's first voice: its increments hold no bend)
+        }
+        lane.tune(&p, s, key, v, r, rate, true);
         for op in 0..OPS {
             put(&mut lane.gain, op, s, 0.0);
             if !has(u32::from(p.plan.live), op) {
@@ -609,26 +799,6 @@ impl Engine {
                 continue;
             }
             let at = |a: &[i8; OPS]| i32::from(a.get(op).copied().unwrap_or(0));
-            // pitch: the grid's steps, then the frequency
-            let fixed = has(u32::from(p.fixed), op);
-            let cents = if fixed {
-                let kf = i32::from(p.fixed_key_follow.get(op).copied().unwrap_or(0));
-                all + laws::fixed_key_follow_cents(kf, key) + laws::fixed_pitch_velocity_cents(at(&p.fixed_velocity), v)
-            } else {
-                ratio_cents
-            };
-            // (each term far inside the i32 range)
-            let steps = p
-                .steps
-                .get(op)
-                .copied()
-                .unwrap_or(0)
-                .wrapping_add(laws::detune_steps(at(&p.detune), key))
-                .wrapping_add(if fixed { 0 } else { laws::key_steps(key) })
-                .wrapping_add(laws::cents_steps(cents));
-            let hz = laws::steps_hz(steps);
-            let hz = if fixed { hz.min(laws::FIXED_MAX_HZ) } else { hz };
-            put(&mut lane.inc, op, s, (hz / rate * 4_294_967_296.0) as u32);
             if has(u32::from(p.reset), op) {
                 put(&mut lane.ph, op, s, 0);
             }
@@ -777,10 +947,16 @@ impl Engine {
         to: usize,
         end: &mut impl FnMut(NoteEnd),
     ) {
-        let shed_step = (self.shed_step, self.rate);
         let (y1, y4) = (&mut self.y1, &mut self.y4);
         let Some(p) = self.sounds.get(usize::from(sound)) else {
             return;
+        };
+        let c = Ctx {
+            rate: self.rate,
+            shed_step: self.shed_step,
+            ms: (1000.0 / self.rate) as f32,
+            bend: 0.0,
+            fixed_max: (laws::FIXED_MAX_HZ / self.rate * 4_294_967_296.0) as f32,
         };
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
             let mut f = from;
@@ -793,13 +969,30 @@ impl Engine {
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
-                    1 => step::<1, scalar::F<1>>(lane, p, shed_step, end, chunk, y1),
-                    _ => step::<W, V>(lane, p, shed_step, end, chunk, y4),
+                    1 => step::<1, scalar::F<1>>(lane, p, &c, end, chunk, y1),
+                    _ => step::<W, V>(lane, p, &c, end, chunk, y4),
                 }
             }
         }
     }
 }
+
+/// What a lane's control step takes from the engine: the rate (Hz), the shed fade a step,
+/// milliseconds a frame, the bend of the lane's sound (octaves), and the highest increment a
+/// fixed-mode operator plays.
+struct Ctx {
+    rate: f64,
+    shed_step: f32,
+    ms: f32,
+    bend: f32,
+    fixed_max: f32,
+}
+
+/// An increment (or its ramp) for each operator and voice of a lane at width `L`.
+type Incs<const L: usize> = [[u32; L]; OPS];
+
+/// The highest increment (the largest `f32` below 2^31).
+const MAX_INC: f32 = 2_147_483_520.0;
 
 /// One control step of a lane at width `L` (its voices in its first `L` slots), added to `out`
 /// (1 to 16 frames: a shorter step is rendered whole, its phases and feedback history then set
@@ -808,23 +1001,37 @@ impl Engine {
 fn step<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
-    shed_step: (f32, f64),
+    c: &Ctx,
     end: &mut impl FnMut(NoteEnd),
     out: &mut [f32],
     y: &mut [[[f32; L]; STEP]; OPS],
 ) {
     let n = out.len().clamp(1, STEP);
-    let (g0, dg) = envelopes::<L, V>(lane, p, shed_step, n, end);
+    let (g0, dg) = envelopes::<L, V>(lane, p, c, n, end);
+    // a lane whose pitch does not move skips this
+    let pt = &lane.pt;
+    let ramp = if pt.moving != 0 || pt.jump || pt.bend != c.bend {
+        pitch::<L, V>(lane, p, c, n)
+    } else {
+        None
+    };
     let start = (n < STEP).then(|| (lane.ph, lane.fb[0]));
     let mut vout = [[0.0f32; L]; STEP];
-    // a sound with sines only runs the kernels without the forms' branches
-    if p.plan.forms {
-        ops::<L, V, true>(lane, p, &g0, &dg, y, &mut vout);
-    } else {
-        ops::<L, V, false>(lane, p, &g0, &dg, y, &mut vout);
+    // a sound with sines only runs the kernels without the forms' branches; the increments ramp
+    // only while a pitch envelope moves them
+    match (p.plan.forms, &ramp) {
+        (true, None) => ops::<L, V, true, false>(lane, p, &g0, &dg, &[[0; L]; OPS], y, &mut vout),
+        (false, None) => ops::<L, V, false, false>(lane, p, &g0, &dg, &[[0; L]; OPS], y, &mut vout),
+        (true, Some((d, _))) => ops::<L, V, true, true>(lane, p, &g0, &dg, d, y, &mut vout),
+        (false, Some((d, _))) => ops::<L, V, false, true>(lane, p, &g0, &dg, d, y, &mut vout),
     }
     if let Some((ph0, fb0)) = start {
-        short(lane, p, n, &ph0, &fb0, y);
+        short(lane, p, n, &ph0, &fb0, y, ramp.as_ref().map(|r| &r.0));
+    }
+    if let Some((_, to)) = ramp {
+        for (inc, to) in lane.inc.iter_mut().zip(to.iter()) {
+            V::U::load(*to).store4(inc);
+        }
     }
     // the voices in pairs, as four-wide (the missing ones' zeros change no bits)
     for (o, v) in out.iter_mut().zip(vout.iter()) {
@@ -838,7 +1045,8 @@ fn step<const L: usize, V: F4<L>>(
 }
 
 /// After a step of `n` frames (fewer than 16) rendered whole: the phases `n` increments on from
-/// `ph0`, the feedback history the source's outputs at frames `n - 1` and `n - 2` (`fb0` before).
+/// `ph0` (with the increments' ramp `d` a frame), the feedback history the source's outputs at
+/// frames `n - 1` and `n - 2` (`fb0` before).
 #[inline(never)]
 fn short<const L: usize>(
     lane: &mut Lane,
@@ -847,11 +1055,18 @@ fn short<const L: usize>(
     ph0: &[[u32; W]; OPS],
     fb0: &[f32; W],
     y: &[[[f32; L]; STEP]; OPS],
+    d: Option<&[[u32; L]; OPS]>,
 ) {
     let live = (lane.ph.iter_mut().zip(ph0.iter().zip(lane.inc.iter()))).zip(0..OPS);
-    for ((ph, (p0, inc)), _) in live.filter(|&(_, i)| has(u32::from(p.plan.live), i)) {
-        for (ph, (p0, inc)) in ph.iter_mut().zip(p0.iter().zip(inc.iter())) {
-            *ph = p0.wrapping_add(inc.wrapping_mul(n as u32));
+    // (n is at most 16)
+    let ramp = (n.wrapping_mul(n.saturating_sub(1)) / 2) as u32;
+    for ((ph, (p0, inc)), i) in live.filter(|&(_, i)| has(u32::from(p.plan.live), i)) {
+        let d = d.and_then(|d| d.get(i)).copied().unwrap_or([0; L]);
+        let ds = d.into_iter().chain([0; W]);
+        for ((ph, (p0, inc)), ds) in ph.iter_mut().zip(p0.iter().zip(inc.iter())).zip(ds) {
+            *ph = p0
+                .wrapping_add(inc.wrapping_mul(n as u32))
+                .wrapping_add(ds.wrapping_mul(ramp));
         }
     }
     let src = match p.plan.feedback {
@@ -867,6 +1082,119 @@ fn short<const L: usize>(
     f2.iter_mut().zip(y2).for_each(|(f, y)| *f = y);
 }
 
+/// A lane's pitch for a control step of `n` frames (docs/design.md, 2.3): what jumps (the bend) is
+/// in the increments from the step's start; while a pitch envelope moves them, the envelopes move
+/// a step and the increments ramp linearly to their value at the step's end: returns the ramp a
+/// frame and that value.
+#[inline(never)]
+fn pitch<const L: usize, V: F4<L>>(lane: &mut Lane, p: &Prepared, c: &Ctx, n: usize) -> Option<(Incs<L>, Incs<L>)> {
+    let pt = &mut lane.pt;
+    if pt.jump || pt.bend != c.bend {
+        (pt.jump, pt.bend) = (false, c.bend);
+        for (inc, to) in lane.inc.iter_mut().zip(incs::<L, V>(pt, p, c).iter()) {
+            V::U::load(*to).store4(inc);
+        }
+    }
+    let moves = |seg: u8| matches!(seg, ATTACK | DECAY1 | DECAY2 | RELEASE);
+    if pt.op_attack | pt.op_decay == 0 && !pt.c_seg.iter().take(L).any(|&s| moves(s)) {
+        pt.moving = 0;
+        return None;
+    }
+    // the envelopes move straight in octaves for the step's milliseconds; a segment that ends
+    // within the step leaves the rest of them to the next
+    let ms = c.ms * n as f32;
+    let go = |l: &mut f32, t: f32, r: f32, ms: &mut f32| {
+        let (dist, reach) = ((t - *l).abs(), r * *ms);
+        if reach < dist {
+            *l += if *l < t { reach } else { -reach };
+            *ms = 0.0;
+            false
+        } else {
+            (*l, *ms) = (t, *ms - dist / r);
+            true
+        }
+    };
+    let mut w = pt.op_attack | pt.op_decay;
+    while w != 0 {
+        let k = w.trailing_zeros();
+        w &= w.wrapping_sub(1);
+        let (op, s, b) = ((k / 4) as usize, (k % 4) as usize, 1u32.checked_shl(k).unwrap_or(0));
+        let e = p.opeg.get(op).copied().unwrap_or([0.0; 4]);
+        let (mut l, mut left) = (get(&pt.op, op, s), ms);
+        if pt.op_attack & b != 0 && go(&mut l, e[1], e[2], &mut left) {
+            (pt.op_attack, pt.op_decay) = (pt.op_attack & !b, pt.op_decay | b);
+        }
+        if pt.op_decay & b != 0 && left > 0.0 && go(&mut l, 0.0, e[3], &mut left) {
+            pt.op_decay &= !b;
+        }
+        put(&mut pt.op, op, s, l);
+    }
+    let mut moving = 0;
+    for (s, (l, (seg, (&sc, &rt)))) in (0..L).zip(
+        pt.c.iter_mut()
+            .zip(pt.c_seg.iter_mut().zip(pt.c_scale.iter().zip(pt.c_rate.iter()))),
+    ) {
+        let mut left = ms;
+        while moves(*seg) && left > 0.0 {
+            // the segment's level and rate, and the one after it
+            let (i, next) = match *seg {
+                ATTACK => (1, DECAY1),
+                DECAY1 => (2, DECAY2),
+                DECAY2 => (3, HOLD),
+                _ => (4, DONE),
+            };
+            let (t, r) = (at(&p.peg, i) * sc, at(&p.peg_rate, i.wrapping_sub(1)) * rt);
+            if go(l, t, r, &mut left) {
+                *seg = next;
+            }
+        }
+        if moves(*seg) || (pt.op_attack | pt.op_decay) & slot_ops(s) != 0 {
+            moving |= bit(s);
+        }
+    }
+    pt.moving = moving;
+    let to = incs::<L, V>(pt, p, c);
+    let mut d = [[0u32; L]; OPS];
+    for ((d, to), from) in d.iter_mut().zip(to.iter()).zip(lane.inc.iter()) {
+        for ((d, &to), &from) in d.iter_mut().zip(to.iter()).zip(from.iter()) {
+            // (both below 2^31)
+            *d = (to as i32).wrapping_sub(from as i32).checked_div(n as i32).unwrap_or(0) as u32;
+        }
+    }
+    Some((d, to))
+}
+
+/// Each live operator's increment from a lane's pitch state: its base times 2 to the octaves
+/// that move it (the common pitch envelope for ratio-mode operators, the operator's own
+/// envelope, the bend), held under Nyquist (fixed-mode ones at their highest frequency); a voice
+/// that nothing moves keeps its base exactly.
+#[inline(always)]
+fn incs<const L: usize, V: F4<L>>(pt: &Pitch, p: &Prepared, c: &Ctx) -> [[u32; L]; OPS] {
+    let zero = V::splat(0.0);
+    let bend = V::splat(c.bend);
+    let common = V::load4(&pt.c) + bend;
+    let mut out = [[0u32; L]; OPS];
+    for (op, o) in (0..OPS)
+        .zip(out.iter_mut())
+        .filter(|&(op, _)| has(u32::from(p.plan.live), op))
+    {
+        let fixed = has(u32::from(p.fixed), op);
+        let mut m = if fixed { bend } else { common };
+        if let Some(e) = pt.op.get(op).filter(|_| has(u32::from(p.opeg_on), op)) {
+            m = m + V::load4(e);
+        }
+        let base = V::U::load4(pt.base.get(op).unwrap_or(&[0; W]));
+        // 2^m as 2^(m - 16) 2^16, within the vector exp2's range
+        let f = base.i32_to_f32() * (m - V::splat(16.0)).exp2() * V::splat(65536.0);
+        let f = f.min(V::splat(if fixed { c.fixed_max } else { MAX_INC }));
+        let still = m.ge(zero).and(zero.ge(m));
+        *o = V::select(still, base.bits_to_f32(), f.to_i32().bits_to_f32())
+            .to_bits()
+            .store();
+    }
+    out
+}
+
 /// One control step of a lane's envelopes: returns each operator's gain at the step's start and
 /// its ramp a frame; moves segments on, fades shed voices, and ends voices (the end rule, a fade's
 /// end).
@@ -874,13 +1202,13 @@ fn short<const L: usize>(
 fn envelopes<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
-    (shed_step, rate): (f32, f64),
+    c: &Ctx,
     n: usize,
     end: &mut impl FnMut(NoteEnd),
 ) -> ([[f32; L]; OPS], [[f32; L]; OPS]) {
     // a step of `n` frames moves each envelope `k` of a 16-frame step's way
     let (k, per_frame) = (n as f32 / STEP as f32, V::splat(1.0 / n as f32));
-    let shed_step = shed_step * k;
+    let shed_step = c.shed_step * k;
     // shed voices fade linearly
     for (s, f) in lane.fade.iter_mut().enumerate().take(L) {
         if has(u32::from(lane.ending), s) {
@@ -935,14 +1263,14 @@ fn envelopes<const L: usize, V: F4<L>>(
         let reached = get(&lane.lvl, op, s) == get(&lane.tgt, op, s);
         match seg {
             HOLD => {
-                let c = get(&lane.count, op, s).saturating_sub(n as u32);
-                put(&mut lane.count, op, s, c);
-                if c == 0 {
-                    lane.enter(p, op, s, ATTACK, rate);
+                let left = get(&lane.count, op, s).saturating_sub(n as u32);
+                put(&mut lane.count, op, s, left);
+                if left == 0 {
+                    lane.enter(p, op, s, ATTACK, c.rate);
                 }
             }
-            ATTACK | DECAY1 if reached => lane.enter(p, op, s, seg.saturating_add(1), rate),
-            RELEASE if reached => lane.enter(p, op, s, DONE, rate),
+            ATTACK | DECAY1 if reached => lane.enter(p, op, s, seg.saturating_add(1), c.rate),
+            RELEASE if reached => lane.enter(p, op, s, DONE, c.rate),
             _ => {}
         }
     }
@@ -961,11 +1289,13 @@ fn envelopes<const L: usize, V: F4<L>>(
 /// One control step of a lane's operators, in ascending order (every modulation edge runs
 /// upwards), each a whole step at a time, except a feedback loop through several operators,
 /// whose operators are interleaved sample by sample; carriers summed into `vout`.
-fn ops<const L: usize, V: F4<L>, const FORMS: bool>(
+#[allow(clippy::too_many_arguments)]
+fn ops<const L: usize, V: F4<L>, const FORMS: bool, const RAMP: bool>(
     lane: &mut Lane,
     p: &Prepared,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
+    di: &[[u32; L]; OPS],
     y: &mut [[[f32; L]; STEP]; OPS],
     vout: &mut [[f32; L]; STEP],
 ) {
@@ -976,11 +1306,11 @@ fn ops<const L: usize, V: F4<L>, const FORMS: bool>(
     };
     for i in (0..OPS).filter(|&i| has(u32::from(plan.live), i)) {
         if FORMS && i == lo && plan.loop_forms {
-            interleaved_forms::<L, V>(lane, p, g0, dg, y, lo, hi);
+            interleaved_forms::<L, V, RAMP>(lane, p, g0, dg, di, y, lo, hi);
         } else if i == lo {
-            interleaved::<L, V, false>(lane, p, g0, dg, y, lo, hi);
+            interleaved::<L, V, false, RAMP>(lane, p, g0, dg, di, y, lo, hi);
         } else if i < lo || i > hi {
-            single::<L, V, FORMS>(lane, p, g0, dg, y, i);
+            single::<L, V, FORMS, RAMP>(lane, p, g0, dg, di, y, i);
         }
         if has(u32::from(plan.carriers), i) {
             if let Some(out) = y.get(i) {
@@ -992,12 +1322,15 @@ fn ops<const L: usize, V: F4<L>, const FORMS: bool>(
     }
 }
 
-/// Operator `i` over a whole step: its modulation input summed first, then its samples.
-fn single<const L: usize, V: F4<L>, const FORMS: bool>(
+/// Operator `i` over a whole step: its modulation input summed first, then its samples (with
+/// `RAMP`, its increment moving by `di` a frame).
+#[allow(clippy::too_many_arguments)]
+fn single<const L: usize, V: F4<L>, const FORMS: bool, const RAMP: bool>(
     lane: &mut Lane,
     p: &Prepared,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
+    di: &[[u32; L]; OPS],
     y: &mut [[[f32; L]; STEP]; OPS],
     i: usize,
 ) {
@@ -1005,15 +1338,17 @@ fn single<const L: usize, V: F4<L>, const FORMS: bool>(
         return;
     };
     let Some((cur, _)) = rest.split_first_mut() else { return };
-    let (Some(ph), Some(&inc), Some(&g), Some(&d), Some(&mods)) = (
+    let (Some(ph), Some(&inc), Some(&g), Some(&d), Some(&di), Some(&mods)) = (
         lane.ph.get_mut(i),
         lane.inc.get(i),
         g0.get(i),
         dg.get(i),
+        di.get(i),
         p.plan.mods.get(i),
     ) else {
         return;
     };
+    let di = V::U::load(di);
     let mut input = [[0.0f32; L]; STEP];
     for (j, src) in done.iter().enumerate() {
         if has(u32::from(mods), j) {
@@ -1022,12 +1357,12 @@ fn single<const L: usize, V: F4<L>, const FORMS: bool>(
             }
         }
     }
-    let (inc, d) = (V::U::load4(&inc), V::load(d));
+    let (mut inc, d) = (V::U::load4(&inc), V::load(d));
     let (mut ph_v, mut g) = (V::U::load4(ph), V::load(g));
     let wave = p.plan.waves.get(i).copied().unwrap_or(Wave::Sine);
     if FORMS && wave != Wave::Sine {
         let own = (p.plan.feedback == Feedback::Own(i as u8)).then_some((&mut lane.fb, p.fbk));
-        form_step::<L, V>(wave, own, cur, &input, inc, g, d, &mut ph_v);
+        form_step::<L, V, RAMP>(wave, own, cur, &input, (inc, di), g, d, &mut ph_v);
     } else if p.plan.feedback == Feedback::Own(i as u8) {
         // self-feedback: sample by sample within this operator
         let fbk = V::splat(p.fbk);
@@ -1039,6 +1374,9 @@ fn single<const L: usize, V: F4<L>, const FORMS: bool>(
             (y2, y1) = (y1, v);
             g = g + d;
             ph_v = ph_v.add(inc);
+            if RAMP {
+                inc = inc.add(di);
+            }
         }
         y1.store4(f1);
         y2.store4(f2);
@@ -1047,6 +1385,9 @@ fn single<const L: usize, V: F4<L>, const FORMS: bool>(
             *out = (read::<L, V>(&SINE, ph_v.add(offset(V::load(*m)))) * g).store();
             g = g + d;
             ph_v = ph_v.add(inc);
+            if RAMP {
+                inc = inc.add(di);
+            }
         }
     }
     ph_v.store4(ph);
@@ -1055,23 +1396,23 @@ fn single<const L: usize, V: F4<L>, const FORMS: bool>(
 /// A non-sine operator's step, kept out of line so the sine kernels compile as they do alone.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn form_step<const L: usize, V: F4<L>>(
+fn form_step<const L: usize, V: F4<L>, const RAMP: bool>(
     wave: Wave,
     own: Option<(&mut [[f32; W]; 2], f32)>,
     cur: &mut [[f32; L]; STEP],
     input: &[[f32; L]; STEP],
-    inc: V::U,
+    inc: (V::U, V::U),
     g: V,
     d: V,
     ph: &mut V::U,
 ) {
-    let (g, d) = nyquist::<L, V>(wave, inc, g, d);
+    let (g, d) = nyquist::<L, V>(wave, inc.0, g, d);
     // one loop for each form, the match outside it
     match wave {
-        Wave::Table(t) => run::<L, V>(|q, o| read16(t, q.add(o)), own, cur, input, inc, g, d, ph),
-        Wave::Odd(t) => run::<L, V>(|q, o| odd(t, q, o), own, cur, input, inc, g, d, ph),
-        Wave::Resonant(t, c) => run::<L, V>(|q, o| resonant(t, c, q, o), own, cur, input, inc, g, d, ph),
-        Wave::Sine => run::<L, V>(|q, o| read(&SINE, q.add(o)), own, cur, input, inc, g, d, ph),
+        Wave::Table(t) => run::<L, V, RAMP>(|q, o| read16(t, q.add(o)), own, cur, input, inc, g, d, ph),
+        Wave::Odd(t) => run::<L, V, RAMP>(|q, o| odd(t, q, o), own, cur, input, inc, g, d, ph),
+        Wave::Resonant(t, c) => run::<L, V, RAMP>(|q, o| resonant(t, c, q, o), own, cur, input, inc, g, d, ph),
+        Wave::Sine => run::<L, V, RAMP>(|q, o| read(&SINE, q.add(o)), own, cur, input, inc, g, d, ph),
     }
 }
 
@@ -1112,15 +1453,16 @@ fn nyquist<const L: usize, V: F4<L>>(w: Wave, inc: V::U, g: V, d: V) -> (V, V) {
 }
 
 /// One operator's step: `r` reads its form at a phase and modulation offset; with `own`, it
-/// feeds back on itself sample by sample (the history and the amount).
+/// feeds back on itself sample by sample (the history and the amount); `inc` is the increment and
+/// (with `RAMP`) its move a frame.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn run<const L: usize, V: F4<L>>(
+fn run<const L: usize, V: F4<L>, const RAMP: bool>(
     r: impl Fn(V::U, V::U) -> V,
     own: Option<(&mut [[f32; W]; 2], f32)>,
     cur: &mut [[f32; L]; STEP],
     input: &[[f32; L]; STEP],
-    inc: V::U,
+    (mut inc, di): (V::U, V::U),
     mut g: V,
     d: V,
     ph: &mut V::U,
@@ -1135,6 +1477,9 @@ fn run<const L: usize, V: F4<L>>(
             (y2, y1) = (y1, v);
             g = g + d;
             ph_v = ph_v.add(inc);
+            if RAMP {
+                inc = inc.add(di);
+            }
         }
         y1.store4(f1);
         y2.store4(f2);
@@ -1143,6 +1488,9 @@ fn run<const L: usize, V: F4<L>>(
             *out = (r(ph_v, offset(V::load(*m))) * g).store();
             g = g + d;
             ph_v = ph_v.add(inc);
+            if RAMP {
+                inc = inc.add(di);
+            }
         }
     }
     *ph = ph_v;
@@ -1150,16 +1498,18 @@ fn run<const L: usize, V: F4<L>>(
 
 /// [`interleaved`] with non-sine forms, out of line (as [`form_step`]).
 #[inline(never)]
-fn interleaved_forms<const L: usize, V: F4<L>>(
+#[allow(clippy::too_many_arguments)]
+fn interleaved_forms<const L: usize, V: F4<L>, const RAMP: bool>(
     lane: &mut Lane,
     p: &Prepared,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
+    di: &[[u32; L]; OPS],
     y: &mut [[[f32; L]; STEP]; OPS],
     lo: usize,
     hi: usize,
 ) {
-    interleaved::<L, V, true>(lane, p, g0, dg, y, lo, hi);
+    interleaved::<L, V, true, RAMP>(lane, p, g0, dg, di, y, lo, hi);
 }
 
 /// The most operators a feedback loop runs through (routing 12's 3 > 4 > 5).
@@ -1169,11 +1519,13 @@ const LOOP: usize = 3;
 /// already made for that sample. Their inputs from below `lo` (written for the whole step before)
 /// are summed first, a whole step at a time, in the order a single operator sums its sources, so
 /// the bits are the same.
-fn interleaved<const L: usize, V: F4<L>, const MIXED: bool>(
+#[allow(clippy::too_many_arguments)]
+fn interleaved<const L: usize, V: F4<L>, const MIXED: bool, const RAMP: bool>(
     lane: &mut Lane,
     p: &Prepared,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
+    di: &[[u32; L]; OPS],
     y: &mut [[[f32; L]; STEP]; OPS],
     lo: usize,
     hi: usize,
@@ -1202,7 +1554,8 @@ fn interleaved<const L: usize, V: F4<L>, const MIXED: bool>(
         }
     }
     let mut ph = ks.map(|k| V::U::load4(lane.ph.get(k).unwrap_or(&[0; W])));
-    let inc = ks.map(|k| V::U::load4(lane.inc.get(k).unwrap_or(&[0; W])));
+    let mut inc = ks.map(|k| V::U::load4(lane.inc.get(k).unwrap_or(&[0; W])));
+    let di = ks.map(|k| V::U::load(di.get(k).copied().unwrap_or([0; L])));
     let waves = ks.map(|k| plan.waves.get(k).copied().unwrap_or(Wave::Sine));
     let mut g = ks.map(|k| V::load(g0.get(k).copied().unwrap_or([0.0; L])));
     let mut d = ks.map(|k| V::load(dg.get(k).copied().unwrap_or([0.0; L])));
@@ -1219,13 +1572,14 @@ fn interleaved<const L: usize, V: F4<L>, const MIXED: bool>(
     for s in 0..STEP {
         // operator `a` of the loop, its input from below with `add` applied
         let mut op = |a: usize, add: &dyn Fn(V) -> V| {
-            let (Some(b), Some(pa), Some(&ia), Some(&w), Some(ga), Some(&da)) = (
+            let (Some(b), Some(pa), Some(ia), Some(&w), Some(ga), Some(&da), Some(&dia)) = (
                 buf.get_mut(a).and_then(|b| b.get_mut(s)),
                 ph.get_mut(a),
-                inc.get(a),
+                inc.get_mut(a),
                 waves.get(a),
                 g.get_mut(a),
                 d.get(a),
+                di.get(a),
             ) else {
                 return V::splat(0.0);
             };
@@ -1236,7 +1590,10 @@ fn interleaved<const L: usize, V: F4<L>, const MIXED: bool>(
                 read::<L, V>(&SINE, pa.add(offset(m)))
             } * *ga;
             *ga = *ga + da;
-            *pa = pa.add(ia);
+            *pa = pa.add(*ia);
+            if RAMP {
+                *ia = ia.add(dia);
+            }
             *b = out.store();
             out
         };
@@ -1565,6 +1922,104 @@ mod tests {
             e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         }
         assert!(seen.len() > 40, "{} values", seen.len());
+    }
+
+    /// Both pitch envelopes against their laws, by operator 1's increment at every block's end
+    /// against the note's own: straight in cents at their rates, the common one scaled by velocity
+    /// (levels and rates alike) and time key follow, released with the key, and not reaching
+    /// fixed-mode operators; within 0.2 cents (the vector exp2's accuracy is 0.15 cents).
+    #[test]
+    fn pitch_envelopes() {
+        let (a, d) = (laws::peg_cents_per_ms(50), laws::peg_cents_per_ms(40));
+        let (lo, hi) = (laws::peg_cents(-20), laws::peg_cents(10));
+        let top = (hi - lo) / a; // the attack's end, ms
+        let r = laws::part_peg_cents_per_ms(40);
+        let off = 20.0 * BLOCK as f64 / RATE * 1000.0; // the release of the fifth case, ms
+        type Law<'a> = &'a dyn Fn(f64) -> f64;
+        let laws: [(&str, u8, f32, Law); 6] = [
+            (
+                "op1.pitch_eg_level_initial=-20 op1.pitch_eg_level_attack=10 op1.pitch_eg_time_attack=50 \
+                 op1.pitch_eg_time_decay=40",
+                69,
+                100.0,
+                &|t| {
+                    if t < top {
+                        lo + a * t
+                    } else {
+                        (hi - d * (t - top)).max(0.0)
+                    }
+                },
+            ),
+            (
+                "pitch_eg_level_initial=-32 pitch_eg_time_attack=40 pitch_eg_depth=1",
+                69,
+                100.0,
+                &|t| (-300.0 + r * t).min(0.0),
+            ),
+            (
+                "pitch_eg_level_initial=-32 pitch_eg_time_attack=40 pitch_eg_depth=1 pitch_eg_depth_velocity=3",
+                69,
+                64.0,
+                &|t| (-300.0 + r * t).min(0.0) * 102.0 / 128.0,
+            ),
+            (
+                "pitch_eg_level_initial=-32 pitch_eg_time_attack=40 pitch_eg_depth=1 pitch_eg_time_key_follow=7",
+                36,
+                100.0,
+                &|t| (-300.0 + 8.0 * r * t).min(0.0),
+            ),
+            ("pitch_eg_level_release=32 pitch_eg_time_release=60", 69, 100.0, &|t| {
+                (laws::part_peg_cents_per_ms(60) * (t - off)).clamp(0.0, 1200.0)
+            }),
+            (
+                "op1.mode=1 op1.coarse=16 pitch_eg_level_initial=-32 pitch_eg_time_attack=40",
+                69,
+                100.0,
+                &|_| 0.0,
+            ),
+        ];
+        for (text, key, vel, law) in laws {
+            // (a long release, so the note sounds throughout)
+            let mut e = engine(&carrier(1, &format!("{text} op1.eg_time_release=99")));
+            e.note_on(0, 1, key, vel, &mut |_| {});
+            let base = f64::from(e.lanes[0].pt.base[0][0]);
+            for b in 1..=300 {
+                if b == 21 && text.contains("release") {
+                    e.note_off(0, 1);
+                }
+                e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+                let t = (b * BLOCK) as f64 / RATE * 1000.0;
+                let got = 1200.0 * (f64::from(e.lanes[0].inc[0][0]) / base).log2();
+                assert!(
+                    (got - law(t)).abs() < 0.2,
+                    "{text} at {t} ms: {got} cents, the law {}",
+                    law(t)
+                );
+            }
+        }
+    }
+
+    /// The fastest operator pitch envelope (4800 cents at 387.6 cents a millisecond) at control
+    /// rate with the increments ramped across each step, against the per-sample law: the phase
+    /// at every block's end within 0.005 cycles of the law's.
+    #[test]
+    fn pitch_ramp_follows_the_law() {
+        let p = carrier(1, "op1.pitch_eg_level_initial=-50 op1.pitch_eg_time_attack=0");
+        let mut e = engine(&p);
+        e.note_on(0, 1, 93, 100.0, &mut |_| {});
+        let base = f64::from(e.lanes[0].pt.base[0][0]) / 4_294_967_296.0;
+        let (lo, rate) = (laws::peg_cents(-50), laws::peg_cents_per_ms(0) * 1000.0 / RATE);
+        let (mut law, mut worst) = (0.0f64, 0.0f64);
+        for b in 0..12 {
+            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            for k in b * BLOCK..(b + 1) * BLOCK {
+                law += base * ((lo + rate * k as f64).min(0.0) / 1200.0).exp2();
+            }
+            let got = f64::from(e.lanes[0].ph[0][0]) / 4_294_967_296.0;
+            let err = (got - law.fract() + 1.5).fract() - 0.5;
+            worst = worst.max(err.abs());
+        }
+        assert!(worst < 0.005, "{worst} cycles");
     }
 
     #[test]
