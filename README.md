@@ -18,14 +18,16 @@ What exists:
   the reference.
 - `crates/fm-core`: the `no_std` core, without an allocator: the parameter table and the sound
   format (`params`, `sound`), the coverage report (`coverage`), the measured laws (`laws`), the 88
-  routings (`routing`), plans (`plan`), the voice engine (`engine`: per-sound lanes of four voices,
-  envelopes, the end rule, shedding), the four-lane vector type (`simd`: NEON, SSE2, scalar,
-  bit-identical), tables, the operator forms (`forms`: Q14 tables written by the build script
+  routings (`routing`), plans (`plan`), the voice engine (`engine`: per-sound lanes of four voices, one
+  lane wide while a lane holds one, timed note events, envelopes, the end rule, shedding), the
+  vector type (`simd`: four lanes on NEON, SSE2 and scalar, bit-identical; the scalar back end any
+  width), tables, the operator forms (`forms`: Q14 tables written by the build script
   from the measured data), and the M0 voice-kernel spike (`spike`).
 - `tools/fmbench`: the engine's and the spike's cost cases, `fmbench time` (the device timing
   tool), `fmbench check`, `fmbench coverage SOUND`.
 - `tools/cost/cg.sh`: instructions a voice-block on aarch64 under callgrind, and data misses with
-  the device's caches, gated against `tools/cost/baseline.txt` and `cache-baseline.txt`.
+  the device's caches, gated against `tools/cost/baseline.txt` and `cache-baseline.txt`, and the
+  lane gate (a voice's cost with few voices a sound).
 - `tools/check-no-panic.sh`: the link-time proof that the block path has no panic path.
 - `crates/fm-clap`: the plugin's identity only. The shell is not built.
 

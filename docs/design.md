@@ -185,7 +185,17 @@ lower operators *in the same sample*, and feedback needs the previous sample. In
 is. Vectorising the eight operators of one voice would need a schedule per routing, idle lanes in
 deep routings, and shuffles between dependent operators. Four voices in lanes have no
 dependencies at all, and the same code serves all 88 routings. The cost is a partly filled lane:
-it costs as a full one (the shell packs a sound's voices into as few lanes as it can).
+four-wide, it costs as a full one.
+
+As built (section 3.3): a lane keeps its voices in its first slots (when a voice ends below
+another, the higher one's state moves down whole, at the next control step, so its output does
+not change), and a lane holding one voice runs one lane wide: its envelopes, step buffers and
+kernels on the scalar back end with `L` = 1 (the vector traits and the scalar back end are generic
+over the lane count; the state stays four-wide in memory, so a voice moves between widths without
+a copy). Two or more voices run four-wide. A two-lane width was measured on the scalar back end
+and lost to four-wide (46,878 against 37,110 instructions a voice-block for two voices, routing 12),
+so it is not built; a two-lane NEON/SSE2 type is the remaining option (estimated, not measured:
+about 15 % off a two-voice lane, for two more back ends).
 
 Within a control step (16 frames) the operators of a lane run in ascending order, which is valid
 for every routing (every modulation edge runs from a lower operator to a higher). Measured
@@ -202,7 +212,19 @@ Audio rate: phases (32-bit integers, wrapping, exact on every back end), modulat
 feedback, wave reads, operator gains (a linear ramp a frame), filter states, the output.
 
 Control rate, every 16 frames (or fewer where an event splits a block, so a note starts on its
-frame), each with a linear ramp to the next step where it reaches the audio:
+frame), each with a linear ramp to the next step where it reaches the audio. As built:
+`render_events` takes a block's note and pedal events with their frames and renders each sound in
+segments between its own events (the sibling engines' rule), its steps starting again at each
+event; a step shorter than 16 frames moves each envelope that share of a step (the fall times n/16,
+a rise's share 1 - e^(-rate n/16), the hold counted in frames) and ramps the gains over its
+frames; its kernels run the whole 16 frames, then the phases and the feedback history are set to
+where its last frame left them (frames past it are never heard), so the kernels have no
+variable-length path. What is bit-identical under splitting: every other sound's output, always; a
+voice of the same sound whose envelopes stand still; and the frames of a note started mid-block up
+to the block's end in whole steps (against the same note started at a block's start). What is not:
+a voice of the same sound whose envelopes move while a step is cut (the shorter steps' shares are
+computed in single precision: 1e-6 against a peak of 0.65 in the test, -116 dB), and the mix of
+several sounds (they are summed sound by sound, no longer lane by lane).
 
 | Modulator | Rate and why it is safe |
 |---|---|
@@ -316,6 +338,10 @@ installed by the audio thread by a copy, with no lock.
 
 - Cost: callgrind on aarch64 (`tools/cost/cg.sh`), instructions a voice-block per case, gated in CI
   (section 6); the device timing binary is `fmbench` (time a voice-block) built for the device.
+- The lane gate (`cg.sh check`): one voice alone, and two voices of a sound, against a voice of 32
+  in one sound; one voice in each of five sounds against five voices in one sound. Targets 1.5,
+  1.25 and 1.6: **open** (reached 2.51, 1.96 and 1.88, section 3.3); the gate holds the reached
+  figures (`ratio-` lines of `tools/cost/baseline.txt`, 2 % allowed) until the targets are met.
 - Memory: the instance is fixed-size structs (`size_of` is the figure, reported through
   `oscairn.memory` as instance bytes, plus per-context bytes); tables are shared read-only data,
   reported once as shared bytes. Bytes touched per voice-block are stated by `fmbench footprint`
@@ -471,14 +497,89 @@ its second-level latency (to be timed: `fmbench time`, case "eight mixed forms")
 with the binary's layout (an unrelated change to fmbench moved them from 81, 41, 67, 110); aligning
 each table to a cache line made them worse, and was not kept.
 
-A lane costs the same with one voice as with four (routing 12: one voice alone 72,948 a
-voice-block, two 37,110, against 18,910 a voice at 32), and the device shows it too. A narrow kernel
-for one and two voices (the scalar back end over the first one or two lanes, voices kept in a lane's
-first slots) was measured and not kept: one voice 65,259 (routing 1: 52,299 against 57,109 four-wide),
-two voices 47,311, worse than four-wide. Most of a lane's cost does not scale with its voices: the
-step's operator buffers zeroed and summed four-wide, the carriers' accumulation, the modulation sums
-and the control step. A lane whose cost follows its voices needs buffers and state the width of the
-kernel (or voices of several sounds sharing one lane), not a narrower arithmetic type.
+A lane cost the same with one voice as with four (routing 12: one voice alone 72,948 a
+voice-block, two 37,110, against 18,910 a voice at 32), and the device shows it too: section 3.3.
+
+### 3.3 Lanes and headroom (measured)
+
+Same tool and settings. Where a block's instructions go, routing 12 with eight sines, before this
+round (a profiling build with each phase kept out of line, so totals differ from the gate's by a
+few per cent): (a) one voice in one sound, (b) four voices in one sound, (c) one voice in each of
+five sounds, (d) 32 voices in one sound; instructions a block.
+
+| Phase | (a) | (b) | (c) | (d) |
+|---|---|---|---|---|
+| operator kernels (single operators and the feedback loop) | 55,256 | 55,256 | 276,280 | 442,048 |
+| control step (envelopes, segment checks, end rule) | 8,254 | 12,130 | 41,413 | 97,040 |
+| modulation sums | 1,936 | 1,936 | 9,680 | 15,488 |
+| buffers cleared and copied | 2,378 | 2,378 | 11,886 | 19,017 |
+| carriers' accumulation and the output | 1,589 | 1,589 | 7,945 | 12,712 |
+| per-lane dispatch | 1,642 | 1,642 | 8,210 | 13,136 |
+| per block (shedding checks, the lane scan) | 1,086 | 1,086 | 1,118 | 1,142 |
+| total (a voice-block) | 72,141 (72,141) | 76,017 (19,004) | 356,531 (71,306) | 600,583 (18,768) |
+
+The kernels were three quarters of a lane, and a lane cost the same at any voice count; of the rest
+only the segment checks scaled with voices. The feedback loop cost 84 instructions an operator-frame
+of a lane against 36 for an operator alone (its inputs summed sample by sample, every source
+tested, its state not kept in registers). Decided from it: (i) a lane holding one voice runs one
+lane wide (section 2.2; a two-lane width on the scalar back end lost to four-wide), (ii) per-voice
+skipping inside four-wide buys nothing (the arithmetic is the same for one voice as for four), and
+(iii) sounds sharing lanes was not built: it cannot help one voice alone, and it helps only sounds
+of compatible plans (the sibling engine's risk list applies: every stage's constants per element,
+more code, the shell's batching of sounds without events). After this round (the same build):
+
+| Phase | (a) | (b) | (c) | (d) |
+|---|---|---|---|---|
+| operator kernels | 21,488 | 41,736 | 107,440 | 333,888 |
+| control step | 8,006 | 11,370 | 40,171 | 90,960 |
+| step buffers, sums, accumulation and dispatch | 2,760 | 4,760 | 13,800 | 38,080 |
+| per lane and per block | 1,667 | 1,683 | 4,143 | 4,259 |
+| total (a voice-block) | 33,920 (33,920) | 59,549 (14,887) | 165,554 (33,111) | 467,187 (14,600) |
+
+What each change bought (the gate's figures, instructions a voice-block): one voice one lane wide,
+72,933 to 53,177; the feedback loop's inputs from below summed a step at a time and the loop written
+out for two or three operators, routing 12 at 32 voices 19,066 to 15,530 (eight resonant forms
+27,636 to 23,313); the step buffers no longer cleared each step and the envelope step over the
+arrays, 15,530 to 15,045 (one voice 37,721 to 36,352); the timed events' short steps cost one voice
+about 2 % (36,155 to 36,693) and nothing four-wide (14,626 at 32 voices).
+
+| Case | Before | After |
+|---|---|---|
+| routing 12, eight sines, 32 voices | 18,910 | 14,626 |
+| one voice alone (fm-s1-v1) | 72,948 | 36,693 |
+| two voices (fm-s1-v2) | 37,110 | 28,613 |
+| one voice in each of five sounds (fm-s5-v1) | 71,915 | 35,746 |
+| five voices in one sound (fm-s1-v5) | 29,682 | 19,004 |
+| worst eight-operator plan (gated) | 27,636 (resonant) | 23,021 (the spike's loop on its window form; the engine's worst: odd forms, 22,642) |
+| all harmonics; odd; resonant; mixed forms | 21,454; 27,478; 27,636; 25,288 | 16,618; 22,642; 22,466; 20,358 |
+| at rest, a block | 1,277 | 1,186 |
+
+The lane gate's ratios (section 2.9): one voice alone 3.86 to 2.51 (target 1.5), two voices 1.96 to
+1.96 (target 1.25), one voice in each of five sounds 2.42 to 1.88 (target 1.6): all three open. What
+stops them: one lane wide, a kernel cannot use the vector across voices, and the compiler's
+vectorising across a step's frames still pays the table reads' lane extracts (an operator alone
+costs 17 instructions a frame one lane wide against 9.4 a voice four-wide; the feedback loop, serial,
+28); the control step costs about as much for one voice as for four. Two voices run four-wide. The
+remaining routes: a two-lane vector type, explicit vectorising across frames for operators without
+feedback, and sounds sharing lanes for compatible plans (case c only).
+
+Bytes: the scratch is the step's operator outputs four-wide (2 KB) and one-wide (512 bytes), kept in
+the engine and never cleared; a lane at work touches 9,492 bytes with its scratch and the sine table
+(10,516 before: the lane's output is a step's, no longer a block's), within the first-level budget
+of 16 KB (a unit test). Code: the one-wide instantiations of every kernel and the short step add
+40,872 bytes of text to fmbench (583,546 to 624,418, both back ends linked; the engine's
+out-of-line functions 27,888 to 53,356 bytes). A block whose lanes run at both widths touches both
+instantiations, in the core's own instruction cache and the shared second-level cache. Data misses
+with the device's caches (`tools/cost/cache-baseline.txt`): sines 2.0, 0.3, 0.5 and 2.6 first-level
+a voice-block at 1, 8, 25 and 64 voices (7.9, 1.2, 1.6, 2.7 before); eight mixed forms 50.3, 55.5,
+68.9 and 105.8 (129.4, 90.4, 98.2, 143.6); last level unchanged (1.1 and 5.3 at one voice). These
+counts move with the binary's layout (section 3.2).
+
+Correctness, seen pass: a voice's state after every block, and with silent neighbours its output,
+the same bits alone, in a pair, in a full lane and while neighbours start and end around it (moving
+it to another slot and between the widths); the golden hashes unchanged; the fuzz (native against
+scalar, every note ending once) with its notes as timed events every other block; a note starting on
+its frame; another sound's bits unchanged by a sound's events.
 
 ## 4. Audio-thread safety, and how it is proven
 
@@ -536,7 +637,8 @@ kernel (or voices of several sounds sharing one lane), not a narrower arithmetic
 | hot set within half of the 32 KB first-level cache (spike and engine) | unit test | seen pass |
 | core builds without `std` and without `alloc` | CI (bare-metal target) | seen pass locally |
 | no panic path (symbols, link), the engine's note on and off, pedal, choke, limits and render included | CI (unix) | seen pass on macOS arm64 and Linux arm64 |
-| cost: rest at most 2,000 a block, the worst eight-operator voice (engine, and the spike's non-sine forms) at most 28,000, every case at most 10 % over `tools/cost/baseline.txt`; data misses with the device's caches at most 10 % and half a miss over `tools/cost/cache-baseline.txt` | CI (aarch64, callgrind) | seen pass in the aarch64 container |
+| cost: rest at most 2,000 a block, the worst eight-operator voice (engine, and the spike's non-sine forms) at most 28,000, every case at most 10 % over `tools/cost/baseline.txt`; data misses with the device's caches at most 10 % and half a miss over `tools/cost/cache-baseline.txt`; the lane gate's ratios at most 2 % over their baseline (targets open, 2.9) | CI (aarch64, callgrind) | seen pass in the aarch64 container |
+| a voice the same bits at every lane width and slot; a note on its frame; a sound's events leave other sounds' bits alone | CI, all targets | seen pass: macOS arm64, Linux arm64, x86_64 under translation |
 
 To come: ABI-level tests of the shell with the aborting allocator; a hosted cost gate (the plugin
 through CLAP against the core alone); sample-rate equivalence (48 to 192 kHz against 44.1 kHz
@@ -550,8 +652,8 @@ Sizes are rough, in working sessions of the size of this round.
 | | Milestone | Content | Size |
 |---|---|---|---|
 | M0 | this round | design, scaffold, vector type, spike, cost and panic gates | done |
-| M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | done (section 3.1), except frame-exact note starts (a block is not yet split at events) |
-| M2 | waves | the six forms with spread and formant, tables from the measured amplitudes and phases, `i16` (Q14) storage, cost re-measured | done (section 3.2), except a lane's cost following its voice count |
+| M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | done (section 3.1); frame-exact note starts since (section 2.3) |
+| M2 | waves | the six forms with spread and formant, tables from the measured amplitudes and phases, `i16` (Q14) storage, cost re-measured | done (section 3.2); a lane's cost follows its voice count in part (one voice one lane wide), the lane gate's targets open (section 3.3) |
 | M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | 2 |
 | M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | 2–3 |
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | 2–3 |
