@@ -81,6 +81,18 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
             ((pick / 13).wrapping_add(u32::from(op)) % 101) as i16 - 50,
         );
         let _ = s.set(1052 + 100 * op, ((pick / 17).wrapping_add(u32::from(op)) % 100) as i16);
+        // level scaling and the voice LFO's offsets
+        for (k, m, d) in [
+            (65, 100, 19),
+            (66, 100, 23),
+            (67, 100, 29),
+            (68, 4, 31),
+            (69, 4, 37),
+            (71, 8, 41),
+            (72, 8, 43),
+        ] {
+            let _ = s.set(1000 + k + 100 * op, ((pick / d).wrapping_add(u32::from(op)) % m) as i16);
+        }
     }
     // the common pitch envelope, key follow, random pitch, the part's detune
     for (id, v) in [
@@ -101,6 +113,21 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
         (205, (pick / 41 % 4) as i16),
         (206, (pick % 73) as i16 - 48),
         (207, (pick / 5 % 73) as i16 - 48),
+        // the voice LFO, the macros, the part's envelope offsets
+        (22, (pick / 43 % 6) as i16),
+        (23, (pick % 100) as i16),
+        (25, (pick / 47 % 100) as i16),
+        (26, (pick / 53 % 2) as i16),
+        (27, (pick / 3 % 100) as i16),
+        (28, (pick / 7 % 100) as i16),
+        (32, (pick / 59 % 2) as i16),
+        (33, (pick % 416) as i16),
+        (34, (pick % 199) as i16 - 99),
+        (35, (pick / 3 % 199) as i16 - 99),
+        (38, (pick / 5 % 199) as i16 - 99),
+        (40, (pick / 7 % 199) as i16 - 99),
+        (249, (pick % 128) as i16 - 64),
+        (251, (pick / 3 % 128) as i16 - 64),
     ] {
         let _ = s.set(id, v);
     }

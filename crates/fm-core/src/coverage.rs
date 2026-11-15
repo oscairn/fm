@@ -39,6 +39,8 @@ pub fn status(p: &Param) -> &'static str {
         "scaling_high_depth",
         "scaling_low_curve",
         "scaling_high_curve",
+        "lfo_pitch_offset",
+        "lfo_amp_offset",
     ];
     let played_part = [
         "algorithm",
@@ -57,6 +59,15 @@ pub fn status(p: &Param) -> &'static str {
         "amp_eg_decay_offset",
         "amp_eg_sustain_offset",
         "amp_eg_release_offset",
+        "lfo_wave",
+        "lfo_speed",
+        "lfo_phase",
+        "lfo_delay",
+        "lfo_key_on_reset",
+        "lfo_pitch_depth",
+        "lfo_amp_depth",
+        "lfo_speed_range",
+        "lfo_extended_speed",
     ];
     let starts = |prefixes: &[&str]| prefixes.iter().any(|x| n.starts_with(x));
     if (op && played_op.contains(&n)) || (!op && played_part.contains(&n)) {
@@ -84,7 +95,7 @@ pub fn status(p: &Param) -> &'static str {
         "distance",
         "random_pan",
         "alternate_pan",
-    ]) || starts(&["scaling_pan", "key_on_delay"])
+    ]) || starts(&["scaling_pan", "key_on_delay", "lfo_filter_depth"])
     {
         "M5 (filter and output)"
     } else {
@@ -150,10 +161,7 @@ mod tests {
         .unwrap();
         let mut got = Vec::new();
         not_covered(&s, |p, v, why| got.push((p.id, v, why)));
-        assert_eq!(
-            got,
-            vec![(0, 3, "M5 (filter and output)"), (225, 3, "M4 (modulators)")]
-        );
+        assert_eq!(got, vec![(0, 3, "M5 (filter and output)"), (225, 3, "M4 (modulators)")]);
         let mut n = 0;
         not_covered(&Sound::default(), |_, _, _| n += 1);
         assert_eq!(n, 0);

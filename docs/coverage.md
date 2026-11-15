@@ -41,18 +41,18 @@ pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 | `pitch_eg_depth_velocity` | 19 | played | 0 to 7 (0) | levels and rates times the measured share left at the velocity (times unchanged); existing profile: met, worst 0.22 cents; the engine within 0.2 cent (test) |
 | `pitch_eg_depth` | 20 | played | 0 to 3 (0) | 1, 1/4, 1/8, 1/16 of the widest (8, 2, 1, 0.5 octaves); existing profile: met; the engine within 0.2 cent (test) |
 | `pitch_eg_time_key_follow` | 21 | played | 0 to 7 (0) | rates times 1 + s (key - 3) / 33; existing profile: within 0.6 %; the engine within 0.2 cent (test) |
-| `lfo_wave` | 22 | M4 (modulators) | 0 to 5 (0) |  |
-| `lfo_speed` | 23 | M4 (modulators) | 0 to 99 (30) |  |
-| `lfo_phase` | 24 | M4 (modulators) | 0 to 3 (0) |  |
-| `lfo_delay` | 25 | M4 (modulators) | 0 to 99 (0) |  |
-| `lfo_key_on_reset` | 26 | M4 (modulators) | 0 to 1 (0) |  |
-| `lfo_pitch_depth` | 27 | M4 (modulators) | 0 to 99 (0) |  |
-| `lfo_amp_depth` | 28 | M4 (modulators) | 0 to 99 (0) |  |
-| `lfo_filter_depth` | 29 | M4 (modulators) | 0 to 99 (0) |  |
+| `lfo_wave` | 22 | played | 0 to 5 (0) | the voice LFO, one a voice, evaluated every 16 frames (docs/design.md, 2.3): triangle, saw down, saw up, square, sine, sample and hold (a new value each cycle), from phase 0 the triangle and saw down at their top, saw up and square at their bottom (as measured); existing profile: starts and shapes 6.3-14.2 cents (95th percentile), the square 61 and the sine 18.9; the engine's pitch route within 0.2 cent of the per-sample law (test) |
+| `lfo_speed` | 23 | played | 0 to 99 (30) | the normal range's measured rate table (speed range normal only); existing profile: 100 of 100 within 1 %, speed 0 unmeasured |
+| `lfo_phase` | 24 | played | 0 to 3 (0) | starts a quarter of a cycle further per value; as lfo_wave |
+| `lfo_delay` | 25 | played | 0 to 99 (0) | the six-operator model's hold, then a fade in as long (straight, at control rate); existing profile: 11 of 12, delay 99 reaching 10 % 2.5 % early; the engine: nothing in the hold, the full swing after the fade (test) |
+| `lfo_key_on_reset` | 26 | played | 0 to 1 (0) | on: each note's LFO from its start phase; off: a note takes the sound's free-running phase (from the engine's clock at the note's block; chosen: the reference's is not modelled) |
+| `lfo_pitch_depth` | 27 | played | 0 to 99 (0) | twice the six-operator depth (depth × 165 / 64 steps, 99 as 256) times each operator's offset, ratio-mode operators; existing profile: 30 of 31 within 1 cent (depth 80 +1.3 cents); the engine within 0.2 cent of the law (test) |
+| `lfo_amp_depth` | 28 | played | 0 to 99 (0) | each operator loses, straight in dB from the LFO's top, the measured offset-7 swing times its offset's eighths, through the carrier envelope's bend below about 45 dB; existing profile: within 0.16 dB on the renders it was fitted to, depth 99 at offsets 3-4 0.8 and 2.6 dB short; the engine: 6 dB at depth 30 within 0.1 dB (test) |
+| `lfo_filter_depth` | 29 | M5 (filter and output) | 0 to 99 (0) |  |
 | `algorithm` | 30 | played | 1 to 88 (69) | the 88 routings as data, checked against the model's documented chart (routing 70 as the reference plays it: 1 and 2 both modulate 3); the carriers' output level per routing measured, 0 to +13.55 dB |
 | `feedback` | 31 | played | 0 to 7 (0) | a modulator feeds back its own output: 2^(f - 9) cycles of phase per unit of the sum of its last two outputs; a carrier 0.18 of that, of its signal before the routing's level; existing profile: carrier within 0.4 dB, modulator harmonics 2-6 within 0.09 dB, 3 cases off by 2.5, 3.8 and 20 dB |
-| `lfo_speed_range` | 32 | M4 (modulators) | 0 to 1 (1) |  |
-| `lfo_extended_speed` | 33 | M4 (modulators) | 0 to 415 (60) |  |
+| `lfo_speed_range` | 32 | played | 0 to 1 (1) | normal or extended; as lfo_speed and lfo_extended_speed |
+| `lfo_extended_speed` | 33 | played | 0 to 415 (60) | the extended range's measured rate table, every fifth value, straight between (0.002 to 1357 Hz); existing profile: every fifth value checked; evaluated every 16 frames, so above about 150 Hz the LFO is under-sampled (docs/known-differences.md) |
 | `macro_depth` | 34 | played | -99 to 99 (0) | added to modulators' levels, divided by 1 + feedback (cut towards 0) on the operator that feeds back, per sound; existing profile: 12 of 12 without feedback, 0.02-1.25 dB with; the engine plays the law (test) |
 | `macro_ratio` | 35 | played | -99 to 99 (0) | ratio-mode modulators: a measured table at 9 ratios and 79 values, straight between both, at least 0.5, then on the grid; existing profile: up to 5.7 cents between measured points; fixed-mode operators unmeasured (not moved); the engine plays the law (test) |
 | `macro_attack` | 36 | played | -99 to 99 (0) | added to modulators' attack time values (0-99); existing profile: 44 of 48 simple probes, 4 of 24 on the wave probe (the envelope macros together); the engine plays the law (test) |
@@ -221,8 +221,8 @@ pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 | `opN.scaling_low_curve` | 1000 + 100 op + 68 | played | 0 to 3 (0) | as opN.scaling_break: - linear, - exponential, + exponential, + linear |
 | `opN.scaling_high_curve` | 1000 + 100 op + 69 | played | 0 to 3 (0) | as opN.scaling_low_curve |
 | `opN.level_velocity` | 1000 + 100 op + 70 | played | -7 to 7 (0) | measured table at 17 velocities, fractional velocities between; existing profile: 56 of 64 (worst 1.5 dB at velocities 2-3) |
-| `opN.lfo_pitch_offset` | 1000 + 100 op + 71 | M4 (modulators) | 0 to 7 (3) |  |
-| `opN.lfo_amp_offset` | 1000 + 100 op + 72 | M4 (modulators) | 0 to 7 (3) |  |
+| `opN.lfo_pitch_offset` | 1000 + 100 op + 71 | played | 0 to 7 (3) | the operator's share of the voice LFO's pitch depth: 0, 10, 20, 33, 56, 96, 160, 256 steps (measured at depths 30 and 99); fixed-mode operators do not follow (as the existing profile); as lfo_pitch_depth |
+| `opN.lfo_amp_offset` | 1000 + 100 op + 72 | played | 0 to 7 (3) | the operator's share of the voice LFO's amplitude loss: 0, 1, 2, 4, 5, 6, 7, 8 eighths (measured at depths 16, 30, 70 and 99); as lfo_amp_depth |
 | `opN.pitch_ctrl_sens` | 1000 + 100 op + 73 | M7 (controllers, tuning) | -7 to 7 (0) |  |
 | `opN.level_ctrl_sens` | 1000 + 100 op + 74 | M7 (controllers, tuning) | -7 to 7 (0) |  |
 | `opN.slfo_ratio1` | 1000 + 100 op + 75 | M4 (modulators) | 0 to 127 (127) |  |
