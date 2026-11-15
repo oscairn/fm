@@ -161,6 +161,9 @@ fn time(blocks: usize) {
         ("pitch envelopes, portamento", 12, 8, "pitch"),
         ("voice LFO, level scaling", 12, 8, "mod"),
         ("sound LFO", 12, 8, "slfo"),
+        ("filter, low-pass 24 dB", 12, 8, "sine+f0"),
+        ("filter, every modulator", 12, 8, "odd+fx"),
+        ("pan", 12, 8, "sine+pan"),
     ];
     let mut rows: Vec<(String, Box<Engine>, usize)> = Vec::new();
     for (name, routing, ops, forms) in cases {
