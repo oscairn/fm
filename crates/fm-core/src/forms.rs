@@ -183,6 +183,8 @@ mod tests {
             (N, crate::tables::LEN)
         );
         assert!(crate::forms_build::build() == *FORMS);
+        // (the device's and the cost gate's targets; macOS x86_64's linker places it at 4 KB)
+        #[cfg(target_arch = "aarch64")]
         assert_eq!(core::ptr::addr_of!(crate::tables::BLOCK) as usize % 8192, 0);
     }
 }
