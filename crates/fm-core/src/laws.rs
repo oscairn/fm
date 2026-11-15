@@ -495,6 +495,51 @@ pub fn lfo_amp_share(offset: i32) -> f64 {
     at(&[0., 1., 2., 4., 5., 6., 7., 8.], offset) / 8.0
 }
 
+/// The sound LFO's rate, Hz, speed 0-63 (measured at every value: 0 stands still, then about a
+/// doubling every 8 values to 11.86 Hz).
+pub fn slfo_hz(speed: i32) -> f64 {
+    at(&SLFO_HZ, speed)
+}
+
+/// The sound LFO's delay, fade in, hold and fade out 0-127: seconds (one table for the four,
+/// measured every eighth value and the delay at every value; made non-decreasing where values 1-30
+/// scatter by about 10 ms).
+pub fn slfo_time_s(v: i32) -> f64 {
+    SLFO_TIME_MS
+        .get(v.clamp(0, 127) as usize)
+        .map_or(0.0, |&ms| f64::from(ms) / 1000.0)
+}
+
+/// After a key-on reset the sound LFO stands still this long (its measured onset).
+pub const SLFO_START_S: f64 = 0.012;
+
+/// A sound LFO destination's depth 0-127 on an operator with depth ratio 0-127: depth × ratio / 128
+/// rounded down, ratio 127 counting as 128 (measured at 7 ratios, within 0.4 cents).
+pub fn slfo_depth(depth: i32, ratio: i32) -> i32 {
+    let r = ratio.clamp(0, 127);
+    depth.clamp(0, 127) * if r == 127 { 128 } else { r } / 128
+}
+
+/// The sound LFO's operator frequency destination: cents at the LFO's peak (3600/127 a depth step,
+/// measured at 17 depths, within 0.3 cents).
+pub fn slfo_pitch_cents(depth: i32) -> f64 {
+    f64::from(depth.clamp(0, 127)) * 3600.0 / 127.0
+}
+
+/// The sound LFO's operator level destination: dB lost at the LFO's bottom, none at its top
+/// (0.589 dB a depth step, measured with a square wave at depths 8, 32 and 64 within 0.2 dB).
+pub fn slfo_level_db(depth: i32) -> f64 {
+    f64::from(depth.clamp(0, 127)) * 0.589
+}
+
+/// The sound LFO's stepped destinations: steps at the LFO's top a depth step, the move rounded
+/// towards 0 (measured with a square wave): an operator's detune (within 0.08 cents), its form,
+/// the feedback, the voice LFO's speed (within 0.3 %).
+pub const SLFO_DETUNE_PER_DEPTH: f64 = 1.0 / 4.0;
+pub const SLFO_FORM_PER_DEPTH: f64 = 1.0 / 16.0;
+pub const SLFO_FEEDBACK_PER_DEPTH: f64 = 1.0 / 16.0;
+pub const SLFO_SPEED_PER_DEPTH: f64 = 100.0 / 128.0;
+
 /// An amplitude loss as played (dB, positive) from its straight loss: straight in dB to about
 /// 45 dB, then the carrier envelope levels' bend, silent past their last audible level.
 pub fn amp_loss_db(straight: f64) -> f64 {
@@ -831,6 +876,22 @@ const LFO_EXT_HZ: [f64; 86] = [
     1356.592,
 ];
 const LFO_PITCH_OFFSET: [f64; 8] = [0., 10., 20., 33., 56., 96., 160., 256.];
+const SLFO_HZ: [f64; 64] = [
+    0., 0.00193, 0.0617357, 0.0673294, 0.0733623, 0.0799999, 0.0872035, 0.0950541, 0.103675, 0.113039, 0.123234,
+    0.134347, 0.14652, 0.159664, 0.174096, 0.189761, 0.206914, 0.225567, 0.245929, 0.268086, 0.292265, 0.31858,
+    0.347287, 0.378543, 0.412699, 0.449924, 0.490483, 0.534823, 0.583041, 0.635359, 0.692989, 0.755392, 0.823748,
+    0.897714, 0.979524, 1.06707, 1.16296, 1.26842, 1.38253, 1.50683, 1.64324, 1.79076, 1.95106, 2.13021, 2.32028,
+    2.52856, 2.75859, 3.0068, 3.27771, 3.57596, 3.89713, 4.25193, 4.65818, 5.02516, 5.51046, 5.97692, 6.52348, 7.10192,
+    7.747, 8.44421, 9.2199, 10.0336, 10.9748, 11.8615,
+];
+const SLFO_TIME_MS: [u16; 128] = [
+    0, 41, 41, 41, 41, 41, 45, 45, 45, 53, 53, 53, 53, 53, 53, 56, 56, 56, 59, 74, 74, 74, 74, 74, 74, 74, 91, 91, 91,
+    91, 94, 97, 97, 99, 126, 126, 126, 130, 130, 139, 151, 151, 152, 175, 175, 176, 176, 211, 211, 211, 221, 258, 258,
+    259, 291, 299, 299, 326, 345, 369, 369, 395, 414, 420, 452, 472, 511, 540, 561, 585, 626, 653, 680, 715, 762, 789,
+    828, 866, 921, 963, 1024, 1076, 1112, 1181, 1250, 1303, 1375, 1463, 1524, 1613, 1685, 1770, 1871, 1968, 2081, 2182,
+    2306, 2438, 2562, 2685, 2832, 2975, 3132, 3309, 3482, 3662, 3862, 4065, 4300, 4515, 4774, 5015, 5264, 5559, 5854,
+    6164, 6492, 6836, 7185, 7579, 7978, 8408, 8856, 9330, 9849, 10366, 10907, 11509,
+];
 const LFO_AMP_X: [f64; 26] = [
     0., 2., 3., 4., 6., 8., 10., 12., 16., 20., 25., 30., 35., 40., 45., 50., 55., 60., 65., 70., 75., 80., 85., 90.,
     95., 99.,
@@ -1396,6 +1457,23 @@ mod tests {
         // amplitude: 0.375 dB steps (depth 30: 16 steps), offsets in eighths (3: 4 eighths)
         assert_eq!((lfo_amp_db(30), lfo_amp_db(99), lfo_amp_db(1)), (6.0, 96.0, 0.0));
         assert_eq!((lfo_amp_share(3), lfo_amp_share(7)), (0.5, 1.0));
+        // the sound LFO: its speed and time tables at their ends and a doubling about every 8
+        // speeds; the depth ratio rule (127 as 128, rounded down); the destinations' depth laws
+        assert_eq!(
+            (slfo_hz(0), slfo_hz(1), slfo_hz(63), slfo_hz(99)),
+            (0.0, 0.00193, 11.8615, 11.8615)
+        );
+        assert!((1.8..2.2).contains(&(slfo_hz(48) / slfo_hz(40))));
+        assert_eq!(
+            (slfo_time_s(0), slfo_time_s(64), slfo_time_s(127)),
+            (0.0, 0.452, 11.509)
+        );
+        assert!(SLFO_TIME_MS.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(
+            (slfo_depth(127, 127), slfo_depth(100, 64), slfo_depth(9, 126)),
+            (127, 50, 8)
+        );
+        assert!(near(slfo_pitch_cents(127), 3600.0) && near(slfo_level_db(64), 37.696));
         // the bend: within 0.06 dB of straight to 30 dB; depth 99 at offsets 3 and 4 (48 and 60 dB
         // straight) play 48.50 and 62.64 dB (the reference 48.7 and 62.8); the inverse returns the
         // straight loss

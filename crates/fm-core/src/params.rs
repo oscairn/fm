@@ -129,11 +129,11 @@ const PART: [Row; 56] = [
     ("slfo_hold", 0, 127, 127),
     ("slfo_fade_out", 0, 127, 64),
     ("slfo_key_on_reset", 0, 2, 2),
-    ("slfo_dest1", 0, 69, 2),
+    ("slfo_dest1", 0, 78, 2),
     ("slfo_depth1", 0, 127, 0),
-    ("slfo_dest2", 0, 69, 4),
+    ("slfo_dest2", 0, 78, 4),
     ("slfo_depth2", 0, 127, 0),
-    ("slfo_dest3", 0, 69, 4),
+    ("slfo_dest3", 0, 78, 4),
     ("slfo_depth3", 0, 127, 0),
     ("slfo_user_cycle", 0, 6, 6),
     ("slfo_user_slope", 0, 3, 0),
@@ -384,6 +384,15 @@ pub enum Part {
     NoteShift = COMMON.len() as isize + FILTER.len() as isize + 9,
     VelocityDepth = COMMON.len() as isize + FILTER.len() as isize + 12,
     VelocityOffset = COMMON.len() as isize + FILTER.len() as isize + 13,
+    SlfoPhase = COMMON.len() as isize + FILTER.len() as isize + 14,
+    SlfoWave = COMMON.len() as isize + FILTER.len() as isize + 15,
+    SlfoSpeed = COMMON.len() as isize + FILTER.len() as isize + 16,
+    SlfoTime = COMMON.len() as isize + FILTER.len() as isize + 19, // delay, fade in, hold, fade out
+    SlfoKeyOnReset = COMMON.len() as isize + FILTER.len() as isize + 23,
+    SlfoDest = COMMON.len() as isize + FILTER.len() as isize + 24, // destination d at 2 d, its depth after it
+    SlfoUserCycle = COMMON.len() as isize + FILTER.len() as isize + 30,
+    SlfoUserSlope = COMMON.len() as isize + FILTER.len() as isize + 31,
+    SlfoStep = COMMON.len() as isize + FILTER.len() as isize + 32, // 16 steps from here
     AttackOffset = COMMON.len() as isize + FILTER.len() as isize + 49,
     DecayOffset = COMMON.len() as isize + FILTER.len() as isize + 50,
     SustainOffset = COMMON.len() as isize + FILTER.len() as isize + 51,
@@ -414,11 +423,17 @@ pub enum Op {
     LevelVelocity = 30,
     LfoPitchOffset = 31,
     LfoAmpOffset = 32,
+    SlfoRatio = 35, // destinations 1-3
 }
 
 /// The index of operator `op`'s parameter `k` (+ `offset` for the multi-value ones).
 pub const fn op_index(op: usize, k: Op, offset: usize) -> usize {
     OP_BASE + op * PER_OP + SWITCH_NAMES.len() + k as usize + offset
+}
+
+/// The index of operator `op`'s sound LFO destination box `d` (0-2).
+pub const fn slfo_box_index(op: usize, d: usize) -> usize {
+    (OP_BASE + 36).wrapping_add(op.wrapping_mul(PER_OP)).wrapping_add(d)
 }
 
 #[cfg(test)]
@@ -451,6 +466,22 @@ mod tests {
         assert_eq!((level7.id, level7.name, level7.default), (1764, "level", 85));
         assert_eq!(PARAMS[op_index(2, Op::EgHold, 0)].name, "eg_time_hold");
         assert_eq!(PARAMS[op_index(0, Op::LevelVelocity, 0)].name, "level_velocity");
+        assert_eq!(PARAMS[op_index(3, Op::SlfoRatio, 2)].name, "slfo_ratio3");
+        assert_eq!(PARAMS[slfo_box_index(3, 2)].name, "slfo_box3");
+        for (k, name) in [
+            (Part::SlfoPhase, "slfo_phase"),
+            (Part::SlfoWave, "slfo_wave"),
+            (Part::SlfoSpeed, "slfo_speed"),
+            (Part::SlfoTime, "slfo_delay"),
+            (Part::SlfoKeyOnReset, "slfo_key_on_reset"),
+            (Part::SlfoDest, "slfo_dest1"),
+            (Part::SlfoUserCycle, "slfo_user_cycle"),
+            (Part::SlfoUserSlope, "slfo_user_slope"),
+            (Part::SlfoStep, "slfo_step1"),
+        ] {
+            assert_eq!(PARAMS[k as usize].name, name);
+        }
+        assert_eq!(PARAMS[Part::SlfoDest as usize + 5].name, "slfo_depth3");
         assert_eq!(index_of(41), None);
     }
 }
