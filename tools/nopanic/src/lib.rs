@@ -181,6 +181,15 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
                     value: pick.rotate_left(b) as i16,
                 },
             },
+            // any id and value (most refused), operator levels changing what is rendered
+            Event {
+                frame: at(29),
+                sound,
+                kind: Kind::Param {
+                    id: (pick.rotate_left(b) % 1800) as u16,
+                    value: (pick >> 3) as i16 % 128,
+                },
+            },
         ];
         e.render_events::<Native>(out, &events, &mut end);
     }

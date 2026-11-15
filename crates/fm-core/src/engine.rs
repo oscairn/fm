@@ -99,6 +99,8 @@ pub enum Kind {
     Pedal { down: bool },
     /// [`Engine::bend`]
     Bend { value: i16 },
+    /// [`Engine::param`]: a parameter's raw value (its id in the sound format)
+    Param { id: u16, value: i16 },
 }
 
 /// A sound's place in the voice budget's order (oscairn.voice-budget): voices it keeps from other
@@ -113,6 +115,8 @@ pub struct Limits {
 /// A sound as the engine plays it: the laws applied once, off the audio thread.
 #[derive(Clone, Copy)]
 pub struct Prepared {
+    /// The raw values it was prepared from (a parameter event changes one and prepares again).
+    sound: Sound,
     pub plan: Plan,
     /// Feedback: the phase offset in cycles per unit of the source's last two outputs (as stored).
     fbk: f32,
@@ -189,6 +193,7 @@ impl Prepared {
         let feedback = i32::from(s.get(Common::Feedback as usize));
         let o = |op: usize, k: Op, i: usize| i32::from(s.get(op_index(op, k, i)));
         let mut p = Prepared {
+            sound: *s,
             plan: Plan::new(&r, 0, false, [Wave::Sine; OPS]),
             fbk: 0.0,
             full: [0.0; OPS],
@@ -857,6 +862,8 @@ pub struct Engine {
     limit: usize,
     /// Sounds whose sustain pedal is down, a bit each.
     pedal: u8,
+    /// Sounds with a parameter change waiting until none of their voices sounds, a bit each.
+    pending: u8,
     age: u32,
     /// Each sound's random source (xorshift32), started again when the sound is installed.
     rng: [u32; SOUNDS],
@@ -892,6 +899,7 @@ impl Engine {
             lanes: [LANE0; LANES],
             limit: VOICES,
             pedal: 0,
+            pending: 0,
             age: 0,
             rng: [SEED; SOUNDS],
             bend: [0; SOUNDS],
@@ -911,14 +919,45 @@ impl Engine {
     /// Installs a prepared sound in slot `sound`, which must have no voice sounding (see
     /// [`Engine::choke`]); whether it was installed.
     pub fn set_sound(&mut self, sound: usize, p: &Prepared) -> bool {
-        let busy = self.lanes.iter().any(|l| l.used != 0 && usize::from(l.sound) == sound)
-            || self.keys_n.get(sound).is_some_and(|&n| n > 0);
+        let busy = self.busy(sound);
         match (self.sounds.get_mut(sound), self.rng.get_mut(sound)) {
             (Some(d), Some(r)) if !busy => {
                 (*d, *r) = (*p, SEED);
+                self.pending &= !bit(sound);
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Whether a voice or a kept mono key of `sound` sounds.
+    fn busy(&self, sound: usize) -> bool {
+        self.lanes.iter().any(|l| l.used != 0 && usize::from(l.sound) == sound)
+            || self.keys_n.get(sound).is_some_and(|&n| n > 0)
+    }
+
+    /// Sets parameter `id` of `sound` to the raw `value` (unknown ids and values out of range are
+    /// ignored) and prepares the sound again: from the next control step what is evaluated a step
+    /// follows it (the LFO, the bend's ranges), from the next note what a note keeps. A change of
+    /// what is rendered (the operators heard, their forms, the feedback path) or of mono or key
+    /// assign waits until no voice of the sound sounds.
+    pub fn param(&mut self, sound: usize, id: u16, value: i16) {
+        let Some(mut s) = self.sounds.get(sound).map(|p| p.sound) else {
+            return;
+        };
+        if s.set(id, value).is_err() {
+            return;
+        }
+        let n = Prepared::new(&s);
+        let busy = self.busy(sound);
+        if let Some(d) = self.sounds.get_mut(sound) {
+            if !busy || (n.plan == d.plan && n.mono == d.mono && n.single == d.single) {
+                *d = n;
+                self.pending &= !bit(sound);
+            } else {
+                d.sound = s;
+                self.pending |= bit(sound);
+            }
         }
     }
 
@@ -1367,6 +1406,16 @@ impl Engine {
     /// control steps start again at its own events' frames (a step shorter than 16 frames before
     /// one), so a note starts on its frame and no sound's output depends on another's events.
     pub fn render_events<V: F4>(&mut self, out: &mut [f32; BLOCK], events: &[Event], end: &mut impl FnMut(NoteEnd)) {
+        // parameter changes that waited for their sound to fall silent
+        for sound in 0..SOUNDS {
+            if !has(u32::from(self.pending), sound) || self.busy(sound) {
+                continue;
+            }
+            if let Some(d) = self.sounds.get_mut(sound) {
+                *d = Prepared::new(&d.sound);
+            }
+            self.pending &= !bit(sound);
+        }
         while self.keeping(None) > self.limit && self.shed(None, None) {}
         for (sound, lim) in (0..SOUNDS as u8).zip(self.limits).filter(|(_, l)| l.limit > 0) {
             while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
@@ -1389,6 +1438,7 @@ impl Engine {
                     Kind::Off { id } => self.note_off(s, id, end),
                     Kind::Pedal { down } => self.pedal(s, down),
                     Kind::Bend { value } => self.bend(s, value),
+                    Kind::Param { id, value } => self.param(s, id, value),
                 }
             }
             self.render_sound::<V>(sound, out, from, BLOCK, end);
@@ -2369,6 +2419,62 @@ mod tests {
         let late: Vec<f64> = x[(2.0 * hold) as usize + BLOCK..].chunks(BLOCK).map(peak_db).collect();
         let lo = late.iter().fold(0.0f64, |l, &b| l.min(b));
         assert!((laws::CARRIER_FULL_DBFS - lo - 6.0).abs() < 0.1, "{lo}");
+    }
+
+    /// A parameter event takes effect at its frame (the same bits as the change made between two
+    /// blocks when the frame is a block's start); a change of what is rendered waits for silence.
+    #[test]
+    fn parameter_events() {
+        let p = carrier(
+            1,
+            "lfo_speed_range=0 lfo_speed=40 lfo_key_on_reset=1 op1.lfo_pitch_offset=7",
+        );
+        let run = |events: &[Event], direct: bool| {
+            let mut e = engine(&p);
+            e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            let mut x = Vec::new();
+            for b in 0..6 {
+                let mut out = [0.0; BLOCK];
+                if b == 3 && direct {
+                    e.param(0, 27, 50);
+                }
+                e.render_events::<Native>(&mut out, if b == 3 { events } else { &[] }, &mut |_| {});
+                x.extend_from_slice(&out);
+            }
+            x
+        };
+        let ev = |frame| Event {
+            frame,
+            sound: 0,
+            kind: Kind::Param { id: 27, value: 50 },
+        };
+        let (none, direct) = (run(&[], false), run(&[], true));
+        assert_eq!(run(&[ev(0)], false), direct);
+        let mid = run(&[ev(64)], false);
+        assert_eq!(mid[..BLOCK * 3 + 64], none[..BLOCK * 3 + 64]);
+        assert_ne!(mid[BLOCK * 4..], none[BLOCK * 4..]);
+        // out of range: ignored
+        assert_eq!(
+            run(
+                &[Event {
+                    kind: Kind::Param { id: 27, value: 100 },
+                    ..ev(0)
+                }],
+                false
+            ),
+            none
+        );
+        // operator 2 heard from now: waits while the note sounds, then plays
+        let mut e = engine(&p);
+        e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        e.param(0, 1164, 99);
+        assert!(e.pending == 1 && e.sounds[0].plan == p.plan);
+        e.note_off(0, 1, &mut |_| {});
+        let mut out = [0.0; BLOCK];
+        for _ in 0..400 {
+            e.render::<Native>(&mut out, &mut |_| {});
+        }
+        assert!(e.pending == 0 && e.sounds[0].plan != p.plan);
     }
 
     #[test]

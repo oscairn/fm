@@ -6,7 +6,7 @@
 use crate::params::{index_of, Param, COUNT, OPS, PARAMS};
 
 /// Raw values, one per entry of [`PARAMS`], always valid.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Sound {
     v: [i16; COUNT],
 }
