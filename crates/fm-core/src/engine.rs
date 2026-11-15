@@ -10,7 +10,7 @@ use crate::boxes::{self, SOURCES};
 use crate::filter::{Laws, Voices, VOICES0};
 use crate::forms::Wave;
 use crate::laws::{self, DOUBLINGS_PER_DB as DPD};
-use crate::params::{op_index, slfo_box_index, Common, Op, Part, OPS};
+use crate::params::{index_of, op_index, slfo_box_index, Common, Op, Part, OPS};
 use crate::plan::{Feedback, Plan};
 use crate::routing::routing;
 use crate::simd::{first, scalar, F4, U4, W};
@@ -1348,23 +1348,35 @@ impl Engine {
     /// what is rendered (the operators heard, their forms, the feedback path) or of mono or key
     /// assign waits until no voice of the sound sounds.
     pub fn param(&mut self, sound: usize, id: u16, value: i16) {
-        if self.stage(sound, id, value) {
+        if self.stage(sound, id, value) && has(u32::from(self.staged), sound) {
             self.apply(sound);
         }
     }
 
     /// Sets parameter `id` of `sound` to the raw `value` as [`Engine::param`] does, but prepares
     /// the sound only at the start of the next render, once for every value staged before it;
-    /// whether the value was taken.
+    /// whether the value was taken. A value the sound already has prepares nothing; a box's source
+    /// (a knob, the ribbon, a switch) is read only by what the boxes do, so with nothing else
+    /// waiting only that is made again, now.
     pub fn stage(&mut self, sound: usize, id: u16, value: i16) -> bool {
-        let ok = self
-            .sounds
-            .get_mut(sound)
-            .is_some_and(|d| d.sound.set(id, value).is_ok());
-        if ok {
+        let Some(d) = self.sounds.get_mut(sound) else {
+            return false;
+        };
+        let i = index_of(id);
+        let was = i.map(|i| d.sound.get(i));
+        if d.sound.set(id, value).is_err() {
+            return false;
+        }
+        let source = i.is_some_and(|i| (Part::Knob as usize..=Part::Switch as usize + 1).contains(&i));
+        if was == Some(value) {
+            return true;
+        }
+        if source && (self.staged | self.pending) & bit(sound) == 0 {
+            self.refresh(sound);
+        } else {
             self.staged |= bit(sound);
         }
-        ok
+        true
     }
 
     /// The sounds with staged values, a bit each (each is prepared once at the next render).
@@ -5721,6 +5733,40 @@ mod tests {
                 .iter()
                 .zip(ob.as_flattened())
                 .all(|(x, y)| x.to_bits() == y.to_bits()));
+        }
+    }
+
+    /// A box's source moved (knob 3 on the cutoff here) makes only the boxes again, the same bits
+    /// as the sound prepared again; a value the sound already has prepares nothing.
+    #[test]
+    fn a_box_source_or_an_unchanged_value_prepares_nothing() {
+        let p = carrier(
+            1,
+            "filter_type=0 cutoff=300 box1_src=10 box1_dst=102 box1_ratio=60 box1_pol=1",
+        );
+        let [mut a, mut b, mut c] = [engine(&p), engine(&p), engine(&p)];
+        for e in [&mut a, &mut b, &mut c] {
+            e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            e.render::<Native>(&mut [[0.0; BLOCK]; 2], &mut |_| {});
+        }
+        assert!(a.stage(0, 258, 900) && a.staged() == 0, "a knob: no preparing");
+        assert!(b.stage(0, 258, 900));
+        b.apply(0);
+        assert!(c.stage(0, 1042, c.sounds[0].sound.get(index_of(1042).unwrap())) && c.staged() == 0);
+        let [mut oa, mut ob, mut oc] = [[[0.0; BLOCK]; 2]; 3];
+        let mut d = engine(&p);
+        d.note_on(0, 1, 60, 100.0, &mut |_| {});
+        let mut od = [[0.0; BLOCK]; 2];
+        d.render::<Native>(&mut od, &mut |_| {});
+        for _ in 0..3 {
+            a.render::<Native>(&mut oa, &mut |_| {});
+            b.render::<Native>(&mut ob, &mut |_| {});
+            c.render::<Native>(&mut oc, &mut |_| {});
+            d.render::<Native>(&mut od, &mut |_| {});
+            let bits = |x: &[[f32; BLOCK]; 2]| x.as_flattened().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&oa), bits(&ob));
+            assert_eq!(bits(&oc), bits(&od));
+            assert_ne!(bits(&oa), bits(&od), "the knob moved the cutoff");
         }
     }
 
