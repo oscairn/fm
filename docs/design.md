@@ -351,17 +351,37 @@ installed by the audio thread by a copy, with no lock.
 
 ### 2.10 The shell
 
-Not built this round: `crates/fm-clap` holds the plugin id and name, each defined once. Plan:
-CLAP's own types from `clap-sys` 0.5.0; the platform's extensions from the platform's bindings
-(`oscairn-clap-sys`, pre-generated, no libclang at the consumer), pinned to one commit. Those
-bindings carry their own copies of the roughly 30 CLAP types the extensions use, layout-identical to
-`clap-sys`'s. The preference is that the bindings use `clap-sys`'s types directly, so the shell has
-one set of CLAP types and no casts at the extension boundary (fewer `unsafe` lines); until then the
-shell casts at that boundary, in the safe layer only. The C++ helper headers' roles (sound contexts,
-voice budget, preset discovery) are written in Rust in the safe layer. Extensions: audio ports (nine,
-with activation), note ports, params (every model parameter, controller-box destinations flagged
-modulatable with the modulation amount kept out of the state), state, voice info, the platform's
-sound snapshots, voice budget, memory and UI hints (a role for every parameter).
+Built at M6 (`crates/fm-clap`; what it offers, its ids, parameters and state: `docs/plugin.md`).
+CLAP's types are `clap-sys` 0.5.0, the platform's extensions its pre-generated bindings
+(`oscairn-clap-sys`, built on `clap-sys`'s types: one set, no casts), from the submodule
+`third_party/oscairn-clap` at c2119db. No framework: `src/ffi.rs` holds the entry, the factory and
+every extension's table, each a thin call into `src/shell.rs`, which holds the instance; the roles
+of the platform's C++ helper (sound contexts, the selection queue, note ownership, `NOTE_END`, the
+snapshot) are written there in Rust, and the voice-budget order is the core's (2.8).
+
+- Data by thread: atomics (each sound's values, bus, id, pins and channel mask; the selection queue;
+  port activation); the main thread's (names, which slots are prepared, ids); the audio thread's
+  (the engine, its output pairs, the note table, the owed note ends, the limits). The main thread
+  takes the audio thread's data only to activate and to load a state, with a flag pair: the audio
+  thread, finding it held, skips that callback (a silent block) and never waits. A prepared sound
+  is written into a free slot's buffer by the main thread and installed by the audio thread with
+  the first selection of it (the selection pins it), so no copy is ever read while written.
+- Rendering: the core renders a block in stretches of at most 128 frames (`render_buses`, any
+  length up to `BLOCK`: a block of 128 frames is the core's own block, bit for bit), each sound
+  into its own output pair (its bus, main where the bus is not active, or a ring-out pair), only
+  what sounds written; the shell copies each written pair to its port (left to both channels for a
+  sound without pan) and zeros an active port nothing played into. Note ends are reported at the
+  end of the stretch they happen in.
+- Parameter values are staged in the core as they arrive and each sound changed is prepared once
+  at the start of the next stretch (`stage`): at most once a stretch however many values come.
+- Sleep: no note, voice, owed end or queued selection; the engine's clock moves on over skipped
+  blocks from `steady_time` (`skip`).
+- Proven: the audio thread's calls allocate nothing (the tests' counting allocator) and reach no
+  panic function (section 4).
+
+Cost: `tools/cost/cg.sh`'s `hosted-*` cases (`fmhost`, a binary of its own: linking the plugin into
+`fmbench` changed the core's code there, a voice alone 0.7 % dearer); figures in
+`tools/cost/baseline.txt` and section 3.8.
 
 ## 3. The spike
 
@@ -780,14 +800,42 @@ about 2,400, pan about 1,100, the LFOs' moves about 500. The gate's worst case i
 case). Data misses with the device's caches: sines 19.6, 3.4, 2.5, 3.7 first-level a voice-block
 at 1, 8, 25, 64 voices (the right channel's 8 lines a block); mixed forms 102.8, 43.7, 48.2, 69.8.
 
+### 3.8 The shell at M6 (measured)
+
+The lane gate's one-voice ratio, back under its limit by removing work: the core writes only what
+sounds (`render_buses`: a right channel that is the left is left to the caller, which copies its
+output anyway; the left cleared only when a lane first plays into it) and skips the pool's
+over-limit scan when the limit is the pool's own (a note starts only within it). A voice alone
+38,282 → 37,923, at 32 voices 14,872 → 14,863: 2.552 against 2.509 + 2 % = 2.559 (met, a margin of
+0.3 %: linking the plugin into `fmbench` alone moved it to 2.584, so the hosted cases are a binary
+of their own). Golden hashes unchanged.
+
+Through CLAP (`fmhost`, a 128-frame block, the routing-12 eight-sine case; the core alone in
+brackets): asleep 1,148 a block (the core at rest 1,190); awake at rest, an ignored controller each
+block, 3,291 a block; eight held voices of one sound 15,824 a voice-block (`fm-r12-8-v8` 15,034:
++5.3 %, about 6,300 a block); one voice in each of five sounds 38,197 (`fm-s5-v1` 36,846: +3.7 %,
+about 6,800 a block). The overhead a block: the selection queue and limits, the bus map, the event
+translation, copying the output pairs to the host's channels and the idle test's count of voices
+(a pass over the lanes). A parameter change costs one preparation a sound a stretch (about 17,200),
+however many events.
+
 ## 4. Audio-thread safety, and how it is proven
 
 - **No allocation**, by construction: the core is `#![no_std]` and does not link the `alloc` crate;
   CI builds it for a bare-metal target without the standard library and checks the sources for any
-  use of `alloc` or `std`. The shell's tests will run the audio thread under an aborting allocator:
-  a global allocator that aborts when a thread-local flag says the thread is inside `process`.
-- **No locks or logging**: the core has neither (no `std`); the shell installs sounds by a copy from
-  a lock-free buffer, and never logs or formats on the audio thread.
+  use of `alloc` or `std`. The shell's tests run every audio-thread call under a counting global
+  allocator (a thread-local flag set around the call): any allocation fails the test.
+- **No locks or logging**: the core has neither (no `std`); the shell passes selections through a
+  lock-free queue, installs a prepared sound by a copy the main thread no longer writes, keeps
+  shared values in atomics, never waits for the main thread (a block it holds the engine through
+  is skipped, silent) and never logs or formats on the audio thread.
+- **No panic path in the shell**: its audio-thread callbacks (process, reset, port activation,
+  parameter flush, ring-out, the voice budget's) are walked along every direct call and tail call
+  of the plugin's release build (`tools/check-no-panic-shell.awk`); no panic function may be
+  reached, and the renderer must be (the walk reached 94 functions on macOS arm64, 107 on Linux
+  arm64). Shown to fail with an index
+  added to `process`. What it found: two `enumerate()` counters and an open range's counter
+  (overflow-checked) and variable shifts in the shell; all fixed.
 - **No panic path**, checked at link time (`tools/check-no-panic.sh`): `tools/nopanic` is a `no_std`
   static library with one C function that drives every block-path entry (note on, note off,
   render; every routing, form and layout chosen by arguments the optimiser cannot see). Its release
@@ -838,9 +886,11 @@ at 1, 8, 25, 64 voices (the right channel's 8 lines a block); mixed forms 102.8,
 | no panic path (symbols, link), the engine's note on and off, pedal, choke, limits and render included | CI (unix) | seen pass on macOS arm64 and Linux arm64 |
 | cost: rest at most 2,000 a block, the worst eight-operator voice (engine, and the spike's non-sine forms) at most 28,000, every case at most 10 % over `tools/cost/baseline.txt`; data misses with the device's caches at most 10 % and half a miss over `tools/cost/cache-baseline.txt`; the lane gate's ratios at most 2 % over their baseline (targets open, 2.9) | CI (aarch64, callgrind) | seen pass in the aarch64 container |
 | a voice the same bits at every lane width and slot; a note on its frame; a sound's events leave other sounds' bits alone | CI, all targets | seen pass: macOS arm64, Linux arm64, x86_64 under translation |
+| the shell through its C entry (in-process host): every required callback; a note the core's render bit for bit; sharing on bus ports; snapshot and state round trips; sleep and wake; voice limits; one preparation a stretch; MIDI, pedal, choke; reset; no allocation on the audio thread | CI, all targets | seen pass: macOS arm64, Linux arm64 (M6) |
+| no panic function reachable from the shell's audio-thread callbacks | CI (unix) | seen pass: macOS arm64, Linux arm64 (M6) |
+| the plugin builds and loads (entry, factory, one instance) | CI, all targets | seen pass: macOS arm64, Linux arm64 (M6) |
 
-To come: ABI-level tests of the shell with the aborting allocator; a hosted cost gate (the plugin
-through CLAP against the core alone); sample-rate equivalence (48 to 192 kHz against 44.1 kHz
+To come: sample-rate equivalence (48 to 192 kHz against 44.1 kHz
 behaviour); the device timing per milestone (hosted target about 30 µs a voice; the existing
 profile measured 110–140 µs a voice on the device; the M1 binaries are not yet run there).
 
@@ -856,7 +906,7 @@ Sizes are rough, in working sessions of the size of this round.
 | M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | done (section 3.4) |
 | M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | done (sections 3.5 and 3.6; the sound LFO's pan and filter destinations at M5, tempo sync not covered) |
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | done (section 3.7) but the output high-pass (it would change every sound's bits: section 8) |
-| M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | 3 |
+| M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | done (sections 2.10 and 3.8, `docs/plugin.md`) but a shell fuzz and UI roles beyond the output bus |
 | | **the first converted sound set plays** | after M6, with the converter writing this engine's format | |
 | M7 | everything | controller-set switches and sensitivities (as decided), micro tuning, the partial items of section 1.5 re-measured, the known-differences register | 2–3 |
 
@@ -872,8 +922,13 @@ Sizes are rough, in working sessions of the size of this round.
 - The voice pool size an instance (the existing profile: 128 shared by every sound).
 - The 10.3 Hz first-order output high-pass (section 1.5, the reference's): not built at M5, as it
   changes every sound's output (the golden hashes); in the engine, or the platform's mixer?
-- The lane gate's one-voice ratio after M5 (2.574 against 2.509 + 2 %): the right channel's copy
-  and the filter and pan tests a step cost a voice alone 2.2 % (section 3.7).
+- The lane gate's one-voice ratio: back under its limit at M6 (2.552 against 2.559, section 3.8),
+  with a margin of 0.3 % that a change of code layout alone can use up; raise the baseline, or keep
+  it?
+- The voice cost the plugin reports: the plans' instructions stated at an assumed 1,000 a
+  microsecond until the device's timing gives the figure (`docs/plugin.md`).
+- The shell's overhead a block (about 6,300-6,800 instructions with voices, 2,100 more than the
+  core at rest when awake with nothing to play): worth a pass of its own?
 
 Provisional decisions taken at M1 (conservative defaults, each open to a later ruling):
 

@@ -22,6 +22,10 @@ portamento, bend, the voice and sound LFOs) is
 evaluated every 16 frames, the increments ramped linearly across a step while something moves them
 (docs/design.md, 2.3); the pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 
+At M6 the plugin (`docs/plugin.md`) offers every parameter below as a CLAP parameter with its id and
+plays each as the core does; what the plugin itself does not cover (the controllers other than the
+pedal and bend, note expressions, parameter modulation) is listed there.
+
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|
 | `random_pan` | 0 | played | 0 to 127 (0) | uniform within depth / 2 positions either way, a draw a note from the sound's own source (only when the depth is above 0); positions add (alternate, scaling, random) and are held within -64..+63, then the pan law: the near side keeps full level (no dip at the centre), the far side falls by the measured table every 4 positions (-0.39 dB at 8, -6.41 at 32, -17.70 at 48, -45.55 at 60, silent from 63); a sound with no pan renders the same bits in both channels; existing profile: the pan law and scaling pan 75 of 76 within 0.5 dB on the far side; random pan's narrower spread at 127 and left lean not modelled (inherited); the engine plays the law (tests) |

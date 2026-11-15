@@ -56,6 +56,10 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 | Key-on delay | whole 64-sample blocks at 44.1 kHz | the same time, to the frame at every rate; at most 32 notes an instance waiting (more end at once); in mono and legato playing the note is handled when it starts | finer than the reference's blocks; mono and legato with a delay unmeasured |
 | Key-on delay tempo sync | 1/16 to 8 beats at the host's tempo | not played: the delay plays its time (reported as not covered) | the core has no tempo input |
 | Sound LFO destinations 0-69 | the insertion effects' parameters | not played (reported as not covered) | the engine has no effects |
+| Parameter changes inside a block (the plugin) | not measured | a block's values for a sound take effect together at the start of its stretch (at most 128 frames), not at their frames | one preparation a stretch instead of one an event (about 17,200 instructions each) |
+| Controllers and note expressions (the plugin) | the controller sets, aftertouch and the part's volume act on the sound | the sustain pedal and pitch bend played; CC 1, 2, 4, 11, 65-67, pressure and the CLAP volume and tuning expressions accepted, not played | the controller sets wait for M7; the core has no per-note gain |
+| Pedal and bend after a sound change (the plugin) | per part | sent to the sound the channel selects now; notes left sounding on the previous sound keep its last values | the channel addresses one sound at a time |
+| Note-on velocity 0 (the plugin) | MIDI velocity 0 is a note off (as here) | a CLAP note on with velocity 0 plays at velocity 1 | a CLAP note on is always a note |
 | A parameter changed while a sound plays | not measured | from the next control step for what moves, the next note for what a note keeps; a change of the operators heard, their forms, the feedback path, mono or key assign waits until the sound is silent | a voice's state stays valid |
 
 ## Adopted from the reference where the existing profile departs from it

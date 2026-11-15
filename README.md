@@ -24,19 +24,22 @@ What exists:
   width), tables, the operator forms (`forms`: Q14 tables written by the build script
   from the measured data), and the M0 voice-kernel spike (`spike`).
 - `tools/fmbench`: the engine's and the spike's cost cases, `fmbench time` (the device timing
-  tool), `fmbench check`, `fmbench coverage SOUND`.
+  tool), `fmbench check`, `fmbench coverage SOUND`; `fmhost`, the plugin's cost through CLAP.
 - `tools/cost/cg.sh`: instructions a voice-block on aarch64 under callgrind, and data misses with
   the device's caches, gated against `tools/cost/baseline.txt` and `cache-baseline.txt`, and the
   lane gate (a voice's cost with few voices a sound).
-- `tools/check-no-panic.sh`: the link-time proof that the block path has no panic path.
-- `crates/fm-clap`: the plugin's identity only. The shell is not built.
+- `tools/check-no-panic.sh`: the link-time proof that the block path, and everything the plugin's
+  audio-thread callbacks run, has no panic path.
+- `crates/fm-clap`: the CLAP plugin `org.oscairn.fm2` (`docs/plugin.md`); `tools/load-plugin.py`
+  loads a built one as a host would.
 
-What does not exist yet: pitch envelopes and pitch modulation, LFO modulation, the
-macros, level scaling, the filter, pan, the CLAP plugin. See `docs/design.md`, section 7.
+What does not exist yet: the controller sets and micro tuning (M7), the output high-pass, tempo
+sync, packaging. See `docs/design.md`, section 7.
 
 ## Build and test
 
 ```sh
+git submodule update --init       # third_party/oscairn-clap, the platform's bindings (pinned)
 cargo test --workspace            # laws, format, engine (fuzz, native against scalar, golden render), spike
 cargo test -p fm-core --features scalar
 sh tools/check-no-panic.sh        # unix
