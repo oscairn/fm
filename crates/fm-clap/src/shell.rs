@@ -730,8 +730,14 @@ impl Plugin {
 
     /// One stretch of `n` frames from `at`: the core renders it, the outputs take it.
     fn render(&self, a: &mut Audio, ports: &Ports, ring: *const *mut f32, at: usize, n: usize, out: Option<&Out>) {
+        // (only the sounds the core renders: each slot is a cache line of its own)
+        let ev = a.events.e.get(..a.events.n).unwrap_or(&[]);
+        let playing = ev.iter().fold(a.engine.playing(), |m, e| m | bit(e.sound));
         let mut bus = [0u8; SOUNDS];
         for ((b, slot), s) in bus.iter_mut().zip(&self.slots).zip(0..SOUNDS as u8) {
+            if playing & bit(s) == 0 {
+                continue;
+            }
             let to = usize::from(slot.bus.load(Relaxed));
             *b = if to == 0 && !ring.is_null() && slot.channels.load(Relaxed) == 0 {
                 if a.notes.fading & bit(s) != 0 {

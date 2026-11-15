@@ -1331,6 +1331,13 @@ impl Engine {
             .filter(|l| l.used != 0)
     }
 
+    /// The sounds with a voice or a note waiting out its key-on delay, a bit each: with the sounds
+    /// of a block's events, the sounds [`Engine::render_buses`] renders.
+    pub fn playing(&self) -> u8 {
+        let m = self.live().fold(0, |m, l| m | bit(usize::from(l.sound)));
+        (self.delayed.iter().take(self.delayed_n)).fold(m, |m, d| m | bit(usize::from(d.0)))
+    }
+
     /// Whether a voice, a kept mono key or a delayed note of `sound` sounds.
     fn busy(&self, sound: usize) -> bool {
         self.live().any(|l| usize::from(l.sound) == sound)
