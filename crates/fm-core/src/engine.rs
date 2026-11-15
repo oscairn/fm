@@ -435,7 +435,7 @@ impl Prepared {
             let level = (o(op, Op::Level, 0) + m(Common::MacroDepth) / fb_div).clamp(0, 99);
             // an operator that boxes can raise is prepared at the top they reach; the boxes' steps
             // lower it from there (docs/design.md, 3.9)
-            let top = (level + up.get(op).copied().unwrap_or(0)).min(99);
+            let top = level.saturating_add(up.get(op).copied().unwrap_or(0)).min(99);
             if let Some(l) = p.levels.get_mut(op) {
                 *l = (level as u8, top as u8);
             }
@@ -1023,7 +1023,9 @@ impl Lane {
     }
 
     /// The output of a step of `n` frames times each voice's gain (its note's volume times
-    /// `want`), ramped linearly from the last step's.
+    /// `want`), ramped linearly from the last step's. (Not inlined: inlined, it cost a voice alone
+    /// 0.9 % with no controller at work, the lane gate's margin.)
+    #[inline(never)]
     fn out_gain<const L: usize, V: F4<L>>(&mut self, want: f32, n: usize, y: &mut [[f32; L]; STEP]) {
         let to = V::load4(&self.vol) * V::splat(want);
         let mut g = V::load4(&self.og);
@@ -1959,7 +1961,8 @@ impl Engine {
             }
             let t = boxes::steps(&p.sound, &src);
             let carriers = u32::from(p.plan.carriers);
-            for (op, ((&(level, top), st), l)) in p.levels.iter().zip(t.level).zip(m.lvl.iter_mut()).enumerate() {
+            let ops = (0..OPS).zip(p.levels.iter().zip(t.level.iter()).zip(m.lvl.iter_mut()));
+            for (op, ((&(level, top), &st), l)) in ops {
                 if (level == top && st == 0) || !has(u32::from(p.plan.live), op) {
                     continue;
                 }
@@ -1970,7 +1973,7 @@ impl Engine {
                         laws::modulator_level_db(l)
                     }
                 };
-                let now = (i32::from(level) + st).clamp(0, 99);
+                let now = i32::from(level).saturating_add(st).clamp(0, 99);
                 *l = ((db(now) - db(i32::from(top))) * DPD).max(f64::from(FLOOR) * 2.0) as f32;
                 m.lvl_on = true;
             }

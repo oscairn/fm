@@ -142,7 +142,7 @@ impl Box {
     /// Box `n` of `s`, if the engine plays it (a destination it has, a source it receives, a
     /// ratio), and why not otherwise (`None`: switched off or no ratio).
     fn read(s: &Sound, n: usize) -> Result<Box, Option<&'static str>> {
-        let g = |k: usize| s.get(BOX_BASE + BOX_FIELDS * n + k);
+        let g = |k: usize| s.get(BOX_BASE.wrapping_add(BOX_FIELDS.wrapping_mul(n)).wrapping_add(k));
         let (src, dst, ratio) = (g(0), g(1), g(2));
         if dst == 0 || ratio == 0 {
             return Err(None);
@@ -195,7 +195,7 @@ pub fn not_played(s: &Sound, n: usize) -> Option<&'static str> {
     match Box::read(s, n) {
         Err(why) => why,
         Ok(_) => {
-            let g = |k: usize| s.get(BOX_BASE + BOX_FIELDS * n + k);
+            let g = |k: usize| s.get(BOX_BASE.wrapping_add(BOX_FIELDS.wrapping_mul(n)).wrapping_add(k));
             curve(g(4), g(5), g(6), g(7))
                 .is_none()
                 .then_some("not covered (a curve not measured: played as linear)")
@@ -217,12 +217,12 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     for b in boxes(s) {
         let k = b.steps(src.get(b.src).copied().unwrap_or(0.0));
         match b.dest {
-            Dest::Cutoff => t.cutoff += k,
-            Dest::Resonance => t.resonance += k,
+            Dest::Cutoff => t.cutoff = t.cutoff.saturating_add(k),
+            Dest::Resonance => t.resonance = t.resonance.saturating_add(k),
             Dest::Level => {
                 for (op, l) in t.level.iter_mut().enumerate() {
                     if b.reaches(s, op) {
-                        *l += k;
+                        *l = (*l).saturating_add(k);
                     }
                 }
             }
@@ -237,11 +237,11 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
 
 /// The most the boxes can raise each operator's level, in steps (within one span).
 pub fn reach(s: &Sound) -> [i32; OPS] {
-    let mut up = [0; OPS];
+    let mut up = [0i32; OPS];
     for b in boxes(s) {
         for (op, u) in up.iter_mut().enumerate() {
             if b.reaches(s, op) {
-                *u += b.up();
+                *u = (*u).saturating_add(b.up());
             }
         }
     }

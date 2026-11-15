@@ -973,7 +973,7 @@ impl Voices {
         let rt = Rate::new(rate);
         // the boxes' cutoff within the cutoff's range
         let hz = if f.slfo_cut != 0.0 || bx.0 != 0.0 {
-            f.cutoffs(sv * f.slfo_cut + bx.0.clamp(-f.value, 1023.0 - f.value))
+            f.cutoffs(sv * f.slfo_cut + bx.0.max(-f.value).min(1023.0 - f.value))
         } else {
             f.hz
         };
