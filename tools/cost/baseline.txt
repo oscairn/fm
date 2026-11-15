@@ -55,6 +55,12 @@ fm-s5-v2 28139
 fm-s8-v1 35665
 fm-s8-v2 28099
 fm-s1-v5 19004
+# the plugin through CLAP (fmhost): asleep and awake at rest a block, eight voices of one sound and one
+# in each of five sounds a voice-block (docs/plugin.md; the core alone: fm-rest, fm-r12-8-v8, fm-s5-v1)
+hosted-sleep 1148
+hosted-idle 3291
+hosted-v8 15824
+hosted-s5 38197
 # The lane gate (tools/cost/cg.sh check, at most 2 % over): one voice alone and two voices of a sound
 # against a voice of 32 (fm-s1-v1, fm-s1-v2 against fm-r12-8), one voice in each of five sounds
 # against five voices in one (fm-s5-v1 against fm-s1-v5). Reached, not the targets (1.5, 1.25 and

@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The cost cases' sounds, shared by fmbench and fmhost.
+
+/// Operator `o`'s (1-8) form, spread and formant in a cost case: `mixed` puts the eight on eight
+/// different tables (the worst case for the cache); `res` is the costliest kernel.
+fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
+    const MIXED: [(usize, usize); 8] = [(1, 0), (2, 3), (3, 5), (4, 7), (5, 2), (6, 6), (1, 7), (4, 1)];
+    match forms {
+        "all" => (1, 3, 0),
+        "odd" => (3, 3, 0),
+        "res" => (5, 7, 3),
+        "mixed" => (MIXED[o - 1].0, MIXED[o - 1].1, 4 + 3 * o),
+        _ => (0, 0, 0),
+    }
+}
+
+/// A cost case's sound, in the text form (fmbench's `case_sound` says what each case is).
+pub fn case_text(routing: u32, ops: u32, forms: &str) -> String {
+    // FORMS+fT: filter type T (the stored value) on the case, its envelope moving; FORMS+fx: the
+    // dual band-stop with the envelope, the voice LFO on the cutoff and the sound LFO on cutoff,
+    // resonance and pan (the costliest filter); FORMS+pan: alternate and random pan
+    let (forms, post) = forms.split_once('+').unwrap_or((forms, ""));
+    let pitch = forms == "pitch";
+    let mut t = format!(
+        "fm-sound/1\nalgorithm={routing} feedback=7 portamento={}\n",
+        u8::from(pitch)
+    );
+    let peg = "pitch_eg_level_initial=-50 pitch_eg_level_attack=50 pitch_eg_time_attack=60";
+    if pitch {
+        t += &format!("portamento_time=100 {peg}\n");
+    }
+    let m = "scaling_low_depth=40 scaling_high_depth=40 scaling_high_curve=2 lfo_pitch_offset=5 lfo_amp_offset=5";
+    if forms == "slfo" {
+        t += "slfo_wave=0 slfo_speed=40 slfo_delay=5 slfo_key_on_reset=1 slfo_dest1=75 slfo_depth1=20 \
+              slfo_dest2=78 slfo_depth2=30 slfo_dest3=77 slfo_depth3=16\n";
+    }
+    if forms == "mod" {
+        t += "lfo_wave=4 lfo_speed_range=0 lfo_speed=40 lfo_delay=5 lfo_pitch_depth=20 lfo_amp_depth=30\n";
+        for o in 1..=8 {
+            t += &format!("op{o}.{}\n", m.replace(' ', &format!(" op{o}.")));
+        }
+    }
+    if let Some(f) = post.strip_prefix('f') {
+        let all = f == "x";
+        if all {
+            t += "lfo_wave=0 lfo_speed=40 lfo_filter_depth=30\n";
+        }
+        let (kind, gain) = match f {
+            "x" => ("17", 255),
+            "gain" => ("21", 200),
+            k => (k, 255),
+        };
+        t += &format!(
+            "filter_type={kind} cutoff=600 resonance=60 hpf_cutoff=200 distance=24 filter_gain={gain} \
+             filter_eg_time_attack=100 filter_eg_level_attack=40 filter_eg_depth=40\n"
+        );
+        if all {
+            t += "slfo_wave=0 slfo_speed=40 slfo_dest1=70 slfo_depth1=40 slfo_dest2=72 slfo_depth2=10 \
+                  slfo_dest3=73 slfo_depth3=20\n";
+        }
+    }
+    if post == "pan" {
+        t += "random_pan=64 alternate_pan=32\n";
+    }
+    for o in 1..=8 {
+        let level = if o > 8 - ops { 99 } else { 0 };
+        let (f, s, r) = case_form(forms, o as usize);
+        t += &format!(
+            "op{o}.level={level} op{o}.coarse={} op{o}.eg_time_decay1=60 op{o}.eg_level_decay1=0 \
+             op{o}.form={f} op{o}.spread={s} op{o}.formant={r}\n",
+            o % 4
+        );
+        if pitch {
+            t += &format!("op{o}.{}\n", peg.replace(' ', &format!(" op{o}.")));
+        }
+    }
+    t
+}

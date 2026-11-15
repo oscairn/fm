@@ -15,7 +15,13 @@
 //!                                the voice-kernel spike (docs/design.md, "The spike")
 //!   fmbench footprint 0 x x FORM the spike's bytes a lane touches a block
 //!
+//! The plugin's cost through CLAP is fmhost's (src/bin/fmhost.rs), a binary of its own so that
+//! linking the plugin leaves this one's code as it is.
+//!
 //! Under callgrind, `--toggle-collect='fmbench_render*'` counts only the rendering (tools/cost/cg.sh).
+mod case;
+
+use case::case_text;
 use fm_core::coverage::not_covered;
 use fm_core::engine::{Engine, Event, Kind, NoteEnd, Prepared, BLOCK, SOUNDS, VOICES};
 use fm_core::simd::{scalar, Native, F4};
@@ -61,19 +67,6 @@ pub extern "C" fn fmbench_render_event(e: &mut Engine, out: &mut [[f32; BLOCK]; 
     );
 }
 
-/// Operator `o`'s (1-8) form, spread and formant in a cost case: `mixed` puts the eight on eight
-/// different tables (the worst case for the cache); `res` is the costliest kernel.
-fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
-    const MIXED: [(usize, usize); 8] = [(1, 0), (2, 3), (3, 5), (4, 7), (5, 2), (6, 6), (1, 7), (4, 1)];
-    match forms {
-        "all" => (1, 3, 0),
-        "odd" => (3, 3, 0),
-        "res" => (5, 7, 3),
-        "mixed" => (MIXED[o - 1].0, MIXED[o - 1].1, 4 + 3 * o),
-        _ => (0, 0, 0),
-    }
-}
-
 /// The cost case: the top `ops` operators at full level on `forms`, feedback 7, a slow decay 1 (so
 /// every envelope is in a segment that can change: the costlier path), held notes, no portamento;
 /// `pitch`: sines with both pitch envelopes moving and portamento gliding on every voice; `mod`:
@@ -81,65 +74,7 @@ fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
 /// on every operator; `slfo`: sines with the sound LFO (triangle, delay) on every operator's
 /// frequency, level and detune.
 fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
-    // FORMS+fT: filter type T (the stored value) on the case, its envelope moving; FORMS+fx: the
-    // dual band-stop with the envelope, the voice LFO on the cutoff and the sound LFO on cutoff,
-    // resonance and pan (the costliest filter); FORMS+pan: alternate and random pan
-    let (forms, post) = forms.split_once('+').unwrap_or((forms, ""));
-    let pitch = forms == "pitch";
-    let mut t = format!(
-        "fm-sound/1\nalgorithm={routing} feedback=7 portamento={}\n",
-        u8::from(pitch)
-    );
-    let peg = "pitch_eg_level_initial=-50 pitch_eg_level_attack=50 pitch_eg_time_attack=60";
-    if pitch {
-        t += &format!("portamento_time=100 {peg}\n");
-    }
-    let m = "scaling_low_depth=40 scaling_high_depth=40 scaling_high_curve=2 lfo_pitch_offset=5 lfo_amp_offset=5";
-    if forms == "slfo" {
-        t += "slfo_wave=0 slfo_speed=40 slfo_delay=5 slfo_key_on_reset=1 slfo_dest1=75 slfo_depth1=20 \
-              slfo_dest2=78 slfo_depth2=30 slfo_dest3=77 slfo_depth3=16\n";
-    }
-    if forms == "mod" {
-        t += "lfo_wave=4 lfo_speed_range=0 lfo_speed=40 lfo_delay=5 lfo_pitch_depth=20 lfo_amp_depth=30\n";
-        for o in 1..=8 {
-            t += &format!("op{o}.{}\n", m.replace(' ', &format!(" op{o}.")));
-        }
-    }
-    if let Some(f) = post.strip_prefix('f') {
-        let all = f == "x";
-        if all {
-            t += "lfo_wave=0 lfo_speed=40 lfo_filter_depth=30\n";
-        }
-        let (kind, gain) = match f {
-            "x" => ("17", 255),
-            "gain" => ("21", 200),
-            k => (k, 255),
-        };
-        t += &format!(
-            "filter_type={kind} cutoff=600 resonance=60 hpf_cutoff=200 distance=24 filter_gain={gain} \
-             filter_eg_time_attack=100 filter_eg_level_attack=40 filter_eg_depth=40\n"
-        );
-        if all {
-            t += "slfo_wave=0 slfo_speed=40 slfo_dest1=70 slfo_depth1=40 slfo_dest2=72 slfo_depth2=10 \
-                  slfo_dest3=73 slfo_depth3=20\n";
-        }
-    }
-    if post == "pan" {
-        t += "random_pan=64 alternate_pan=32\n";
-    }
-    for o in 1..=8 {
-        let level = if o > 8 - ops { 99 } else { 0 };
-        let (f, s, r) = case_form(forms, o as usize);
-        t += &format!(
-            "op{o}.level={level} op{o}.coarse={} op{o}.eg_time_decay1=60 op{o}.eg_level_decay1=0 \
-             op{o}.form={f} op{o}.spread={s} op{o}.formant={r}\n",
-            o % 4
-        );
-        if pitch {
-            t += &format!("op{o}.{}\n", peg.replace(' ', &format!(" op{o}.")));
-        }
-    }
-    Prepared::new(&Sound::from_text(&t).expect("case sound"))
+    Prepared::new(&Sound::from_text(&case_text(routing, ops, forms)).expect("case sound"))
 }
 
 /// `voices` held notes in each of `sounds` sounds (all the same case).

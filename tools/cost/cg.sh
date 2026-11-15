@@ -24,10 +24,12 @@ B="$OUT/target/release/fmbench"
 # callgrind on fmbench with an empty environment, from the binary's own directory: the stack's
 # place, and with it the cache misses, then does not depend on the caller's environment or paths
 vg() { (cd "$OUT/target/release" && env -i valgrind --tool=callgrind --cache-sim=yes --toggle-collect='fmbench_render*' "$@"); }
-run() {  # name voices then fmbench's arguments after VOICES BLOCKS (the engine's: e VOICES BLOCKS ...)
-  n=$1; v=$2; shift 2
-  if [ "$1" = e ]; then shift; set -- engine "$v" $BLOCKS "$@"; else set -- "$v" $BLOCKS "$@"; fi
-  vg --callgrind-out-file="$OUT/$n.cg" ./fmbench "$@" > "$OUT/$n.txt" 2> "$OUT/$n.err"
+run() {  # name voices then fmbench's arguments after VOICES BLOCKS (the engine's: e ..., the plugin's: h ...)
+  n=$1; v=$2; shift 2; bin=./fmbench
+  if [ "$1" = e ]; then shift; set -- engine "$v" $BLOCKS "$@"
+  elif [ "$1" = h ]; then shift; bin=./fmhost; set -- "$v" $BLOCKS "$@"
+  else set -- "$v" $BLOCKS "$@"; fi
+  vg --callgrind-out-file="$OUT/$n.cg" $bin "$@" > "$OUT/$n.txt" 2> "$OUT/$n.err"
   # events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw
   awk -v n="$n" -v v="$v" -v t="${TOTAL:-0}" -v b=$BLOCKS '/^summary:/ {
       d = (t > 0 ? t : (v > 0 ? v : 1)) * b
@@ -82,6 +84,13 @@ run fm-s1-v1-param 1 e 12 8 native sine 1 param
 # voices few a sound: 1 and 2 voices in each of 1, 5 and 8 sounds (a voice-block: by all the voices)
 for s in 1 5 8; do for v in 1 2; do TOTAL=$((s * v)); run "fm-s$s-v$v" "$v" e 12 8 native sine $s; done; done; TOTAL=
 run fm-s1-v5 5 e 12 8 native sine 1
+# the plugin through CLAP, a 128-frame block: at rest asleep and awake (an ignored controller), eight
+# held voices of one sound and one voice in each of five sounds (the core alone: fm-rest, fm-r12-8-v8
+# and fm-s5-v1)
+run hosted-sleep 0 h sleep
+run hosted-idle 0 h idle
+run hosted-v8 8 h voices
+run hosted-s5 5 h sounds
 for f in table window; do echo "footprint $f: $("$B" footprint 0 x x $f)"; done
 } | tee "$OUT/summary.txt"
 cache() {  # name voices forms: the device's caches, routing 12 with eight operators
