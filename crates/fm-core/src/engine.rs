@@ -688,6 +688,8 @@ impl Engine {
             while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
         }
         let shed_step = self.shed_step;
+        // the operators' outputs in a step, at each width: each is written before it is read
+        let (mut y1, mut y4) = ([[[0.0f32; 1]; STEP]; OPS], [[[0.0f32; W]; STEP]; OPS]);
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0) {
             let Some(p) = self.sounds.get(usize::from(lane.sound)) else {
                 continue;
@@ -700,8 +702,8 @@ impl Engine {
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
-                    1 => step::<1, scalar::F<1>>(lane, p, shed_step, end, chunk),
-                    _ => step::<W, V>(lane, p, shed_step, end, chunk),
+                    1 => step::<1, scalar::F<1>>(lane, p, shed_step, end, chunk, &mut y1),
+                    _ => step::<W, V>(lane, p, shed_step, end, chunk, &mut y4),
                 }
             }
         }
@@ -716,14 +718,15 @@ fn step<const L: usize, V: F4<L>>(
     shed_step: f32,
     end: &mut impl FnMut(NoteEnd),
     out: &mut [f32; STEP],
+    y: &mut [[[f32; L]; STEP]; OPS],
 ) {
     let (g0, dg) = envelopes::<L, V>(lane, p, shed_step, end);
     let mut vout = [[0.0f32; L]; STEP];
     // a sound with sines only runs the kernels without the forms' branches
     if p.plan.forms {
-        ops::<L, V, true>(lane, p, &g0, &dg, &mut vout);
+        ops::<L, V, true>(lane, p, &g0, &dg, y, &mut vout);
     } else {
-        ops::<L, V, false>(lane, p, &g0, &dg, &mut vout);
+        ops::<L, V, false>(lane, p, &g0, &dg, y, &mut vout);
     }
     // the voices in pairs, as four-wide (the missing ones' zeros change no bits)
     for (o, v) in out.iter_mut().zip(vout.iter()) {
@@ -757,22 +760,17 @@ fn envelopes<const L: usize, V: F4<L>>(
     let mut g0 = [[0.0; L]; OPS];
     let mut dg = [[0.0; L]; OPS];
     let mut bound = V::splat(0.0);
-    for i in (0..OPS).filter(|&i| has(u32::from(p.plan.live), i)) {
-        let (Some(lv), Some(&t), Some(&fall), Some(&rise), Some(&top), Some(gain), Some(g), Some(d)) = (
-            lane.lvl.get_mut(i),
-            lane.tgt.get(i),
-            lane.fall.get(i),
-            lane.rise.get(i),
-            lane.top.get(i),
-            lane.gain.get_mut(i),
-            g0.get_mut(i),
-            dg.get_mut(i),
-        ) else {
+    let ops = (lane.lvl.iter_mut().zip(lane.gain.iter_mut()))
+        .zip(g0.iter_mut().zip(dg.iter_mut()))
+        .zip((lane.tgt.iter().zip(lane.fall.iter())).zip(lane.rise.iter().zip(lane.top.iter())))
+        .zip(0..OPS);
+    for ((((lv, gain), (g, d)), ((t, fall), (rise, top))), i) in ops {
+        if !has(u32::from(p.plan.live), i) {
             continue;
-        };
-        let (l, t) = (V::load4(lv), V::load4(&t));
-        let up = ((V::load4(&top) - l) * V::load4(&rise)).max(V::splat(MIN_RISE)) + l;
-        let l2 = V::select(l.ge(t), (l - V::load4(&fall)).max(t), up.min(t));
+        }
+        let (l, t) = (V::load4(lv), V::load4(t));
+        let up = ((V::load4(top) - l) * V::load4(rise)).max(V::splat(MIN_RISE)) + l;
+        let l2 = V::select(l.ge(t), (l - V::load4(fall)).max(t), up.min(t));
         l2.store4(lv);
         let target = l2.exp2() * fade;
         let g_last = V::load4(gain);
@@ -825,21 +823,21 @@ fn ops<const L: usize, V: F4<L>, const FORMS: bool>(
     p: &Prepared,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
+    y: &mut [[[f32; L]; STEP]; OPS],
     vout: &mut [[f32; L]; STEP],
 ) {
     let plan = &p.plan;
-    let mut y = [[[0.0f32; L]; STEP]; OPS];
     let (lo, hi) = match plan.feedback {
         Feedback::Loop { to, from } => (usize::from(to), usize::from(from)),
         _ => (OPS, OPS),
     };
     for i in (0..OPS).filter(|&i| has(u32::from(plan.live), i)) {
         if FORMS && i == lo && plan.loop_forms {
-            interleaved_forms::<L, V>(lane, p, g0, dg, &mut y, lo, hi);
+            interleaved_forms::<L, V>(lane, p, g0, dg, y, lo, hi);
         } else if i == lo {
-            interleaved::<L, V, false>(lane, p, g0, dg, &mut y, lo, hi);
+            interleaved::<L, V, false>(lane, p, g0, dg, y, lo, hi);
         } else if i < lo || i > hi {
-            single::<L, V, FORMS>(lane, p, g0, dg, &mut y, i);
+            single::<L, V, FORMS>(lane, p, g0, dg, y, i);
         }
         if has(u32::from(plan.carriers), i) {
             if let Some(out) = y.get(i) {
