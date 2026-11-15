@@ -229,7 +229,7 @@ several sounds (they are summed sound by sound, no longer lane by lane).
 | Modulator | Rate and why it is safe |
 |---|---|
 | Amplitude envelopes (8 a voice), level scaling, velocity, voice and sound LFO amplitude, macros on levels | a target gain a step, ramped linearly a frame (implemented in the spike). 16 frames is 0.33 ms at 48 kHz: the sibling engine measured its reference with no artefact at 16/32/64-sample periods above −55 dB and its own 16-frame ramps at −68 dB on the fastest sweep. Exception to check: segments faster than a step (instant times) become one ramp; the reference's own fastest segments read slower than the existing tables, so a per-segment check is a gate of M1 |
-| Operator and common pitch envelopes, key follow, bend, portamento, voice and sound LFO pitch, random pitch, detune, ratio shift | a phase increment a step. The phase is continuous, so a pitch step is a frequency step, not a waveform discontinuity; a 16-frame staircase of a 6 Hz vibrato is 500 steps a cycle. The existing profile steps operator pitch envelopes per sample; to measure at M3 whether the step is audible on an operator modulating at a high index (a pitch step there moves many sidebands) and ramp the increment if it is |
+| Operator and common pitch envelopes, key follow, bend, portamento, voice and sound LFO pitch, random pitch, detune, ratio shift | as built at M3: what a note keeps (key follow, velocity, random pitch, detune) is in its increments from note-on, on the grid; what moves is evaluated a step, each increment its note's times 2 to the octaves that move it (one vector `exp2` an operator, 0.15 cent at worst). While a pitch envelope moves, the increments ramp linearly across the step from their value at its start to the law's at its end (kernels instantiated with and without the ramp; a lane whose pitch stands still runs them without it and skips the pitch work after a test of three flags); bend and portamento change at a step's start (an event's frame, the glide clock's tick), as their laws step. Against the per-sample law: the ramp's frequency is within 1.2 cents at the fastest operator pitch envelope (times 0-2, 387 cents/ms, 129 cents a step), within 0.65 cent from time 3, within 0.002 cent at the fastest common one (14 cents/ms) (computed from the chord of the exponential); the fastest sweep (4800 cents in 12 ms, key 93) leaves the phase 0.0022 cycles off the law's (0.26 cycles with a staircase instead of the ramp: a test). On a modulator at the highest index (4 pi) the momentary frequency error is the same share (at most 7e-4) and that phase error becomes a carrier phase offset of at most 4 pi × 0.0022 × 2 pi ≈ 0.17 rad after the fastest 4-octave sweep, constant once it ends. Within the existing profile's 1-cent pitch tolerance except during the fastest operator pitch envelope segments (12 ms at most), so no per-sample pitch is paid for |
 | Sound and voice LFOs | evaluated a step. At 48 kHz that is 3,000 values a second: up to about 150 Hz that is 20 a cycle. The extended speed range reaches higher; its top rate is to be read from the measured rate table at M4, and above 150 Hz the LFO moves to audio rate for that sound (a plan choice) |
 | Filter coefficients and the filter envelope | a step, coefficients ramped (the existing profile: once per 64 samples, its instant envelope segments then take 1.45 ms; the reference's arrive about 2 ms after them) |
 | Pan (random, alternate, scaling, sound LFO pan) | per note, and the LFO's a step, ramped |
@@ -329,7 +329,7 @@ installed by the audio thread by a copy, with no lock.
   The order is the platform's (`voice-budget.h`): never a held voice of a sound at or under its
   reserve (unless for that sound's own note); released before held; the new note's own sound
   before others; lower priority before higher; the quietest (the end rule's bound), then the
-  oldest. No mono yet (M3), so its rule has nothing to protect. A note that gets no voice (every
+  oldest; never a held mono key's voice (M3). A note that gets no voice (every
   candidate protected, or no free slot while fades are under way) ends at once; every note-on is
   answered by exactly one end (the fuzz test). A sound is installed only while none of its voices
   sounds (`choke` fades them first).
@@ -581,6 +581,44 @@ it to another slot and between the widths); the golden hashes unchanged; the fuz
 scalar, every note ending once) with its notes as timed events every other block; a note starting on
 its frame; another sound's bits unchanged by a sound's events.
 
+### 3.4 Pitch at M3 (measured)
+
+Same tool and settings. As built: the laws in `laws.rs` (the existing profile's measured tables;
+bend from the documented ranges only); per voice a pitch state in the lane (`Pitch`: each
+operator's increment from the pitch the note keeps, the operator envelopes' levels with their
+segments as bit masks, the common envelope's level, segment and the note's factors, the glide left
+and its step), 348 bytes a lane (87 a voice), read only while a voice's pitch moves; three flags
+read every step beside the lane's other step flags. A segment's rate is now made when it is entered
+(from the note's key) instead of kept for every segment: 512 bytes off a lane, the same bits. A
+lane is 1,684 bytes (about 1,772 before M3); the hot set 9,368 bytes (the first-level budget test:
+at most 16 KB). The engine keeps each sound's bend, latest note, random source and a mono sound's
+16 kept keys, and one glide clock (9.977 ms).
+
+Mono: one voice a sound, last-note priority; with portamento a note whose predecessor's key is
+down takes over its voice (legato), otherwise the sounding note fades out over 13.3 ms by the
+square of the share left while the new one starts (also key assign single's retrigger); a key
+taken over is kept and returned to when the newer key is released. Every note ends exactly once: a
+voice whose note lives on as a kept key does not report the end when it fades; a kept key's note
+ends at its release, when a 17th is kept, or at `choke`. The fuzz plays random sounds with every
+pitch parameter (mono, portamento, both envelopes, random pitch, bend ranges) and bend events,
+native against scalar bit for bit, every note ending once.
+
+Cost, instructions a voice-block (at M3's start / after): routing 12 sines at 32 voices 14,626 /
+14,581; one voice alone 36,693 / 37,007; eight mixed forms 20,358 / 20,317; at rest 1,186 / 1,215 a
+block; the worst eight-operator plan 23,021 / 23,021 (gate 28,000); the lane gate's ratios 2.509 /
+2.538, 1.956 / 1.959, 1.881 / 1.894 (2 % allowed). New cases, both pitch envelopes moving and
+portamento gliding on every voice: 18,332 at 32 voices (25 % over sines: the ramped kernels, the
+increments made each step, the envelopes) and 47,065 for one voice alone (27 % over). Sounds that use
+no pitch feature render the same bits as before M3 (the golden hashes unchanged).
+
+The cache figures (`tools/cost/cache-baseline.txt`) moved with the binary's layout: the same engine
+read 61.0 and 90.7 first-level misses a voice-block at cache-mixed-25 in two fmbench builds that
+differ only by an added cost case. The sine and the form tables are now one static aligned to the
+first-level cache's way (8 KB), and callgrind runs with an empty environment: two builds differing
+by unrelated cases read within 3 % of each other at every case. The aligned placement's figures are
+higher than the earlier lucky ones (sines at one voice 11.0 against 2.0; mixed forms 83.9 to 142.4
+against 55.5 to 105.8); the device's own placement is not known either way.
+
 ## 4. Audio-thread safety, and how it is proven
 
 - **No allocation**, by construction: the core is `#![no_std]` and does not link the `alloc` crate;
@@ -654,7 +692,7 @@ Sizes are rough, in working sessions of the size of this round.
 | M0 | this round | design, scaffold, vector type, spike, cost and panic gates | done |
 | M1 | the voice | sound format and parameter table (all ids), coverage report, plans, the 88 routings as data, per-sound pools, note on/off, end rule, shedding, sine operators with the measured level curves, amplitude envelopes and their time tables, feedback law, the pitch grid (ratio and fixed), device timing | done (section 3.1); frame-exact note starts since (section 2.3) |
 | M2 | waves | the six forms with spread and formant, tables from the measured amplitudes and phases, `i16` (Q14) storage, cost re-measured | done (section 3.2); a lane's cost follows its voice count in part (one voice one lane wide), the lane gate's targets open (section 3.3) |
-| M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | 2 |
+| M3 | pitch | operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono, key assign | done (section 3.4) |
 | M4 | modulators | voice LFO, sound LFO (all waves, destinations, user wave), the seven macros, level scaling, velocity, part offsets | 2–3 |
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | 2–3 |
 | M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | 3 |
@@ -682,5 +720,6 @@ Provisional decisions taken at M1 (conservative defaults, each open to a later r
   `docs/known-differences.md`.
 - The controller-set switches and the pitch and level controller sensitivities have their ids,
   ranges and defaults in the sound format now; their behaviour waits for M7.
-- Parameter defaults are the model's initial values, except portamento (off), so that a sound
-  without the parameter plays as before it existed.
+- Parameter defaults are the model's initial values. Portamento was off until M3 built it; it is
+  now the documented default, on (the reference also needs the performance's switch, off by
+  default: docs/known-differences.md), so a sound that sets nothing glides full-time at time 64.
