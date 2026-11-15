@@ -2032,8 +2032,10 @@ impl Engine {
                 m.lfo_speed = moved(Common::LfoSpeed, t.lfo_speed) as i16;
             }
             m.pitch = t.pitch as f32 / 1200.0;
-            for ((x, &st), &k) in m.op_pitch.iter_mut().zip(t.op_pitch.iter()).zip(p.op_sens.iter()) {
-                *x = st as f32 * k / 1200.0;
+            if p.op_pitch_box {
+                for ((x, &st), &k) in m.op_pitch.iter_mut().zip(t.op_pitch.iter()).zip(p.op_sens.iter()) {
+                    *x = st as f32 * k / 1200.0;
+                }
             }
         }
         m.on = m.gain != 1.0
@@ -2043,7 +2045,7 @@ impl Engine {
             || m.lfo_depths != p.lfo_depths
             || m.lfo_speed != p.lfo_speed.1
             || m.pitch != 0.0
-            || m.op_pitch.iter().any(|&x| x != 0.0);
+            || (p.op_pitch_box && m.op_pitch.iter().any(|&x| x != 0.0));
     }
 
     /// Starts shedding one note by the platform's voice-budget order, for a new note of `incoming`
@@ -2556,16 +2558,22 @@ fn step<const L: usize, V: F4<L>>(
     });
     let bx = m.filter(|m| m.lvl_on).map(|m| &m.lvl);
     let (g0, dg) = envelopes::<L, V>(lane, p, c, n, end, lfo.as_ref().map(|l| &l.1), sv, bx);
-    // the sound LFO's pitch (a sound without it skips this)
-    let sp = (p.slfo & SLFO_PITCH != 0).then(|| slfo_pitch::<L>(lane, p, sv));
+    // the sound LFO's pitch and the boxes' on the operators (a sound without either skips this)
+    let sp = (p.slfo & SLFO_PITCH != 0 || c.op_pitch.is_some()).then(|| {
+        let mut sp = if p.slfo & SLFO_PITCH != 0 {
+            slfo_pitch::<L>(lane, p, sv)
+        } else {
+            [[0.0; W]; OPS]
+        };
+        if let Some(o) = c.op_pitch {
+            for (s, &b) in sp.iter_mut().zip(o.iter()) {
+                s.iter_mut().for_each(|x| *x += b);
+            }
+        }
+        sp
+    });
     // a lane whose pitch does not move skips this
-    let ramp = if lane.moving != 0
-        || lane.jump
-        || lane.bend != c.bend
-        || p.lfo_pitch_on
-        || sp.is_some()
-        || c.op_pitch.is_some()
-    {
+    let ramp = if lane.moving != 0 || lane.jump || lane.bend != c.bend || p.lfo_pitch_on || sp.is_some() {
         pitch::<L, V>(lane, p, c, t, n, lfo.as_ref().map_or(&[0.0; W], |l| &l.0), sp.as_ref())
     } else {
         None
@@ -2748,11 +2756,7 @@ fn pitch<const L: usize, V: F4<L>>(
         }
     }
     let moves = |seg: u8| matches!(seg, ATTACK | DECAY1 | DECAY2 | RELEASE);
-    if pt.op_attack | pt.op_decay == 0
-        && !pt.c_seg.iter().take(L).any(|&s| moves(s))
-        && !p.lfo_pitch_on
-        && sp.is_none()
-        && c.op_pitch.is_none()
+    if pt.op_attack | pt.op_decay == 0 && !pt.c_seg.iter().take(L).any(|&s| moves(s)) && !p.lfo_pitch_on && sp.is_none()
     {
         lane.moving = gliding;
         return None;
@@ -2848,13 +2852,11 @@ fn incs<const L: usize, V: F4<L>>(
             m = m + V::load4(e);
         }
         if p.lfo_pitch_on && !fixed {
+            // (times the depth a box moves to, or 1)
             m = V::load4(lfo).mul_add(V::splat(at(&p.lfo_pitch, op) * c.lfo_depths.0), m);
         }
         if let Some(s) = sp.and_then(|s| s.get(op)) {
             m = m + V::load4(s);
-        }
-        if let Some(b) = c.op_pitch {
-            m = m + V::splat(at(b, op));
         }
         let base = V::U::load4(pt.base.get(op).unwrap_or(&[0; W]));
         // 2^m as 2^(m - 16) 2^16, within the vector exp2's range
