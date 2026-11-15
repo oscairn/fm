@@ -837,7 +837,13 @@ prepared at the top the boxes reach (its envelope levels, the attack's overshoot
 operators: a silent operator a box can raise is rendered), and the boxes' offset, the level law at
 (level + steps) against the law at that top (log2, at most 0), is added where the LFOs' losses are,
 so it rides the gain ramp of each step. The cutoff's values and the resonance's steps join the sound
-LFO's in the filter's step (coefficients ramped). Expression and the notes' volumes multiply the
+LFO's in the filter's step (coefficients ramped). The voice LFO's speed and depths: the stored value
+moved by the steps within 0-99 and played by its own law; a sound with a box on a depth keeps its
+operators' depth shares a unit of depth and multiplies them by the depth now (a sound without one by
+1, its bits unchanged); the speed's increment is made again when it moves. The sound's pitch joins
+the bend; an operator's frequency (its steps times its sensitivity / 7) is added to its pitch when
+the increments are made, which a sound with such a box does every step (the increments ramp across
+it). Expression and the notes' volumes multiply the
 lane's output after the filter, ramped linearly across a step (the lane's voices at once, not
 inlined: inlined, it moved a voice alone 0.9 % with no controller at work).
 
@@ -941,14 +947,14 @@ Sizes are rough, in working sessions of the size of this round.
 | M5 | filter and output | 19 filter types, filter envelope, pan (three kinds), key-on delay, output high-pass | done (section 3.7) but the output high-pass (it would change every sound's bits: section 8) |
 | M6 | the shell | the CLAP plugin: params, state, note and audio ports, sound snapshots, voice budget, memory, UI hints; allocation tests, fuzz, hosted cost gate | done (sections 2.10 and 3.8, `docs/plugin.md`) but a shell fuzz and UI roles beyond the output bus |
 | | **the first converted sound set plays** | after M6, with the converter writing this engine's format | |
-| M7 | everything | controller-set switches and sensitivities (as decided), micro tuning, the partial items of section 1.5 re-measured, the known-differences register | in part (section 3.9): the channel controllers, note expressions, the sostenuto pedal and the controller boxes on the operator level, cutoff and resonance; not the sensitivities, the other box destinations, the key controller boxes, micro tuning, the sound LFO's random speed |
+| M7 | everything | controller-set switches and sensitivities (as decided), micro tuning, the partial items of section 1.5 re-measured, the known-differences register | in part (section 3.9): the channel controllers, note expressions, the sostenuto pedal and the controller boxes on the operator level and frequency (with the pitch sensitivity), cutoff, resonance, the voice LFO's speed and depths and the pitch; not the level sensitivity, the other box destinations, the key controller boxes, micro tuning, the sound LFO's random speed |
 
 ## 8. Open questions
 
 - The controller boxes are in the engine (M7, section 3.9). Open: modulatable box destinations
   (`PARAM_MOD`) beside them, as the sibling engines offer; the box destinations without a law
-  (the operator frequency with the pitch sensitivity, the voice LFO's depths, the envelopes'
-  times): measure them, or play documented guesses; CC 65 (the portamento switch over a stored
+  (the voice LFO's filter depth, the envelopes' times, the part volume): measure them, or play
+  documented guesses; what the level controller sensitivity moves (not the level boxes); CC 65 (the portamento switch over a stored
   parameter).
 - Micro tuning: the engine's own scales, or the host's tuning?
 - The deliberate differences of section 1.5 (band-limiting, formant silence above Nyquist, no
