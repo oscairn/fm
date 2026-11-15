@@ -1944,10 +1944,11 @@ mod tests {
     #[test]
     fn hot_set_fits_half_the_l1() {
         use core::mem::size_of;
-        let scratch = size_of::<[[[f32; W]; STEP]; OPS]>() // operator outputs
+        let scratch = size_of::<[[[f32; W]; STEP]; OPS]>() // operator outputs, four-wide
+            + size_of::<[[[f32; 1]; STEP]; OPS]>() // and one-wide
             + size_of::<[[f32; W]; STEP]>() // modulation input
-            + 2 * size_of::<[[f32; W]; OPS]>() // gains and ramps
-            + size_of::<[[f32; W]; BLOCK]>(); // the lane's output
+            + 4 * size_of::<[[f32; W]; OPS]>() // gains, ramps, falls and rises
+            + size_of::<[[f32; W]; STEP]>(); // the lane's output in a step
         let hot = size_of::<Lane>() + scratch + size_of::<crate::tables::Table>();
         assert!(hot <= 16 * 1024, "{hot} B");
         // eight operators on eight different form tables: within the first-level cache by size
