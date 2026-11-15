@@ -350,8 +350,24 @@ pub enum Common {
     PegVelocity = 19,
     PegDepth = 20,
     PegTimeKeyFollow = 21,
+    LfoWave = 22,
+    LfoSpeed = 23,
+    LfoPhase = 24,
+    LfoDelay = 25,
+    LfoKeyOnReset = 26,
+    LfoPitchDepth = 27,
+    LfoAmpDepth = 28,
     Algorithm = 30,
     Feedback = 31,
+    LfoSpeedRange = 32,
+    LfoExtendedSpeed = 33,
+    MacroDepth = 34,
+    MacroRatio = 35,
+    MacroAttack = 36,
+    MacroDecay = 37,
+    MacroSustain = 38,
+    MacroRelease = 39,
+    MacroTexture = 40,
 }
 
 #[derive(Clone, Copy)]
@@ -368,6 +384,10 @@ pub enum Part {
     NoteShift = COMMON.len() as isize + FILTER.len() as isize + 9,
     VelocityDepth = COMMON.len() as isize + FILTER.len() as isize + 12,
     VelocityOffset = COMMON.len() as isize + FILTER.len() as isize + 13,
+    AttackOffset = COMMON.len() as isize + FILTER.len() as isize + 49,
+    DecayOffset = COMMON.len() as isize + FILTER.len() as isize + 50,
+    SustainOffset = COMMON.len() as isize + FILTER.len() as isize + 51,
+    ReleaseOffset = COMMON.len() as isize + FILTER.len() as isize + 52,
 }
 
 /// Operator parameters the engine reads, by their place in the operator's parameter list.
@@ -390,7 +410,10 @@ pub enum Op {
     EgHold = 22,
     EgTimeKeyFollow = 23,
     Level = 24,
+    Scaling = 25, // break point, low depth, high depth, low curve, high curve
     LevelVelocity = 30,
+    LfoPitchOffset = 31,
+    LfoAmpOffset = 32,
 }
 
 /// The index of operator `op`'s parameter `k` (+ `offset` for the multi-value ones).

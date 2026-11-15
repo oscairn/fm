@@ -53,13 +53,13 @@ pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 | `feedback` | 31 | played | 0 to 7 (0) | a modulator feeds back its own output: 2^(f - 9) cycles of phase per unit of the sum of its last two outputs; a carrier 0.18 of that, of its signal before the routing's level; existing profile: carrier within 0.4 dB, modulator harmonics 2-6 within 0.09 dB, 3 cases off by 2.5, 3.8 and 20 dB |
 | `lfo_speed_range` | 32 | M4 (modulators) | 0 to 1 (1) |  |
 | `lfo_extended_speed` | 33 | M4 (modulators) | 0 to 415 (60) |  |
-| `macro_depth` | 34 | M4 (modulators) | -99 to 99 (0) |  |
-| `macro_ratio` | 35 | M4 (modulators) | -99 to 99 (0) |  |
-| `macro_attack` | 36 | M4 (modulators) | -99 to 99 (0) |  |
-| `macro_decay` | 37 | M4 (modulators) | -99 to 99 (0) |  |
-| `macro_sustain` | 38 | M4 (modulators) | -99 to 99 (0) |  |
-| `macro_release` | 39 | M4 (modulators) | -99 to 99 (0) |  |
-| `macro_texture` | 40 | M4 (modulators) | -99 to 99 (0) |  |
+| `macro_depth` | 34 | played | -99 to 99 (0) | added to modulators' levels, divided by 1 + feedback (cut towards 0) on the operator that feeds back, per sound; existing profile: 12 of 12 without feedback, 0.02-1.25 dB with; the engine plays the law (test) |
+| `macro_ratio` | 35 | played | -99 to 99 (0) | ratio-mode modulators: a measured table at 9 ratios and 79 values, straight between both, at least 0.5, then on the grid; existing profile: up to 5.7 cents between measured points; fixed-mode operators unmeasured (not moved); the engine plays the law (test) |
+| `macro_attack` | 36 | played | -99 to 99 (0) | added to modulators' attack time values (0-99); existing profile: 44 of 48 simple probes, 4 of 24 on the wave probe (the envelope macros together); the engine plays the law (test) |
+| `macro_decay` | 37 | played | -99 to 99 (0) | added to modulators' decay 1 and decay 2 times; as macro_attack |
+| `macro_sustain` | 38 | played | -99 to 99 (0) | added to modulators' decay 2 levels; as macro_attack |
+| `macro_release` | 39 | played | -99 to 99 (0) | added to modulators' release times; as macro_attack |
+| `macro_texture` | 40 | played | -99 to 99 (0) | moves the forms of the carriers (below 0) or the modulators (above) along the measured path of form places, coming round past +-99, per sound; existing profile: extremes off by 16-25 dB, -99 by 22.6 dB, the wrap unmeasured (inherited); the engine plays the law (test) |
 | `filter_type` | 100 | M5 (filter and output) | 0 to 21 (21) |  |
 | `cutoff` | 101 | M5 (filter and output) | 0 to 1023 (1023) |  |
 | `cutoff_velocity` | 102 | M5 (filter and output) | -64 to 63 (0) |  |
@@ -144,10 +144,10 @@ pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 | `slfo_step15` | 246 | M4 (modulators) | -64 to 63 (0) |  |
 | `slfo_step16` | 247 | M4 (modulators) | -64 to 63 (0) |  |
 | `slfo_random_speed` | 248 | M4 (modulators) | 0 to 127 (0) |  |
-| `amp_eg_attack_offset` | 249 | M4 (modulators) | -64 to 63 (0) |  |
-| `amp_eg_decay_offset` | 250 | M4 (modulators) | -64 to 63 (0) |  |
-| `amp_eg_sustain_offset` | 251 | M4 (modulators) | -64 to 63 (0) |  |
-| `amp_eg_release_offset` | 252 | M4 (modulators) | -64 to 63 (0) |  |
+| `amp_eg_attack_offset` | 249 | played | -64 to 63 (0) | every operator's attack time times 2^(offset / 4), held within attack times 0-99's, a positive offset on carriers only; existing profile: within one time value from -12 to +26, faster below -12, sooner at +28 and +30 (up to 5.6 dB); the engine plays the law (test) |
+| `amp_eg_decay_offset` | 250 | played | -64 to 63 (0) | 1.5 time values a step (rounded) added to every operator's decay 1 and decay 2 times; existing profile: 18 of 18 offsets within 0.3 dB (with release); the engine plays the law (test) |
+| `amp_eg_sustain_offset` | 251 | played | -64 to 63 (0) | decay 2 level steps from a measured table at even offsets -22 to +32 (odd ones halfway, 1.5 a step beyond, unmeasured); existing profile: 1.2-2.3 dB off; the engine plays the law (test) |
+| `amp_eg_release_offset` | 252 | played | -64 to 63 (0) | as amp_eg_decay_offset, on release times; existing profile: -8 off by 1.0 dB |
 | `filter_eg_depth_offset` | 253 | M5 (filter and output) | -64 to 63 (0) |  |
 | `cutoff_offset` | 254 | M5 (filter and output) | -64 to 63 (0) |  |
 | `resonance_offset` | 255 | M5 (filter and output) | -64 to 63 (0) |  |
@@ -215,11 +215,11 @@ pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 | `opN.eg_time_hold` | 1000 + 100 op + 62 | played | 0 to 99 (0) | fitted time table; in whole 16-frame control steps (0.33 ms at 48 kHz); the engine within 2 % at times 30, 50, 70 (test) |
 | `opN.eg_time_key_follow` | 1000 + 100 op + 63 | played | 0 to 7 (0) | 8 steps a rate doubling, keys in groups of three around keys 64-69, every segment but the hold; existing profile: 90 of 151 within 3 % (the rest the fast-segment reading); the engine within 2 % at sensitivity 7, key 105 (test) |
 | `opN.level` | 1000 + 100 op + 64 | played | 0 to 99 (0) | carrier curve; modulator curve, 0.75 dB a step, modulation index 4 pi at 0 dB; existing profile: index within 0.01 dB at 32 levels; the engine's J1/J0 within 1 % at levels 40, 60, 75 and a lone carrier within 0.02 dB of -17.64 dBFS (tests) |
-| `opN.scaling_break` | 1000 + 100 op + 65 | M4 (modulators) | 0 to 99 (39) |  |
-| `opN.scaling_low_depth` | 1000 + 100 op + 66 | M4 (modulators) | 0 to 99 (0) |  |
-| `opN.scaling_high_depth` | 1000 + 100 op + 67 | M4 (modulators) | 0 to 99 (0) |  |
-| `opN.scaling_low_curve` | 1000 + 100 op + 68 | M4 (modulators) | 0 to 3 (0) |  |
-| `opN.scaling_high_curve` | 1000 + 100 op + 69 | M4 (modulators) | 0 to 3 (0) |  |
+| `opN.scaling_break` | 1000 + 100 op + 65 | played | 0 to 99 (39) | documented, not measured: the six-operator model's level scaling (break point A-1 to C8, keys in groups of three, linear and exponential curves in its 0.7526 dB output level steps), added in dB at note-on at the key after note shift, raising a level to level 99's at most (as the existing profile, also unmeasured); the engine plays the documented values (test) |
+| `opN.scaling_low_depth` | 1000 + 100 op + 66 | played | 0 to 99 (0) | as opN.scaling_break, below it |
+| `opN.scaling_high_depth` | 1000 + 100 op + 67 | played | 0 to 99 (0) | as opN.scaling_break, above it |
+| `opN.scaling_low_curve` | 1000 + 100 op + 68 | played | 0 to 3 (0) | as opN.scaling_break: - linear, - exponential, + exponential, + linear |
+| `opN.scaling_high_curve` | 1000 + 100 op + 69 | played | 0 to 3 (0) | as opN.scaling_low_curve |
 | `opN.level_velocity` | 1000 + 100 op + 70 | played | -7 to 7 (0) | measured table at 17 velocities, fractional velocities between; existing profile: 56 of 64 (worst 1.5 dB at velocities 2-3) |
 | `opN.lfo_pitch_offset` | 1000 + 100 op + 71 | M4 (modulators) | 0 to 7 (3) |  |
 | `opN.lfo_amp_offset` | 1000 + 100 op + 72 | M4 (modulators) | 0 to 7 (3) |  |

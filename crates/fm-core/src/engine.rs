@@ -119,6 +119,11 @@ pub struct Prepared {
     /// Per operator, log2 of its gain at envelope level 99 and velocity sensitivity 0, less HEAD.
     full: [f32; OPS],
     level_velocity: [i8; OPS],
+    /// Level scaling's raw values (break point, low and high depths, low and high curves), the
+    /// operators it acts on, and the most it may raise each level (log2: up to level 99's).
+    scaling: [[u8; 5]; OPS],
+    scaling_on: u8,
+    cap: [f32; OPS],
     /// The four envelope levels (attack, decay 1, decay 2, release and hold), log2 offsets.
     eg: [[f32; 4]; OPS],
     /// The four segments' ms per dB, and their places on the rate scale (for time key follow).
@@ -175,6 +180,9 @@ impl Prepared {
             fbk: 0.0,
             full: [0.0; OPS],
             level_velocity: [0; OPS],
+            scaling: [[0; 5]; OPS],
+            scaling_on: 0,
+            cap: [0.0; OPS],
             eg: [[0.0; 4]; OPS],
             ms: [[0.0; 4]; OPS],
             rate_step: [[0; 4]; OPS],
@@ -231,19 +239,54 @@ impl Prepared {
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
+        let c = |k: Common| i32::from(s.get(k as usize));
+        let part = |k: Part| i32::from(s.get(k as usize));
+        let attack_scale = laws::aeg_attack_scale(part(Part::AttackOffset));
+        let (decay_off, release_off) = (
+            laws::aeg_offset_steps(part(Part::DecayOffset)),
+            laws::aeg_offset_steps(part(Part::ReleaseOffset)),
+        );
+        let sustain_off = laws::aeg_sustain_steps(part(Part::SustainOffset));
         let mut audible = 0u8;
+        let mut forms = [(0, 0, 0); OPS];
         for op in 0..OPS {
             let bit = 1u8 << op;
             let carrier = r.carriers & bit != 0;
-            let level = o(op, Op::Level, 0);
+            let m = |k: Common| if carrier { 0 } else { c(k).clamp(-99, 99) };
+            // the depth macro on modulators, divided by 1 + feedback on the operator that feeds back
+            let fb_div = if usize::from(r.fb_from) == op { 1 + feedback.max(0) } else { 1 };
+            let level = (o(op, Op::Level, 0) + m(Common::MacroDepth) / fb_div).clamp(0, 99);
+            let (form, spread, formant) = (o(op, Op::Form, 0), o(op, Op::Spread, 0), o(op, Op::Formant, 0));
+            let (form, spread, formant, texture_db) =
+                laws::texture(c(Common::MacroTexture), !carrier, form, spread, formant).unwrap_or((form, spread, formant, 0.0));
+            if let Some(f) = forms.get_mut(op) {
+                *f = (form, spread, formant);
+            }
             // a modulator's full deviation is 2 cycles (4 pi radians) at 0 dB
             let (db, base) = if carrier {
                 (laws::carrier_level_db(level), carrier_gain_db * DPD)
             } else {
                 (laws::modulator_level_db(level), 1.0)
             };
-            let eg = [0, 1, 2, 3].map(|i| {
-                let l = o(op, Op::EgLevel, i);
+            let db = db + texture_db;
+            let scaling = [0, 1, 2, 3, 4].map(|i| o(op, Op::Scaling, i) as u8);
+            if scaling[1] | scaling[2] != 0 {
+                p.scaling_on |= bit;
+            }
+            if let (Some(sc), Some(cap)) = (p.scaling.get_mut(op), p.cap.get_mut(op)) {
+                // level scaling raises a level to level 99's at most
+                (*sc, *cap) = (scaling, (-db * DPD) as f32);
+            }
+            let mut levels = [0, 1, 2, 3].map(|i| o(op, Op::EgLevel, i));
+            levels[2] += sustain_off + m(Common::MacroSustain);
+            let levels = levels.map(|l| l.clamp(0, 99));
+            let mut times = [0, 1, 2, 3].map(|i| o(op, Op::EgTime, i));
+            times[0] += m(Common::MacroAttack);
+            times[1] += decay_off + m(Common::MacroDecay);
+            times[2] += decay_off + m(Common::MacroDecay);
+            times[3] += release_off + m(Common::MacroRelease);
+            let times = times.map(|t| t.clamp(0, 99));
+            let eg = levels.map(|l| {
                 (if carrier {
                     laws::carrier_eg_db(l)
                 } else {
@@ -253,7 +296,9 @@ impl Prepared {
             if db > laws::SILENT_DB && eg.iter().any(|&e| e > laws::SILENT_DB * DPD) {
                 audible |= bit;
             }
-            let times = [0, 1, 2, 3].map(|i| o(op, Op::EgTime, i));
+            // the attack offset scales attack times within times 0-99's (raising them on carriers only)
+            let attack = laws::attack_ms_per_db(times[0]) * if carrier { attack_scale } else { attack_scale.min(1.0) };
+            let attack = attack.max(laws::attack_ms_per_db(0)).min(laws::attack_ms_per_db(99));
             if let (Some(f), Some(e), Some(ms), Some(rs), Some(v)) = (
                 p.full.get_mut(op),
                 p.eg.get_mut(op),
@@ -264,7 +309,7 @@ impl Prepared {
                 *f = (base + db * DPD) as f32 - HEAD;
                 *e = eg.map(|x| x as f32);
                 *ms = [
-                    laws::attack_ms_per_db(times[0]),
+                    attack,
                     laws::eg_ms_per_db(times[1]),
                     laws::eg_ms_per_db(times[2]),
                     laws::eg_ms_per_db(times[3]),
@@ -286,15 +331,19 @@ impl Prepared {
                 *st = if fixed {
                     laws::fixed_steps(coarse, fine)
                 } else {
-                    laws::ratio_steps(laws::ratio(coarse, fine))
+                    let ratio = laws::ratio(coarse, fine);
+                    laws::ratio_steps(if carrier {
+                        ratio
+                    } else {
+                        laws::shifted_ratio(ratio, c(Common::MacroRatio))
+                    })
                 };
                 *d = o(op, Op::Detune, 0) as i8;
             }
             p.fixed |= if fixed { bit } else { 0 };
             p.reset |= if o(op, Op::KeyOnReset, 0) != 0 { bit } else { 0 };
         }
-        let waves =
-            core::array::from_fn(|op| Wave::new(o(op, Op::Form, 0), o(op, Op::Spread, 0), o(op, Op::Formant, 0)));
+        let waves = forms.map(|(f, s, n)| Wave::new(f, s, n));
         p.plan = Plan::new(&r, audible, feedback > 0, waves);
         // a carrier feeds back its measured share of a modulator's amount, of its signal before the
         // routing's output level
@@ -1079,8 +1128,13 @@ impl Engine {
                 put(&mut lane.ph, op, s, 0);
             }
             // level for this velocity
-            let full =
+            let mut full =
                 p.full.get(op).copied().unwrap_or(FLOOR) + (laws::velocity_db(at(&p.level_velocity), v) * DPD) as f32;
+            if let (true, Some(sc)) = (has(u32::from(p.scaling_on), op), p.scaling.get(op)) {
+                let x = sc.map(i32::from);
+                let db = laws::level_scaling_db(key, x[0], (x[1], x[3]), (x[2], x[4]));
+                full += ((db * DPD) as f32).min(p.cap.get(op).copied().unwrap_or(0.0));
+            }
             put(&mut lane.top, op, s, full + (laws::ATTACK_OVER_DB * DPD) as f32);
             let start = (full + p.eg.get(op).map_or(FLOOR, |e| e[3])).max(FLOOR);
             put(&mut lane.lvl, op, s, start);
@@ -2044,6 +2098,56 @@ mod tests {
             "op1.level=99 "
         };
         sound(&format!("algorithm={routing}\n{level}{extra}\nop8.level=0"))
+    }
+
+    /// Level scaling on a lone carrier at level 70 (+ linear above break point 39, key 60 one
+    /// group up: 7 steps), capped at level 99's; the macros and part offsets as the laws move the
+    /// operators' values.
+    #[test]
+    fn scaling_macros_and_offsets() {
+        let step = 32.0 * 6.020_599_913_279_624 / 256.0;
+        let at = |extra: &str, key: u8| {
+            let x = play::<Native>(&carrier(1, &format!("op1.level=70 {extra}")), key, 100.0, 100, 40);
+            peak_db(&x[BLOCK * 8..])
+        };
+        let base = at("", 60);
+        let up = "op1.scaling_high_depth=99 op1.scaling_high_curve=3";
+        assert!((at(up, 60) - base - 7.0 * step).abs() < 0.02, "{}", at(up, 60) - base);
+        assert!((at(up, 96) - base - 21.99).abs() < 0.02); // capped at level 99
+        let down = "op1.scaling_low_depth=99 op1.scaling_low_curve=0";
+        assert!((at(down, 52) - base + 7.0 * step).abs() < 0.02);
+        assert!((at(down, 60) - base).abs() < 1e-6); // the high side has no depth
+        // routing 2: operators 1-3 a stack of modulators (operator 1 feeding back), 4-8 carriers
+        let r = routing(2);
+        assert!(r.carriers == 0xf8 && r.fb_from == 0);
+        let p = |t: &str| sound(&format!("algorithm=2 feedback=3 op4.level=99 {t}"));
+        let full = |t: &str, op: usize| p(t).full[op];
+        // depth: added to modulators' levels, divided by 1 + feedback on the one feeding back
+        assert_eq!(full("op2.level=50 macro_depth=10", 1), full("op2.level=60", 1));
+        assert_eq!(full("op1.level=50 macro_depth=10", 0), full("op1.level=52", 0));
+        assert_eq!(full("op5.level=50 macro_depth=10", 4), full("op5.level=50", 4));
+        // the envelope macros on modulators: time and level values; the part's offsets on all
+        let m = p("macro_attack=10 macro_decay=-5 macro_sustain=20 macro_release=3 op2.eg_level_decay2=50");
+        let want = p("op2.eg_time_attack=10 op2.eg_time_release=43 op2.eg_level_decay2=70");
+        assert_eq!((m.ms[1], m.eg[1]), (want.ms[1], want.eg[1]));
+        assert_eq!((m.ms[3], m.eg[3]), (p("").ms[3], p("").eg[3]));
+        let o = p("amp_eg_decay_offset=2 amp_eg_release_offset=-2 amp_eg_sustain_offset=3 op4.eg_time_decay1=10");
+        let want = p("op4.eg_time_decay1=13 op4.eg_time_release=37 op4.eg_level_decay2=99");
+        assert_eq!((o.ms[3][1], o.ms[3][3]), (want.ms[3][1], want.ms[3][3]));
+        let s = p("amp_eg_sustain_offset=-3 op4.eg_level_decay2=50");
+        assert_eq!(s.eg[3], p("op4.eg_level_decay2=45").eg[3]);
+        // the attack offset doubles attack times every 4 steps, raising them on carriers only
+        let a = p("amp_eg_attack_offset=4 op4.eg_time_attack=50 op2.eg_time_attack=50");
+        assert_eq!(a.ms[3][0], (laws::attack_ms_per_db(50) * 2.0) as f32);
+        assert_eq!(a.ms[1][0], laws::attack_ms_per_db(50) as f32);
+        // the ratio macro on ratio-mode modulators; texture: a carrier's harmonic form at spread
+        // 3 plays a sine at -25
+        let q = p("macro_ratio=99 op2.coarse=1 op4.coarse=1");
+        assert_eq!(q.steps[1], laws::ratio_steps(laws::shifted_ratio(1.0, 99)));
+        assert_eq!(q.steps[3], laws::ratio_steps(1.0));
+        let tex = "op5.level=99 op5.form=1 op5.spread=3";
+        assert_eq!(p(&format!("{tex} macro_texture=-25")).plan.waves[4], Wave::Sine);
+        assert_eq!(p(&format!("{tex} macro_texture=25")).plan.waves[4], p(tex).plan.waves[4]);
     }
 
     #[test]

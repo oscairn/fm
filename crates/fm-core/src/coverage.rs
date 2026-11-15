@@ -34,6 +34,11 @@ pub fn status(p: &Param) -> &'static str {
         "eg_time_key_follow",
         "level",
         "level_velocity",
+        "scaling_break",
+        "scaling_low_depth",
+        "scaling_high_depth",
+        "scaling_low_curve",
+        "scaling_high_curve",
     ];
     let played_part = [
         "algorithm",
@@ -41,6 +46,17 @@ pub fn status(p: &Param) -> &'static str {
         "note_shift",
         "velocity_depth",
         "velocity_offset",
+        "macro_depth",
+        "macro_ratio",
+        "macro_attack",
+        "macro_decay",
+        "macro_sustain",
+        "macro_release",
+        "macro_texture",
+        "amp_eg_attack_offset",
+        "amp_eg_decay_offset",
+        "amp_eg_sustain_offset",
+        "amp_eg_release_offset",
     ];
     let starts = |prefixes: &[&str]| prefixes.iter().any(|x| n.starts_with(x));
     if (op && played_op.contains(&n)) || (!op && played_part.contains(&n)) {
@@ -129,14 +145,14 @@ mod tests {
     #[test]
     fn report() {
         let s = Sound::from_text(
-            "fm-sound/1\nalgorithm=5 random_pan=3\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
+            "fm-sound/1\nalgorithm=5 random_pan=3 slfo_depth1=3\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
         )
         .unwrap();
         let mut got = Vec::new();
         not_covered(&s, |p, v, why| got.push((p.id, v, why)));
         assert_eq!(
             got,
-            vec![(0, 3, "M5 (filter and output)"), (1166, 3, "M4 (modulators)")]
+            vec![(0, 3, "M5 (filter and output)"), (225, 3, "M4 (modulators)")]
         );
         let mut n = 0;
         not_covered(&Sound::default(), |_, _, _| n += 1);
