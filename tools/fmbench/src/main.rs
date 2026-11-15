@@ -151,7 +151,7 @@ fn check() -> bool {
     for _ in 0..20_000 {
         for _ in 0..r() % 4 {
             if r() % 3 == 0 && notes > 0 {
-                e.note_off((r() % 3) as usize, r() % notes);
+                e.note_off((r() % 3) as usize, r() % notes, &mut |_| ended += 1);
             } else {
                 notes += 1;
                 e.note_on(

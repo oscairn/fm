@@ -40,6 +40,29 @@ const SHED_MS: f64 = 3.0;
 const MIN_RISE: f32 = 4e-6;
 /// Where each sound's random source starts.
 const SEED: u32 = 0x2545_f491;
+/// A retriggered note (mono without portamento, a key played again with key assign single) fades
+/// out over this long, by the square of the share left.
+const RETRIGGER_MS: f64 = 13.3;
+/// The keys a mono sound keeps to return to (more: the oldest is let go).
+const KEYS: usize = 16;
+
+/// Takes key `i` out of a mono sound's kept keys, the later ones moving down.
+fn remove(keys: &mut [Held; KEYS], i: usize) {
+    for j in i..KEYS {
+        let next = keys.get(j.wrapping_add(1)).copied().unwrap_or_default();
+        if let Some(k) = keys.get_mut(j) {
+            *k = next;
+        }
+    }
+}
+
+/// A mono sound's key still down whose note another took over.
+#[derive(Clone, Copy, Default)]
+struct Held {
+    id: u32,
+    key: u8,
+    velocity: f32,
+}
 
 // envelope segments
 const HOLD: u8 = 0;
@@ -137,6 +160,9 @@ pub struct Prepared {
     porta_time: u8,
     porta_full: bool,
     porta_mode: u8,
+    /// Mono (else poly), and key assign single (else multi).
+    mono: bool,
+    single: bool,
 }
 
 impl Prepared {
@@ -200,6 +226,8 @@ impl Prepared {
             porta_time: s.get(Part::PortamentoTime as usize) as u8,
             porta_full: s.get(Part::PortamentoMode as usize) != 0,
             porta_mode: s.get(Part::PortamentoTimeMode as usize) as u8,
+            mono: s.get(Part::MonoPoly as usize) == 0,
+            single: s.get(Part::KeyAssign as usize) == 0,
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -298,20 +326,28 @@ struct Lane {
     fall: [[f32; W]; OPS],
     rise: [[f32; W]; OPS],
     top: [[f32; W]; OPS],
-    /// Each voice's gain on everything: 1, falling to 0 while it is shed; 0 in a free slot.
+    /// Each voice's gain on everything: 1, falling to 0 while it is shed; 0 in a free slot. While
+    /// it fades, `left` is the share of the fade left (the gain, or its square for a retrigger).
     fade: [f32; W],
+    left: [f32; W],
     /// Read only when a segment changes: the segment, frames left of the hold.
     seg: [[u8; W]; OPS],
     count: [[u32; W]; OPS],
     /// Envelopes that can change segment, bit 4 op + slot.
     watch: u32,
     sound: u8,
-    /// Slots in use; keys down; released keys the pedal holds; voices being shed.
+    /// Slots in use; keys down; released keys the pedal holds; voices being shed; those fading as
+    /// a retrigger (13.3 ms, the square of the share left); those whose note lives on without
+    /// them (a mono key still down: its end is not theirs to report).
     used: u8,
     held: u8,
     sustained: u8,
     ending: u8,
+    retrig: u8,
+    orphan: u8,
     key: [u8; W],
+    /// The note's velocity as played (for a mono note taken over and returned to).
+    vel: [f32; W],
     id: [u32; W],
     age: [u32; W],
     /// The carriers' gain bound at the last step: the end rule's measure, and loudness for shedding.
@@ -358,6 +394,7 @@ const LANE0: Lane = Lane {
     rise: [[0.0; W]; OPS],
     top: [[0.0; W]; OPS],
     fade: [0.0; W],
+    left: [0.0; W],
     seg: [[DONE; W]; OPS],
     count: [[0; W]; OPS],
     watch: 0,
@@ -366,7 +403,10 @@ const LANE0: Lane = Lane {
     held: 0,
     sustained: 0,
     ending: 0,
+    retrig: 0,
+    orphan: 0,
     key: [0; W],
+    vel: [0.0; W],
     id: [0; W],
     age: [0; W],
     bound: [0.0; W],
@@ -476,10 +516,18 @@ impl Lane {
     /// Frees slot `s`: silent from the next step.
     fn free(&mut self, s: usize) {
         let b = bit(s);
-        (self.used, self.held, self.sustained, self.ending) =
-            (self.used & !b, self.held & !b, self.sustained & !b, self.ending & !b);
-        if let Some(f) = self.fade.get_mut(s) {
-            *f = 0.0;
+        for m in [
+            &mut self.used,
+            &mut self.held,
+            &mut self.sustained,
+            &mut self.ending,
+            &mut self.retrig,
+            &mut self.orphan,
+        ] {
+            *m &= !b;
+        }
+        if let (Some(f), Some(l)) = (self.fade.get_mut(s), self.left.get_mut(s)) {
+            (*f, *l) = (0.0, 0.0);
         }
         for op in 0..OPS {
             put(&mut self.gain, op, s, 0.0);
@@ -530,11 +578,12 @@ impl Lane {
         col(&mut self.top, from, to);
         col(&mut self.seg, from, to);
         col(&mut self.count, from, to);
-        one(&mut self.fade, from, to);
+        for x in [&mut self.fade, &mut self.left, &mut self.vel, &mut self.bound] {
+            one(x, from, to);
+        }
         one(&mut self.key, from, to);
         one(&mut self.id, from, to);
         one(&mut self.age, from, to);
-        one(&mut self.bound, from, to);
         let pt = &mut self.pt;
         col(&mut pt.base, from, to);
         col(&mut pt.op, from, to);
@@ -554,6 +603,8 @@ impl Lane {
             &mut self.held,
             &mut self.sustained,
             &mut self.ending,
+            &mut self.retrig,
+            &mut self.orphan,
             &mut pt.moving,
         ] {
             *m = if *m & f != 0 { *m | t } else { *m & !t };
@@ -661,7 +712,7 @@ impl Lane {
     }
 
     fn end(&mut self, s: usize, end: &mut impl FnMut(NoteEnd)) {
-        if has(u32::from(self.used), s) {
+        if has(u32::from(self.used & !self.orphan), s) {
             let (key, id) = (
                 self.key.get(s).copied().unwrap_or(0),
                 self.id.get(s).copied().unwrap_or(0),
@@ -699,8 +750,13 @@ pub struct Engine {
     /// unit): one clock for every sound.
     clock: u64,
     tick: u64,
+    /// A mono sound's keys still down whose notes another took over, oldest first.
+    keys: [[Held; KEYS]; SOUNDS],
+    keys_n: [u8; SOUNDS],
     rate: f64,
+    /// A shed fade's and a retrigger fade's share a 16-frame step.
     shed_step: f32,
+    retrig_step: f32,
     /// The operators' outputs in a step, at each width (each is written before it is read, so
     /// they are never cleared).
     y1: [[[f32; 1]; STEP]; OPS],
@@ -724,8 +780,11 @@ impl Engine {
             last: [None; SOUNDS],
             clock: 0,
             tick: ((laws::GLIDE_TICK_MS * rate / 1000.0 * 65536.0 + 0.5) as u64).max(1),
+            keys: [[Held::default(); KEYS]; SOUNDS],
+            keys_n: [0; SOUNDS],
             rate,
             shed_step: (1.0 / steps) as f32,
+            retrig_step: (STEP as f64 * 1000.0 / (RETRIGGER_MS * rate)) as f32,
             y1: [[[0.0; 1]; STEP]; OPS],
             y4: [[[0.0; W]; STEP]; OPS],
         }
@@ -734,7 +793,8 @@ impl Engine {
     /// Installs a prepared sound in slot `sound`, which must have no voice sounding (see
     /// [`Engine::choke`]); whether it was installed.
     pub fn set_sound(&mut self, sound: usize, p: &Prepared) -> bool {
-        let busy = self.lanes.iter().any(|l| l.used != 0 && usize::from(l.sound) == sound);
+        let busy = self.lanes.iter().any(|l| l.used != 0 && usize::from(l.sound) == sound)
+            || self.keys_n.get(sound).is_some_and(|&n| n > 0);
         match (self.sounds.get_mut(sound), self.rng.get_mut(sound)) {
             (Some(d), Some(r)) if !busy => {
                 (*d, *r) = (*p, SEED);
@@ -744,10 +804,21 @@ impl Engine {
         }
     }
 
-    /// Fades out every voice of `sound` (each ends after its fade).
-    pub fn choke(&mut self, sound: usize) {
+    /// Fades out every voice of `sound` (each ends after its fade); a mono sound's keys kept to
+    /// return to end at once.
+    pub fn choke(&mut self, sound: usize, end: &mut impl FnMut(NoteEnd)) {
         for l in self.lanes.iter_mut().filter(|l| usize::from(l.sound) == sound) {
             l.ending |= l.used;
+        }
+        if let (Some(keys), Some(n)) = (self.keys.get(sound), self.keys_n.get_mut(sound)) {
+            for h in keys.iter().take(usize::from(*n)) {
+                end(NoteEnd {
+                    sound: sound as u8,
+                    key: h.key,
+                    id: h.id,
+                });
+            }
+            *n = 0;
         }
     }
 
@@ -812,19 +883,134 @@ impl Engine {
 
     /// Starts a note: `key` 0-127, `velocity` 1-127 (fractions allowed). A note that gets no voice
     /// ends at once; past the limits the voice-budget order sheds another note (with a fade).
+    /// A mono sound plays one note: a new one takes over the sounding note's voice when
+    /// portamento is on and its key is down (legato: the envelopes go on), else the sounding
+    /// note fades out as a retrigger and the new one starts; a key still down is returned to when
+    /// the newer one is released (last-note priority). With key assign single, a key played again
+    /// retriggers its sounding note.
     pub fn note_on(&mut self, sound: usize, id: u32, key: u8, velocity: f32, end: &mut impl FnMut(NoteEnd)) {
         let s8 = sound as u8;
+        let Some(p) = self.sounds.get(sound).copied() else {
+            return end(NoteEnd { sound: s8, key, id });
+        };
+        let v = laws::part_velocity(i32::from(p.velocity.0), i32::from(p.velocity.1), f64::from(velocity));
+        if v <= 0.0 || velocity.is_nan() {
+            return end(NoteEnd { sound: s8, key, id });
+        }
+        // a legato note: another key of the sound is down
+        let legato = self.lanes.iter().any(|l| l.sound == s8 && l.held & !l.ending != 0);
+        let new = Held { id, key, velocity };
+        if p.mono {
+            if let Some((li, s)) = self.sounding(s8) {
+                let Some(lane) = self.lanes.get_mut(li) else { return };
+                let (b, down) = (bit(s), has(u32::from(lane.held), s));
+                let old = Held {
+                    id: lane.id.get(s).copied().unwrap_or(0),
+                    key: lane.key.get(s).copied().unwrap_or(0),
+                    velocity: lane.vel.get(s).copied().unwrap_or(0.0),
+                };
+                if p.porta && down {
+                    // legato: the voice goes on with the new note, the old key is kept
+                    let glide = self.glide(sound, &p, i32::from(key) + i32::from(p.note_shift), true);
+                    self.push(sound, old, end);
+                    return self.retarget(sound, li, s, new, v, glide);
+                }
+                // the sounding note fades out (a key still down is kept, its end not the voice's)
+                (lane.ending, lane.retrig, lane.held) = (lane.ending | b, lane.retrig | b, lane.held & !b);
+                if down {
+                    lane.orphan |= b;
+                    self.push(sound, old, end);
+                }
+            }
+        } else if p.single {
+            for l in self.lanes.iter_mut().filter(|l| l.sound == s8) {
+                let same = (0..W)
+                    .filter(|&s| l.key.get(s) == Some(&key))
+                    .fold(0, |m, s| m | bit(s));
+                let on = same & l.used & !l.ending;
+                (l.ending, l.retrig) = (l.ending | on, l.retrig | on);
+            }
+        }
+        self.start(sound, new, legato, end);
+    }
+
+    /// The voice of a mono sound that sounds (not fading), the newest: its lane and slot.
+    fn sounding(&self, sound: u8) -> Option<(usize, usize)> {
+        let voices = (0..LANES).zip(self.lanes.iter()).filter(|(_, l)| l.sound == sound);
+        voices
+            .flat_map(|(li, l)| {
+                (0..W)
+                    .filter(|&s| has(u32::from(l.used & !l.ending), s))
+                    .map(move |s| (li, s, l))
+            })
+            .max_by_key(|&(_, s, l)| l.age.get(s).copied().unwrap_or(0))
+            .map(|(li, s, _)| (li, s))
+    }
+
+    /// Keeps a mono sound's key that another took over (the oldest let go, its note ending, when
+    /// there are `KEYS` already).
+    fn push(&mut self, sound: usize, h: Held, end: &mut impl FnMut(NoteEnd)) {
+        let (Some(keys), Some(n)) = (self.keys.get_mut(sound), self.keys_n.get_mut(sound)) else {
+            return;
+        };
+        if usize::from(*n) >= KEYS {
+            if let Some(&o) = keys.first() {
+                end(NoteEnd {
+                    sound: sound as u8,
+                    key: o.key,
+                    id: o.id,
+                });
+            }
+            remove(keys, 0);
+            *n = n.saturating_sub(1);
+        }
+        if let Some(k) = keys.get_mut(usize::from(*n)) {
+            *k = h;
+            *n = n.saturating_add(1);
+        }
+    }
+
+    /// A mono sound's voice goes on with another note `h` (velocity `v` after the part's law):
+    /// its pitch for that note (the common pitch envelope and the amplitude envelopes go on).
+    fn retarget(&mut self, sound: usize, li: usize, s: usize, h: Held, v: f64, glide: (f32, f32)) {
+        let Some(p) = self.sounds.get(sound).copied() else {
+            return;
+        };
+        let (rate, r) = (self.rate, next_random(self.rng.get_mut(sound)));
+        self.age = self.age.wrapping_add(1);
+        let Some(lane) = self.lanes.get_mut(li) else { return };
+        if let (Some(k), Some(i), Some(a), Some(vl)) = (
+            lane.key.get_mut(s),
+            lane.id.get_mut(s),
+            lane.age.get_mut(s),
+            lane.vel.get_mut(s),
+        ) {
+            (*k, *i, *a, *vl) = (h.key, h.id, self.age, h.velocity);
+        }
+        (lane.held, lane.sustained) = (lane.held | bit(s), lane.sustained & !bit(s));
+        lane.tune(
+            &p,
+            s,
+            i32::from(h.key) + i32::from(p.note_shift),
+            v,
+            r,
+            rate,
+            false,
+            glide,
+        );
+        if let Some(l) = self.last.get_mut(sound) {
+            *l = Some(h.id);
+        }
+    }
+
+    /// A note in a voice of its own (`legato`: another key of the sound was down).
+    fn start(&mut self, sound: usize, h: Held, legato: bool, end: &mut impl FnMut(NoteEnd)) {
+        let (s8, Held { id, key, velocity }) = (sound as u8, h);
         let refuse = |end: &mut dyn FnMut(NoteEnd)| end(NoteEnd { sound: s8, key, id });
         let Some(p) = self.sounds.get(sound).copied() else {
             return refuse(end);
         };
-        let (depth, off) = p.velocity;
-        let v = laws::part_velocity(i32::from(depth), i32::from(off), f64::from(velocity));
-        if v <= 0.0 || velocity.is_nan() {
-            return refuse(end);
-        }
-        // a legato note: another key of the sound is down
-        let legato = self.lanes.iter().any(|l| l.sound == s8 && l.held & !l.ending != 0);
+        let v = laws::part_velocity(i32::from(p.velocity.0), i32::from(p.velocity.1), f64::from(velocity));
         let glide = self.glide(sound, &p, i32::from(key) + i32::from(p.note_shift), legato);
         let own = usize::from(self.limits.get(sound).map_or(0, |l| l.limit));
         if self.keeping(None) >= self.limit || (own > 0 && self.keeping(Some(s8)) >= own) {
@@ -852,6 +1038,8 @@ impl Engine {
         lane.held |= b;
         lane.sustained &= !b;
         lane.ending &= !b;
+        lane.retrig &= !b;
+        lane.orphan &= !b;
         if let (Some(k), Some(i), Some(a), Some(f), Some(bd)) = (
             lane.key.get_mut(s),
             lane.id.get_mut(s),
@@ -860,6 +1048,9 @@ impl Engine {
             lane.bound.get_mut(s),
         ) {
             (*k, *i, *a, *f, *bd) = (key, id, self.age, 1.0, 1.0);
+        }
+        if let (Some(l), Some(vl)) = (lane.left.get_mut(s), lane.vel.get_mut(s)) {
+            (*l, *vl) = (1.0, velocity);
         }
         for h in lane.fb.iter_mut() {
             if let Some(x) = h.get_mut(s) {
@@ -898,13 +1089,55 @@ impl Engine {
         }
     }
 
-    /// Releases the note `id` of `sound` (or holds it with the pedal down).
-    pub fn note_off(&mut self, sound: usize, id: u32) {
+    /// Releases the note `id` of `sound` (or holds it with the pedal down). A mono sound's
+    /// sounding note released while older keys are down returns to the newest of them: legato
+    /// with portamento (the released note ends at once), else as a retrigger.
+    pub fn note_off(&mut self, sound: usize, id: u32, end: &mut impl FnMut(NoteEnd)) {
         let s8 = sound as u8;
         let pedal = has(u32::from(self.pedal), sound);
         let Some(p) = self.sounds.get(sound).copied() else {
             return;
         };
+        if p.mono {
+            let (Some(keys), Some(n)) = (self.keys.get_mut(sound), self.keys_n.get_mut(sound)) else {
+                return;
+            };
+            let kept = keys.get(..usize::from(*n)).unwrap_or(&[]);
+            if let Some(i) = kept.iter().position(|h| h.id == id) {
+                // a key another took over: its note ends
+                let h = kept.get(i).copied().unwrap_or_default();
+                remove(keys, i);
+                *n = n.saturating_sub(1);
+                return end(NoteEnd {
+                    sound: s8,
+                    key: h.key,
+                    id,
+                });
+            }
+            let top = usize::from(*n).checked_sub(1).and_then(|i| keys.get(i)).copied();
+            let voice = self.sounding(s8).filter(|&(li, s)| {
+                self.lanes
+                    .get(li)
+                    .is_some_and(|l| has(u32::from(l.held), s) && l.id.get(s) == Some(&id))
+            });
+            if let (Some(h), Some((li, s))) = (top, voice) {
+                if let Some(n) = self.keys_n.get_mut(sound) {
+                    *n = n.saturating_sub(1);
+                }
+                let v = laws::part_velocity(i32::from(p.velocity.0), i32::from(p.velocity.1), f64::from(h.velocity));
+                if p.porta {
+                    let glide = self.glide(sound, &p, i32::from(h.key) + i32::from(p.note_shift), true);
+                    let key = self.lanes.get(li).and_then(|l| l.key.get(s)).copied().unwrap_or(0);
+                    end(NoteEnd { sound: s8, key, id });
+                    return self.retarget(sound, li, s, h, v, glide);
+                }
+                if let Some(l) = self.lanes.get_mut(li) {
+                    let b = bit(s);
+                    (l.ending, l.retrig, l.held) = (l.ending | b, l.retrig | b, l.held & !b);
+                }
+                return self.start(sound, h, true, end);
+            }
+        }
         for lane in self.lanes.iter_mut().filter(|l| l.sound == s8 && l.held != 0) {
             for s in 0..W {
                 if has(u32::from(lane.held), s) && lane.id.get(s) == Some(&id) {
@@ -971,7 +1204,9 @@ impl Engine {
                 }
                 let is_held = has(u32::from(l.held), s);
                 let reserve = held.get(usize::from(l.sound)).copied().unwrap_or(0) <= usize::from(lim.reserve);
-                if is_held && incoming != Some(l.sound) && reserve {
+                let mono = self.sounds.get(usize::from(l.sound)).is_some_and(|p| p.mono);
+                // never a held mono key
+                if is_held && ((incoming != Some(l.sound) && reserve) || mono) {
                     continue;
                 }
                 let rank = (
@@ -1021,7 +1256,7 @@ impl Engine {
                 let s = usize::from(sound);
                 match e.kind {
                     Kind::On { id, key, velocity } => self.note_on(s, id, key, velocity, end),
-                    Kind::Off { id } => self.note_off(s, id),
+                    Kind::Off { id } => self.note_off(s, id, end),
                     Kind::Pedal { down } => self.pedal(s, down),
                     Kind::Bend { value } => self.bend(s, value),
                 }
@@ -1048,6 +1283,7 @@ impl Engine {
         let c = Ctx {
             rate: self.rate,
             shed_step: self.shed_step,
+            retrig_step: self.retrig_step,
             ms: (1000.0 / self.rate) as f32,
             bend: self.bend.get(usize::from(sound)).map_or(0.0, |&b| {
                 laws::bend_steps(i32::from(b), i32::from(p.bend.0), i32::from(p.bend.1)) as f32 / 2048.0
@@ -1082,6 +1318,7 @@ impl Engine {
 struct Ctx {
     rate: f64,
     shed_step: f32,
+    retrig_step: f32,
     ms: f32,
     bend: f32,
     fixed_max: f32,
@@ -1340,12 +1577,15 @@ fn envelopes<const L: usize, V: F4<L>>(
 ) -> ([[f32; L]; OPS], [[f32; L]; OPS]) {
     // a step of `n` frames moves each envelope `k` of a 16-frame step's way
     let (k, per_frame) = (n as f32 / STEP as f32, V::splat(1.0 / n as f32));
-    let shed_step = c.shed_step * k;
-    // shed voices fade linearly
-    for (s, f) in lane.fade.iter_mut().enumerate().take(L) {
+    let (shed, retrig) = (c.shed_step * k, c.retrig_step * k);
+    // shed voices fade linearly, a retrigger's by the square of the share left
+    for (s, (f, left)) in lane.fade.iter_mut().zip(lane.left.iter_mut()).enumerate().take(L) {
         if has(u32::from(lane.ending), s) {
+            let sq = has(u32::from(lane.retrig), s);
+            let step = if sq { retrig } else { shed };
             // (to 0 on the last step, whatever the rounding of the steps before)
-            *f = if *f > shed_step * 1.5 { *f - shed_step } else { 0.0 };
+            *left = if *left > step * 1.5 { *left - step } else { 0.0 };
+            *f = if sq { *left * *left } else { *left };
         }
     }
     let fade = V::load4(&lane.fade) * V::splat(16.0); // 2^HEAD
@@ -1783,7 +2023,7 @@ mod tests {
         e.note_on(0, 1, key, velocity, &mut |_| {});
         for b in 0..blocks {
             if b == hold {
-                e.note_off(0, 1);
+                e.note_off(0, 1, &mut |_| {});
             }
             let mut out = [0.0; BLOCK];
             e.render::<V>(&mut out, &mut |_| {});
@@ -2049,8 +2289,8 @@ mod tests {
             let k = (c / 18.75).round();
             assert!((c - k * 18.75).abs() < 0.6 && k.abs() <= 31.0, "{c} cents");
             seen.insert(k as i32);
-            e.note_off(0, id);
-            e.choke(0);
+            e.note_off(0, id, &mut |_| {});
+            e.choke(0, &mut |_| {});
             e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         }
         assert!(seen.len() > 40, "{} values", seen.len());
@@ -2117,7 +2357,7 @@ mod tests {
             let base = f64::from(e.lanes[0].pt.base[0][0]);
             for b in 1..=300 {
                 if b == 21 && text.contains("release") {
-                    e.note_off(0, 1);
+                    e.note_off(0, 1, &mut |_| {});
                 }
                 e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
                 let t = (b * BLOCK) as f64 / RATE * 1000.0;
@@ -2197,7 +2437,7 @@ mod tests {
         e.note_on(0, 3, 60, 100.0, &mut |n| ends.push(n));
         for b in 0..2000 {
             if b == 1000 {
-                e.note_off(0, 3);
+                e.note_off(0, 3, &mut |_| {});
             }
             let mut out = [0.0; BLOCK];
             e.render::<Native>(&mut out, &mut |n| ends.push(n));
@@ -2213,7 +2453,7 @@ mod tests {
         let mut ends = 0;
         e.pedal(0, true);
         e.note_on(0, 1, 60, 100.0, &mut |_| ends += 1);
-        e.note_off(0, 1);
+        e.note_off(0, 1, &mut |_| {});
         for _ in 0..200 {
             e.render::<Native>(&mut [0.0; BLOCK], &mut |_| ends += 1);
         }
@@ -2248,7 +2488,7 @@ mod tests {
         on(&mut e, 0, 2, &mut ends);
         on(&mut e, 0, 3, &mut ends);
         // released before held: 2 is released, so the fourth note sheds it, with a fade
-        e.note_off(0, 2);
+        e.note_off(0, 2, &mut |_| {});
         on(&mut e, 0, 4, &mut ends);
         assert_eq!(ends, vec![2]);
         // all held: the quietest goes, then the oldest
@@ -2306,7 +2546,7 @@ mod tests {
         for _ in 0..8 {
             e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         }
-        e.choke(0);
+        e.choke(0, &mut |_| {});
         let mut x = [0.0; BLOCK * 2];
         let mut ended_at = None;
         for (b, out) in x.chunks_exact_mut(BLOCK).enumerate() {
@@ -2319,15 +2559,17 @@ mod tests {
         assert!(x[..120].iter().any(|&v| v.abs() > a * 0.5));
     }
 
-    /// A random sound: every parameter M1 plays at a random value in its range.
+    /// A random sound: every parameter the engine plays at a random value in its range.
     fn random_sound(r: &mut impl FnMut() -> u32) -> Prepared {
         let mut s = Sound::default();
-        let played = [30u16, 31, 209, 212, 213];
+        // (and the pitch parameters: both envelopes, key follow, random pitch, mono, key assign,
+        // portamento, bend ranges, detune)
+        let played =
+            |id: u16| [30u16, 31, 209, 212, 213].contains(&id) || (6..=21).contains(&id) || (200..=208).contains(&id);
         for p in PARAMS.iter() {
             let k = p.id % 100;
-            let op_played = p.op.is_some()
-                && ((40..=44).contains(&k) || (47..=49).contains(&k) || (54..=64).contains(&k) || k == 70);
-            if played.contains(&p.id) || op_played {
+            let op_played = p.op.is_some() && ((40..=53).contains(&k) || (54..=64).contains(&k) || k == 70);
+            if played(p.id) || op_played {
                 let span = (i32::from(p.max) - i32::from(p.min) + 1) as u32;
                 s.set(p.id, (i32::from(p.min) + (r() % span) as i32) as i16).unwrap();
             }
@@ -2357,8 +2599,8 @@ mod tests {
             if block % 500 == 0 {
                 for s in 0..SOUNDS {
                     let p = random_sound(&mut r);
-                    a.choke(s);
-                    b.choke(s);
+                    a.choke(s, &mut |n| record(n, &mut ended));
+                    b.choke(s, &mut |_| {});
                     for _ in 0..4 {
                         let mut o = [0.0; BLOCK];
                         a.render::<Native>(&mut o, &mut |n| record(n, &mut ended));
@@ -2404,8 +2646,8 @@ mod tests {
                         if timed {
                             event(s, Kind::Off { id });
                         } else {
-                            a.note_off(s, id);
-                            b.note_off(s, id);
+                            a.note_off(s, id, &mut |n| record(n, &mut ended));
+                            b.note_off(s, id, &mut |_| {});
                         }
                     }
                     8 => {
@@ -2415,6 +2657,15 @@ mod tests {
                         } else {
                             a.pedal(s, down);
                             b.pedal(s, down);
+                        }
+                    }
+                    9 if r() % 2 == 0 => {
+                        let (s, value) = ((r() % 3) as usize, (r() % 16384) as i16 - 8192);
+                        if timed {
+                            event(s, Kind::Bend { value });
+                        } else {
+                            a.bend(s, value);
+                            b.bend(s, value);
                         }
                     }
                     _ => {
@@ -2446,7 +2697,7 @@ mod tests {
         // everything released: every note rings out and ends
         for s in 0..SOUNDS {
             a.pedal(s, false);
-            a.choke(s);
+            a.choke(s, &mut |n| record(n, &mut ended));
         }
         for _ in 0..100 {
             a.render::<Native>(&mut [0.0; BLOCK], &mut |n| record(n, &mut ended));
@@ -2640,7 +2891,7 @@ mod tests {
             }
             for b in 0..24 {
                 if b == 12 {
-                    (0..6).for_each(|v| e.note_off(0, v));
+                    (0..6).for_each(|v| e.note_off(0, v, &mut |_| {}));
                 }
                 let mut out = [0.0; BLOCK];
                 e.render::<Native>(&mut out, &mut |_| {});
@@ -2718,7 +2969,7 @@ mod tests {
                     if on {
                         e.note_on(0, id, if id == 0 { 36 } else { 96 }, 100.0, &mut |_| {});
                     } else {
-                        e.note_off(0, id);
+                        e.note_off(0, id, &mut |_| {});
                     }
                 }
                 let mut o = [0.0; BLOCK];
@@ -2789,6 +3040,105 @@ mod tests {
         assert!(x[37..].iter().zip(&z).all(|(a, b)| (a - b).abs() < 1e-3));
     }
 
+    /// Mono: one voice sounds; with portamento a held key's note takes over legato (one voice,
+    /// the envelopes going on) and the older key is returned to on release; without it the sounding
+    /// note fades out as a retrigger (13.3 ms, the square of the share left) while the new one
+    /// starts; every note ends exactly once, a key taken over at its own release; a held mono key
+    /// is never shed. Key assign single retriggers a key played again.
+    #[test]
+    fn mono_and_key_assign() {
+        let ended = std::cell::RefCell::new(Vec::new());
+        let mut end = |n: NoteEnd| ended.borrow_mut().push(n.id);
+        let ids = |e: &Engine| -> Vec<u32> {
+            let mut v: Vec<u32> = e
+                .lanes
+                .iter()
+                .flat_map(|l| {
+                    (0..W)
+                        .filter(|&s| has(u32::from(l.used & !l.ending), s))
+                        .map(|s| l.id[s])
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let blocks = |e: &mut Engine, n: usize, end: &mut dyn FnMut(NoteEnd)| {
+            for _ in 0..n {
+                e.render::<Native>(&mut [0.0; BLOCK], &mut |x| end(x));
+            }
+        };
+        // legato with portamento
+        let mut e = engine(&carrier(1, "mono_poly=0 portamento=1"));
+        e.note_on(0, 1, 60, 100.0, &mut end);
+        blocks(&mut e, 4, &mut end);
+        let level = e.lanes[0].lvl[0][0];
+        e.note_on(0, 2, 67, 100.0, &mut end);
+        assert_eq!((ids(&e), e.active()), (vec![2], 1));
+        assert_eq!(e.lanes[0].lvl[0][0], level, "the envelope goes on");
+        blocks(&mut e, 2, &mut end);
+        e.note_off(0, 2, &mut end);
+        assert_eq!(
+            (ids(&e), ended.borrow().clone()),
+            (vec![1], vec![2]),
+            "back to the held key"
+        );
+        e.note_off(0, 1, &mut end);
+        blocks(&mut e, 400, &mut end);
+        assert_eq!((e.active(), ended.borrow().clone()), (0, vec![2, 1]));
+        // retrigger without portamento: the old note fades by the square of what is left
+        ended.borrow_mut().clear();
+        let mut e = engine(&carrier(1, "mono_poly=0 portamento=0"));
+        e.note_on(0, 1, 60, 100.0, &mut end);
+        blocks(&mut e, 4, &mut end);
+        e.note_on(0, 2, 64, 100.0, &mut end);
+        assert_eq!((ids(&e), e.active()), (vec![2], 2));
+        e.render::<Native>(&mut [0.0; BLOCK], &mut end);
+        let l = e.lanes.iter().find(|l| l.id.contains(&1) && l.used != 0).unwrap();
+        let s = l.id.iter().position(|&i| i == 1).unwrap();
+        let share = 1.0 - 8.0 * e.retrig_step;
+        assert!(
+            (l.fade[s] - share * share).abs() < 1e-6,
+            "{} against {}",
+            l.fade[s],
+            share * share
+        );
+        blocks(&mut e, 5, &mut end); // 13.3 ms: the fade is over
+        assert_eq!(
+            (e.active(), ended.borrow().len()),
+            (1, 0),
+            "a held key's note does not end with its voice"
+        );
+        e.note_off(0, 2, &mut end); // back to key 60, a new voice; key 64 fades out
+        assert_eq!(ids(&e), vec![1]);
+        blocks(&mut e, 6, &mut end);
+        assert_eq!(ended.borrow().clone(), vec![2]);
+        // a key taken over and released ends at its release; choke ends the kept keys
+        e.note_on(0, 3, 70, 100.0, &mut end);
+        e.note_on(0, 4, 72, 100.0, &mut end);
+        e.note_off(0, 3, &mut end);
+        assert_eq!(ended.borrow().clone(), vec![2, 3]);
+        e.choke(0, &mut end);
+        blocks(&mut e, 10, &mut end);
+        let mut got = ended.borrow().clone();
+        got.sort();
+        assert_eq!((e.active(), got), (0, vec![1, 2, 3, 4]));
+        // a held mono key is never shed for another sound's note
+        let mut e = engine(&carrier(1, "mono_poly=0"));
+        assert!(e.set_sound(1, &carrier(1, "")));
+        e.set_limits(1, &[Limits::default(); SOUNDS]);
+        e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        let mut refused = vec![];
+        e.note_on(1, 2, 60, 100.0, &mut |n| refused.push(n.id));
+        assert_eq!((ids(&e), refused), (vec![1], vec![2]));
+        // key assign single: the same key again retriggers; multi keeps both
+        for (assign, want) in [(0, 1), (1, 2)] {
+            let mut e = engine(&carrier(1, &format!("key_assign={assign}")));
+            e.note_on(0, 1, 60, 100.0, &mut |_| {});
+            e.note_on(0, 2, 60, 100.0, &mut |_| {});
+            assert_eq!(ids(&e).len(), want, "key assign {assign}");
+        }
+    }
+
     /// Two notes of one sound (keys 60 then `to`, the first released first when `release`): the
     /// second's pitch (cents against its own) at every block's end, and the blocks it moved in.
     fn glide_track(text: &str, to: u8, release: bool) -> (Vec<f64>, usize) {
@@ -2796,7 +3146,7 @@ mod tests {
         e.note_on(0, 1, 60, 100.0, &mut |_| {});
         e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
         if release {
-            e.note_off(0, 1);
+            e.note_off(0, 1, &mut |_| {});
         }
         e.note_on(0, 2, to, 100.0, &mut |_| {});
         let (mut track, mut moves) = (Vec::new(), 0);

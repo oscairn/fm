@@ -121,8 +121,8 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
     for b in 0..blocks {
         if b == blocks / 2 {
             e.pedal(0, pick & 1 != 0);
-            e.note_off(0, 2);
-            e.choke(1);
+            e.note_off(0, 2, &mut end);
+            e.choke(1, &mut end);
         }
         // timed events at frames and for sounds the optimiser cannot see (some out of range)
         let at = |k: u32| (pick.rotate_left(k) % 160) as usize;
