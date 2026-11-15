@@ -340,6 +340,7 @@ impl Lane {
     /// Moves the voices in the highest slots into free lower ones, so a lane's voices fill its
     /// first slots and it renders at the width of its voice count. A voice's state moves whole, so
     /// its output does not change.
+    #[inline(always)]
     fn compact(&mut self) {
         while self.used & self.used.wrapping_add(1) != 0 {
             // the lowest free slot is below the highest used one
@@ -352,6 +353,7 @@ impl Lane {
     }
 
     /// Moves the voice in slot `from` to the free slot `to`, below it.
+    #[inline(never)]
     fn mv(&mut self, from: usize, to: usize) {
         fn col<T: Copy, const K: usize>(a: &mut [[T; W]; K], from: usize, to: usize) {
             a.iter_mut().for_each(|r| one(r, from, to));
