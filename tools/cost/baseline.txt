@@ -24,6 +24,8 @@ fm-r1-8-res 21932
 fm-r12-8-mixed-v8 20494
 fm-r12-8-pitch 18332
 fm-s1-v1-pitch 47065
+fm-r12-8-mod 19081
+fm-s1-v1-mod 48230
 fm-s1-v1 36693
 fm-s1-v2 28613
 fm-s5-v1 35746
