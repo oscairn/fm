@@ -92,6 +92,13 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
         (7, (pick % 128) as i16),
         (8, (pick / 11 % 128) as i16),
         (208, (pick % 256) as i16 - 128),
+        // mono, key assign, portamento
+        (200, (pick / 19 % 2) as i16),
+        (201, (pick / 23 % 2) as i16),
+        (202, (pick / 29 % 2) as i16),
+        (203, (pick / 31 % 128) as i16),
+        (204, (pick / 37 % 2) as i16),
+        (205, (pick / 41 % 4) as i16),
         (206, (pick % 73) as i16 - 48),
         (207, (pick / 5 % 73) as i16 - 48),
     ] {

@@ -132,6 +132,11 @@ pub struct Prepared {
     opeg_on: u8,
     /// The pitch at full bend up and at full bend down, semitones.
     bend: (i8, i8),
+    /// Portamento: on, its time, full-time (else fingered), its time mode.
+    porta: bool,
+    porta_time: u8,
+    porta_full: bool,
+    porta_mode: u8,
 }
 
 impl Prepared {
@@ -191,6 +196,10 @@ impl Prepared {
                 .filter(|&op| o(op, Op::PegLevel, 0) != 0 || o(op, Op::PegLevel, 1) != 0)
                 .fold(0, |m, op| m | bit(op)),
             bend: (s.get(Part::BendUp as usize) as i8, s.get(Part::BendDown as usize) as i8),
+            porta: s.get(Part::Portamento as usize) != 0,
+            porta_time: s.get(Part::PortamentoTime as usize) as u8,
+            porta_full: s.get(Part::PortamentoMode as usize) != 0,
+            porta_mode: s.get(Part::PortamentoTimeMode as usize) as u8,
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -327,6 +336,10 @@ struct Pitch {
     c_seg: [u8; W],
     c_scale: [f32; W],
     c_rate: [f32; W],
+    /// Portamento: octaves still to glide (from where the glide started, less the note's own
+    /// pitch), and the step a tick of the glide clock moves it.
+    glide: [f32; W],
+    glide_step: [f32; W],
     /// Voices whose pitch moves; the bend (octaves) the increments hold; whether the increments
     /// are to be made again at the next step's start (something jumped).
     moving: u8,
@@ -366,6 +379,8 @@ const LANE0: Lane = Lane {
         c_seg: [DONE; W],
         c_scale: [0.0; W],
         c_rate: [0.0; W],
+        glide: [0.0; W],
+        glide_step: [0.0; W],
         moving: 0,
         bend: 0.0,
         jump: false,
@@ -473,8 +488,8 @@ impl Lane {
         (self.watch, self.pt.op_attack, self.pt.op_decay) =
             (self.watch & ops, self.pt.op_attack & ops, self.pt.op_decay & ops);
         self.pt.moving &= !b;
-        if let Some(c) = self.pt.c_seg.get_mut(s) {
-            *c = DONE;
+        if let (Some(c), Some(g)) = (self.pt.c_seg.get_mut(s), self.pt.glide.get_mut(s)) {
+            (*c, *g) = (DONE, 0.0);
         }
     }
 
@@ -523,7 +538,13 @@ impl Lane {
         let pt = &mut self.pt;
         col(&mut pt.base, from, to);
         col(&mut pt.op, from, to);
-        for x in [&mut pt.c, &mut pt.c_scale, &mut pt.c_rate] {
+        for x in [
+            &mut pt.c,
+            &mut pt.c_scale,
+            &mut pt.c_rate,
+            &mut pt.glide,
+            &mut pt.glide_step,
+        ] {
             one(x, from, to);
         }
         one(&mut pt.c_seg, from, to);
@@ -560,10 +581,10 @@ impl Lane {
 
     /// Slot `s`'s pitch for `key` (note shift applied) and velocity `v`, `r` its random draw:
     /// each live operator's increment from the pitch the note keeps (key follow, velocity, random
-    /// pitch and detune, in cents, on the grid), its pitch envelope from the start, and with
-    /// `common` the common pitch envelope too.
+    /// pitch and detune, in cents, on the grid), its pitch envelope from the start, with `common`
+    /// the common pitch envelope too, and `glide` (octaves, the step a tick) to glide from.
     #[allow(clippy::too_many_arguments)]
-    fn tune(&mut self, p: &Prepared, s: usize, key: i32, v: f64, r: u32, rate: f64, common: bool) {
+    fn tune(&mut self, p: &Prepared, s: usize, key: i32, v: f64, r: u32, rate: f64, common: bool, glide: (f32, f32)) {
         // cents: every operator's, then ratio-mode ones'
         let all = laws::pitch_velocity_cents(i32::from(p.pitch_velocity), v);
         let ratio_cents = all
@@ -625,7 +646,11 @@ impl Lane {
                 };
             }
         }
-        let moves = pt.op_attack & ops != 0 || pt.c_seg.get(s).is_some_and(|&c| c != HOLD && c != DONE);
+        if let (Some(g), Some(st)) = (pt.glide.get_mut(s), pt.glide_step.get_mut(s)) {
+            (*g, *st) = glide;
+        }
+        let moves =
+            pt.op_attack & ops != 0 || glide.0 != 0.0 || pt.c_seg.get(s).is_some_and(|&c| c != HOLD && c != DONE);
         if moves {
             pt.moving |= bit(s);
         } else {
@@ -668,6 +693,12 @@ pub struct Engine {
     rng: [u32; SOUNDS],
     /// Each sound's pitch bend, -8192..+8191.
     bend: [i16; SOUNDS],
+    /// Each sound's latest note, where portamento glides from.
+    last: [Option<u32>; SOUNDS],
+    /// Frames rendered (at the block's start), and the glide clock's period (frames, 2^-16 a
+    /// unit): one clock for every sound.
+    clock: u64,
+    tick: u64,
     rate: f64,
     shed_step: f32,
     /// The operators' outputs in a step, at each width (each is written before it is read, so
@@ -690,6 +721,9 @@ impl Engine {
             age: 0,
             rng: [SEED; SOUNDS],
             bend: [0; SOUNDS],
+            last: [None; SOUNDS],
+            clock: 0,
+            tick: ((laws::GLIDE_TICK_MS * rate / 1000.0 * 65536.0 + 0.5) as u64).max(1),
             rate,
             shed_step: (1.0 / steps) as f32,
             y1: [[[0.0; 1]; STEP]; OPS],
@@ -740,6 +774,42 @@ impl Engine {
             })
     }
 
+    /// Portamento for a note of `sound` at `key` (note shift applied): from the pitch the sound's
+    /// latest note has now (if it still sounds), when the switch is on and the note is legato or
+    /// the mode full-time; octaves to glide (at most one with time modes rate 2 and time 2) and
+    /// the step a tick of the glide clock moves them, straight in semitones; none at time 0.
+    fn glide(&self, sound: usize, p: &Prepared, key: i32, legato: bool) -> (f32, f32) {
+        let last = self
+            .last
+            .get(sound)
+            .copied()
+            .flatten()
+            .filter(|_| p.porta && (legato || p.porta_full));
+        let from = last.and_then(|id| {
+            self.lanes
+                .iter()
+                .filter(|l| usize::from(l.sound) == sound)
+                .find_map(|l| {
+                    let s = (0..W).find(|&s| has(u32::from(l.used), s) && l.id.get(s) == Some(&id))?;
+                    let k = i32::from(l.key.get(s).copied().unwrap_or(0)) + i32::from(p.note_shift);
+                    Some(k as f32 / 12.0 + l.pt.glide.get(s).copied().unwrap_or(0.0))
+                })
+        });
+        let Some(from) = from else { return (0.0, 0.0) };
+        let g = from - key as f32 / 12.0;
+        let g = if p.porta_mode >= 2 { g.clamp(-1.0, 1.0) } else { g };
+        let rate = laws::portamento_rate(
+            i32::from(p.porta_time),
+            i32::from(p.porta_mode),
+            f64::from(g.abs()) * 12.0,
+        );
+        if rate > 0.0 && g != 0.0 {
+            (g, (rate / 12.0 * laws::GLIDE_TICK_MS / 1000.0) as f32)
+        } else {
+            (0.0, 0.0)
+        }
+    }
+
     /// Starts a note: `key` 0-127, `velocity` 1-127 (fractions allowed). A note that gets no voice
     /// ends at once; past the limits the voice-budget order sheds another note (with a fade).
     pub fn note_on(&mut self, sound: usize, id: u32, key: u8, velocity: f32, end: &mut impl FnMut(NoteEnd)) {
@@ -753,6 +823,9 @@ impl Engine {
         if v <= 0.0 || velocity.is_nan() {
             return refuse(end);
         }
+        // a legato note: another key of the sound is down
+        let legato = self.lanes.iter().any(|l| l.sound == s8 && l.held & !l.ending != 0);
+        let glide = self.glide(sound, &p, i32::from(key) + i32::from(p.note_shift), legato);
         let own = usize::from(self.limits.get(sound).map_or(0, |l| l.limit));
         if self.keeping(None) >= self.limit || (own > 0 && self.keeping(Some(s8)) >= own) {
             let only = (own > 0 && self.keeping(Some(s8)) >= own).then_some(s8);
@@ -799,7 +872,10 @@ impl Engine {
         if lane.used == b {
             lane.pt.bend = 0.0; // (a lane's first voice: its increments hold no bend)
         }
-        lane.tune(&p, s, key, v, r, rate, true);
+        lane.tune(&p, s, key, v, r, rate, true, glide);
+        if let Some(l) = self.last.get_mut(sound) {
+            *l = Some(id);
+        }
         for op in 0..OPS {
             put(&mut lane.gain, op, s, 0.0);
             if !has(u32::from(p.plan.live), op) {
@@ -952,6 +1028,7 @@ impl Engine {
             }
             self.render_sound::<V>(sound, out, from, BLOCK, end);
         }
+        self.clock = self.clock.wrapping_add(BLOCK as u64);
     }
 
     /// Frames `from..to` of the lanes of `sound`, in control steps of 16 frames from `from` (the
@@ -976,20 +1053,23 @@ impl Engine {
                 laws::bend_steps(i32::from(b), i32::from(p.bend.0), i32::from(p.bend.1)) as f32 / 2048.0
             }),
             fixed_max: (laws::FIXED_MAX_HZ / self.rate * 4_294_967_296.0) as f32,
+            tick: self.tick,
         };
+        let clock = self.clock;
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
             let mut f = from;
             while let Some(chunk) = out.get_mut(f..to.min(f.saturating_add(STEP))) {
                 if chunk.is_empty() {
                     break;
                 }
+                let t = clock.wrapping_add(f as u64);
                 f = f.saturating_add(chunk.len());
                 lane.compact();
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
-                    1 => step::<1, scalar::F<1>>(lane, p, &c, end, chunk, y1),
-                    _ => step::<W, V>(lane, p, &c, end, chunk, y4),
+                    1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, chunk, y1),
+                    _ => step::<W, V>(lane, p, &c, t, end, chunk, y4),
                 }
             }
         }
@@ -997,14 +1077,23 @@ impl Engine {
 }
 
 /// What a lane's control step takes from the engine: the rate (Hz), the shed fade a step,
-/// milliseconds a frame, the bend of the lane's sound (octaves), and the highest increment a
-/// fixed-mode operator plays.
+/// milliseconds a frame, the bend of the lane's sound (octaves), the highest increment a
+/// fixed-mode operator plays, and the glide clock's period (frames, 2^-16 a unit).
 struct Ctx {
     rate: f64,
     shed_step: f32,
     ms: f32,
     bend: f32,
     fixed_max: f32,
+    tick: u64,
+}
+
+impl Ctx {
+    /// Whether the glide clock ticks in the step of `n` frames from frame `t`.
+    fn ticks(&self, t: u64, n: usize) -> bool {
+        let at = |t: u64| t.wrapping_mul(65536).checked_div(self.tick);
+        at(t) != at(t.wrapping_add(n as u64))
+    }
 }
 
 /// An increment (or its ramp) for each operator and voice of a lane at width `L`.
@@ -1015,12 +1104,14 @@ const MAX_INC: f32 = 2_147_483_520.0;
 
 /// One control step of a lane at width `L` (its voices in its first `L` slots), added to `out`
 /// (1 to 16 frames: a shorter step is rendered whole, its phases and feedback history then set
-/// to where its last frame left them).
+/// to where its last frame left them), from frame `t` of the engine's clock.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn step<const L: usize, V: F4<L>>(
     lane: &mut Lane,
     p: &Prepared,
     c: &Ctx,
+    t: u64,
     end: &mut impl FnMut(NoteEnd),
     out: &mut [f32],
     y: &mut [[[f32; L]; STEP]; OPS],
@@ -1030,7 +1121,7 @@ fn step<const L: usize, V: F4<L>>(
     // a lane whose pitch does not move skips this
     let pt = &lane.pt;
     let ramp = if pt.moving != 0 || pt.jump || pt.bend != c.bend {
-        pitch::<L, V>(lane, p, c, n)
+        pitch::<L, V>(lane, p, c, t, n)
     } else {
         None
     };
@@ -1101,13 +1192,35 @@ fn short<const L: usize>(
     f2.iter_mut().zip(y2).for_each(|(f, y)| *f = y);
 }
 
-/// A lane's pitch for a control step of `n` frames (docs/design.md, 2.3): what jumps (the bend) is
-/// in the increments from the step's start; while a pitch envelope moves them, the envelopes move
-/// a step and the increments ramp linearly to their value at the step's end: returns the ramp a
-/// frame and that value.
+/// A lane's pitch for a control step of `n` frames from frame `t` (docs/design.md, 2.3): what
+/// jumps (the bend, a portamento step when the glide clock ticks) is in the increments from the
+/// step's start; while a pitch envelope moves them, the envelopes move a step and the increments
+/// ramp linearly to their value at the step's end: returns the ramp a frame and that value.
 #[inline(never)]
-fn pitch<const L: usize, V: F4<L>>(lane: &mut Lane, p: &Prepared, c: &Ctx, n: usize) -> Option<(Incs<L>, Incs<L>)> {
+fn pitch<const L: usize, V: F4<L>>(
+    lane: &mut Lane,
+    p: &Prepared,
+    c: &Ctx,
+    t: u64,
+    n: usize,
+) -> Option<(Incs<L>, Incs<L>)> {
     let pt = &mut lane.pt;
+    let mut gliding = 0;
+    if pt.glide.iter().take(L).any(|&g| g != 0.0) && c.ticks(t, n) {
+        for (s, (g, &st)) in (0..L).zip(pt.glide.iter_mut().zip(pt.glide_step.iter())) {
+            *g = if *g > 0.0 {
+                (*g - st).max(0.0)
+            } else {
+                (*g + st).min(0.0)
+            };
+            gliding |= if *g != 0.0 { bit(s) } else { 0 };
+        }
+        pt.jump = true;
+    } else {
+        gliding = (0..L)
+            .zip(pt.glide.iter())
+            .fold(0, |m, (s, &g)| if g != 0.0 { m | bit(s) } else { m });
+    }
     if pt.jump || pt.bend != c.bend {
         (pt.jump, pt.bend) = (false, c.bend);
         for (inc, to) in lane.inc.iter_mut().zip(incs::<L, V>(pt, p, c).iter()) {
@@ -1116,7 +1229,7 @@ fn pitch<const L: usize, V: F4<L>>(lane: &mut Lane, p: &Prepared, c: &Ctx, n: us
     }
     let moves = |seg: u8| matches!(seg, ATTACK | DECAY1 | DECAY2 | RELEASE);
     if pt.op_attack | pt.op_decay == 0 && !pt.c_seg.iter().take(L).any(|&s| moves(s)) {
-        pt.moving = 0;
+        pt.moving = gliding;
         return None;
     }
     // the envelopes move straight in octaves for the step's milliseconds; a segment that ends
@@ -1171,7 +1284,7 @@ fn pitch<const L: usize, V: F4<L>>(lane: &mut Lane, p: &Prepared, c: &Ctx, n: us
             moving |= bit(s);
         }
     }
-    pt.moving = moving;
+    pt.moving = moving | gliding;
     let to = incs::<L, V>(pt, p, c);
     let mut d = [[0u32; L]; OPS];
     for ((d, to), from) in d.iter_mut().zip(to.iter()).zip(lane.inc.iter()) {
@@ -1184,14 +1297,14 @@ fn pitch<const L: usize, V: F4<L>>(lane: &mut Lane, p: &Prepared, c: &Ctx, n: us
 }
 
 /// Each live operator's increment from a lane's pitch state: its base times 2 to the octaves
-/// that move it (the common pitch envelope for ratio-mode operators, the operator's own
-/// envelope, the bend), held under Nyquist (fixed-mode ones at their highest frequency); a voice
-/// that nothing moves keeps its base exactly.
+/// that move it (the common pitch envelope and portamento for ratio-mode operators, the
+/// operator's own envelope, the bend), held under Nyquist (fixed-mode ones at their highest
+/// frequency); a voice that nothing moves keeps its base exactly.
 #[inline(always)]
 fn incs<const L: usize, V: F4<L>>(pt: &Pitch, p: &Prepared, c: &Ctx) -> [[u32; L]; OPS] {
     let zero = V::splat(0.0);
     let bend = V::splat(c.bend);
-    let common = V::load4(&pt.c) + bend;
+    let common = V::load4(&pt.c) + V::load4(&pt.glide) + bend;
     let mut out = [[0u32; L]; OPS];
     for (op, o) in (0..OPS)
         .zip(out.iter_mut())
@@ -2674,6 +2787,73 @@ mod tests {
         let (mut c, mut z) = (engine(&p), [0.0; BLOCK]);
         c.render_events::<Native>(&mut z, &[on(0, 0, 1, 60)], &mut |_| {});
         assert!(x[37..].iter().zip(&z).all(|(a, b)| (a - b).abs() < 1e-3));
+    }
+
+    /// Two notes of one sound (keys 60 then `to`, the first released first when `release`): the
+    /// second's pitch (cents against its own) at every block's end, and the blocks it moved in.
+    fn glide_track(text: &str, to: u8, release: bool) -> (Vec<f64>, usize) {
+        let mut e = engine(&carrier(1, text));
+        e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+        if release {
+            e.note_off(0, 1);
+        }
+        e.note_on(0, 2, to, 100.0, &mut |_| {});
+        let (mut track, mut moves) = (Vec::new(), 0);
+        for _ in 0..200 {
+            e.render::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            let l = e.lanes.iter().find(|l| l.used != 0 && l.id.contains(&2)).unwrap();
+            let s = l.id.iter().position(|&i| i == 2).unwrap();
+            let c = 1200.0 * (f64::from(l.inc[0][s]) / f64::from(l.pt.base[0][s])).log2();
+            moves += usize::from(track.last().is_some_and(|&x| x != c));
+            track.push(c);
+        }
+        (track, moves)
+    }
+
+    /// Portamento: straight in semitones from the sound's latest note, in steps of the glide clock
+    /// (9.977 ms) at the time value's rate; rate 1 keeps the rate, time 1 the time; rate 2 starts
+    /// at most an octave away; fingered glides only from a held key; off or time 0, no glide.
+    #[test]
+    fn portamento() {
+        let block_ms = BLOCK as f64 / RATE * 1000.0;
+        let ends = |t: &[f64]| t.iter().position(|&c| c == 0.0).unwrap() as f64 * block_ms;
+        let rate = laws::portamento_rate(64, 0, 12.0); // semitones a second
+        let (t, moves) = glide_track("portamento=1 portamento_mode=1", 72, true);
+        // from an octave down; 12 / rate seconds in whole steps of the clock
+        assert!((t[0] + 1200.0).abs() < 40.0, "{}", t[0]);
+        let want = (12.0 / (rate * laws::GLIDE_TICK_MS / 1000.0)).ceil() * laws::GLIDE_TICK_MS;
+        assert!(
+            (ends(&t) - want).abs() < 2.0 * laws::GLIDE_TICK_MS,
+            "{} ms against {want}",
+            ends(&t)
+        );
+        assert!(
+            moves as f64 <= want / laws::GLIDE_TICK_MS + 1.0,
+            "{moves} moves: steps, not a slide"
+        );
+        // each step the rate's share of a tick
+        let step = rate * laws::GLIDE_TICK_MS / 1000.0 * 100.0;
+        let diffs: Vec<f64> = t.windows(2).map(|w| w[1] - w[0]).filter(|&d| d > 0.0).collect();
+        assert!(
+            diffs.iter().take(diffs.len() - 1).all(|&d| (d - step).abs() < 0.5),
+            "{diffs:?}"
+        );
+        // time 1: twice the distance in the same time; rate 2: from an octave at most
+        let (t1, _) = glide_track("portamento=1 portamento_mode=1 portamento_time_mode=1", 84, true);
+        assert!(
+            (ends(&t1) - want).abs() < 2.0 * laws::GLIDE_TICK_MS,
+            "time 1: {} ms",
+            ends(&t1)
+        );
+        let (t2, _) = glide_track("portamento=1 portamento_mode=1 portamento_time_mode=2", 84, true);
+        assert!((t2[0] + 1200.0).abs() < 40.0 && (ends(&t2) - want).abs() < 2.0 * laws::GLIDE_TICK_MS);
+        // fingered: from a held key only
+        assert!(glide_track("portamento=1 portamento_mode=0", 72, true).0[0] == 0.0);
+        assert!(glide_track("portamento=1 portamento_mode=0", 72, false).0[0] < -1100.0);
+        // off, or time 0
+        assert!(glide_track("portamento=0 portamento_mode=1", 72, true).0[0] == 0.0);
+        assert!(glide_track("portamento=1 portamento_mode=1 portamento_time=0", 72, true).0[0] == 0.0);
     }
 
     /// Pitch bend: from its event's frame on, every operator (fixed-mode ones too) at the law's
