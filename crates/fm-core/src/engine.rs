@@ -28,6 +28,8 @@ pub const VOICES: usize = 128;
 /// Lanes: the ceiling's, and a partly filled lane per sound, so a note under the ceiling always
 /// finds a slot.
 pub const LANES: usize = VOICES / W + SOUNDS;
+// (the lanes in use are a bit each of a u64)
+const _: () = assert!(LANES <= 64);
 
 /// Levels are log2 of gain less `HEAD` (so that a modulator's deviation, up to 3.2 cycles, stays
 /// within the vector `exp2`'s range of [-30, 0]).
@@ -862,6 +864,19 @@ fn bit16(i: usize) -> u16 {
     u32::try_from(i).ok().and_then(|i| 1u16.checked_shl(i)).unwrap_or(0)
 }
 
+fn bit64(i: usize) -> u64 {
+    u32::try_from(i).ok().and_then(|i| 1u64.checked_shl(i)).unwrap_or(0)
+}
+
+/// The set bits of `m`, lowest first.
+fn bits(mut m: u64) -> impl Iterator<Item = usize> {
+    core::iter::from_fn(move || {
+        let i = m.trailing_zeros() as usize;
+        m &= m.wrapping_sub(1);
+        (i < 64).then_some(i)
+    })
+}
+
 #[inline(always)]
 fn at<const N: usize>(a: &[f32; N], i: usize) -> f32 {
     a.get(i).copied().unwrap_or(0.0)
@@ -1195,6 +1210,9 @@ pub struct Engine {
     sounds: [Prepared; SOUNDS],
     limits: [Limits; SOUNDS],
     lanes: [Lane; LANES],
+    /// The lanes with a voice, a bit each (and maybe some emptied since their last step), so that
+    /// the per-block scans touch only those (a lane is several cache lines apart from the next).
+    live: u64,
     /// Voices the instance may keep (at most `VOICES`).
     limit: usize,
     /// Sounds whose sustain pedal is down, a bit each.
@@ -1255,6 +1273,7 @@ impl Engine {
             sounds: [p; SOUNDS],
             limits: [Limits::default(); SOUNDS],
             lanes: [LANE0; LANES],
+            live: 0,
             limit: VOICES,
             pedal: 0,
             pending: 0,
@@ -1305,9 +1324,16 @@ impl Engine {
         }
     }
 
+    /// The lanes with a voice, in order.
+    fn live(&self) -> impl Iterator<Item = &Lane> {
+        bits(self.live)
+            .filter_map(|i| self.lanes.get(i))
+            .filter(|l| l.used != 0)
+    }
+
     /// Whether a voice, a kept mono key or a delayed note of `sound` sounds.
     fn busy(&self, sound: usize) -> bool {
-        self.lanes.iter().any(|l| l.used != 0 && usize::from(l.sound) == sound)
+        self.live().any(|l| usize::from(l.sound) == sound)
             || self.keys_n.get(sound).is_some_and(|&n| n > 0)
             || self
                 .delayed
@@ -1374,7 +1400,7 @@ impl Engine {
                 }
             }
         }
-        self.lanes = [LANE0; LANES];
+        (self.lanes, self.live) = ([LANE0; LANES], 0);
         (self.pedal, self.pending, self.staged, self.age, self.alt) = (0, 0, 0, 0, 0);
         (self.rng, self.bend, self.last) = ([SEED; SOUNDS], [0; SOUNDS], [None; SOUNDS]);
         (self.ctl, self.sost) = ([CTL_REST; SOUNDS], 0);
@@ -1423,7 +1449,7 @@ impl Engine {
     /// Each voice sounding: its sound, its note and its loudness now (the end rule's bound on its
     /// carriers' gain, times its fade).
     pub fn voices(&self, mut f: impl FnMut(u8, u32, f32)) {
-        for l in self.lanes.iter().filter(|l| l.used != 0) {
+        for l in self.live() {
             for s in (0..W).filter(|&s| has(u32::from(l.used), s)) {
                 let (id, b, g) = (l.id.get(s), l.bound.get(s), l.fade.get(s));
                 f(l.sound, id.copied().unwrap_or(0), b.zip(g).map_or(0.0, |(b, g)| b * g));
@@ -1472,14 +1498,12 @@ impl Engine {
 
     /// Voices sounding (fading ones included).
     pub fn active(&self) -> usize {
-        self.lanes
-            .iter()
+        self.live()
             .fold(0usize, |n, l| n.wrapping_add(l.used.count_ones() as usize))
     }
 
     fn keeping(&self, sound: Option<u8>) -> usize {
-        self.lanes
-            .iter()
+        self.live()
             .filter(|l| sound.is_none_or(|s| s == l.sound))
             .fold(0usize, |n, l| {
                 n.wrapping_add((l.used & !l.ending).count_ones() as usize)
@@ -1722,6 +1746,7 @@ impl Engine {
         let Some(lane) = found.and_then(|i| self.lanes.get_mut(i)) else {
             return refuse(end);
         };
+        self.live |= found.map_or(0, bit64);
         if lane.used == 0 {
             lane.sound = s8;
         }
@@ -2152,11 +2177,7 @@ impl Engine {
             self.pending &= !bit(sound);
             self.refresh(sound);
         }
-        let busy = self
-            .lanes
-            .iter()
-            .filter(|l| l.used != 0)
-            .fold(0, |m, l| m | bit(usize::from(l.sound)));
+        let busy = self.live().fold(0, |m, l| m | bit(usize::from(l.sound)));
         // (without a voice there is nothing to shed; a note starts only within the limit, so at the
         // pool's own nothing is over it)
         if busy != 0 {
@@ -2278,7 +2299,16 @@ impl Engine {
         if let Some(l) = self.slfo.get_mut(usize::from(sound)).filter(|_| p.slfo != 0) {
             l.steps(p, self.rate, to.saturating_sub(from), &mut sv);
         }
-        for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
+        let live = &mut self.live;
+        for i in bits(*live) {
+            let Some(lane) = self.lanes.get_mut(i) else { break };
+            if lane.used == 0 {
+                *live &= !bit64(i);
+                continue;
+            }
+            if lane.sound != sound {
+                continue;
+            }
             if panned && !*pan_on {
                 (*left, *right, *pan_on) = ([0.0; BLOCK], [0.0; BLOCK], true);
             } else if !panned && !*written {
@@ -2305,6 +2335,9 @@ impl Engine {
                     1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, o, y1, v, m),
                     _ => step::<W, V>(lane, p, &c, t, end, o, y4, v, m),
                 }
+            }
+            if lane.used == 0 {
+                *live &= !bit64(i);
             }
         }
     }
@@ -5536,6 +5569,32 @@ mod tests {
         let mut out = [0.0; BLOCK];
         e.render1::<Native>(&mut out, &mut |_| {});
         assert!(out.iter().all(|&x| x == 0.0));
+    }
+
+    /// The lanes in use are kept a bit each (a block scans only those): a lane joins with its first
+    /// voice and leaves in the step its last one ends.
+    #[test]
+    fn live_lanes_follow_the_voices() {
+        let mut e = Engine::new(RATE);
+        let p = carrier(1, "op8.eg_time_release=99");
+        for s in 0..3 {
+            e.set_sound(s, &p);
+            e.note_on(s, s as u32, 60, 100.0, &mut |_| {});
+        }
+        e.note_on(0, 9, 64, 100.0, &mut |_| {});
+        assert_eq!((e.live.count_ones(), e.active()), (3, 4));
+        for (s, id) in [(0, 0), (1, 1), (2, 2), (0, 9)] {
+            e.note_off(s, id, &mut |_| {});
+        }
+        let mut out = [0.0; BLOCK];
+        for _ in 0..400 {
+            e.render1::<Native>(&mut out, &mut |_| {});
+            assert_eq!(
+                e.live.count_ones() as usize,
+                e.lanes.iter().filter(|l| l.used != 0).count()
+            );
+        }
+        assert_eq!((e.live, e.active()), (0, 0));
     }
 
     /// Two sounds, one with pan, playing a note each: (sound, pan) settings.
