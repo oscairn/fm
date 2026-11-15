@@ -71,29 +71,40 @@ impl Plan {
                 from: r.fb_from,
             },
         };
-        let waves: [Wave; OPS] = core::array::from_fn(|i| {
-            if on(i as u8) {
-                waves.get(i).copied().unwrap_or(Wave::Sine)
-            } else {
-                Wave::Sine
-            }
-        });
-        let loop_forms = match feedback {
-            Feedback::Loop { to, from } => waves
-                .iter()
-                .skip(usize::from(to))
-                .take(usize::from(from.saturating_sub(to)) + 1)
-                .any(|&w| w != Wave::Sine),
-            _ => false,
-        };
         Plan {
             live,
             carriers: r.carriers & live,
             mods: r.mods.map(|m| m & live),
             feedback,
+            waves: [Wave::Sine; OPS],
+            forms: false,
+            loop_forms: false,
+        }
+        .with_waves(waves)
+    }
+
+    /// The plan with its live operators on `waves` (the others sines).
+    pub fn with_waves(self, waves: [Wave; OPS]) -> Plan {
+        let waves: [Wave; OPS] = core::array::from_fn(|i| {
+            if self.live.checked_shr(i as u32).is_some_and(|m| m & 1 != 0) {
+                waves.get(i).copied().unwrap_or(Wave::Sine)
+            } else {
+                Wave::Sine
+            }
+        });
+        let loop_forms = match self.feedback {
+            Feedback::Loop { to, from } => waves
+                .iter()
+                .skip(usize::from(to))
+                .take(usize::from(from.saturating_sub(to)).saturating_add(1))
+                .any(|&w| w != Wave::Sine),
+            _ => false,
+        };
+        Plan {
             forms: waves.iter().any(|&w| w != Wave::Sine),
             waves,
             loop_forms,
+            ..self
         }
     }
 

@@ -8,7 +8,7 @@
 
 use crate::forms::Wave;
 use crate::laws::{self, DOUBLINGS_PER_DB as DPD};
-use crate::params::{op_index, Common, Op, Part, OPS};
+use crate::params::{op_index, slfo_box_index, Common, Op, Part, OPS};
 use crate::plan::{Feedback, Plan};
 use crate::routing::routing;
 use crate::simd::{first, scalar, F4, U4, W};
@@ -185,7 +185,61 @@ pub struct Prepared {
     lfo_amp: [f32; OPS],
     lfo_pitch_on: bool,
     lfo_amp_on: bool,
+    /// The voice LFO's speed value and range (for the sound LFO's speed destination).
+    lfo_speed: (bool, i16),
+    /// The sound LFO, one a sound (docs/design.md, 3.6): what it moves (`SLFO_*` bits, 0: it does
+    /// not run); rate (Hz); wave; start phase; key-on reset (off, each, first); delay, fade in,
+    /// hold (infinite: for ever) and fade out (seconds); the user wave's steps, step count and
+    /// slope. Per operator at the LFO's top: pitch (octaves; ratio-mode operators), detune steps
+    /// (ratio-mode operators), form steps, and half the level lost at its bottom (log2); the
+    /// feedback and voice LFO speed steps; the base feedback and each operator's form, spread and
+    /// formant (the stepped destinations' starting points), and the feedback amount at 0-7.
+    slfo: u8,
+    slfo_hz: f32,
+    slfo_wave: u8,
+    slfo_start: u32,
+    slfo_reset: u8,
+    slfo_env: [f32; 4],
+    slfo_user: [f32; 16],
+    slfo_steps: u8,
+    slfo_slope: u8,
+    slfo_pitch: [f32; OPS],
+    slfo_detune: [f32; OPS],
+    slfo_form: [f32; OPS],
+    slfo_amp: [f32; OPS],
+    slfo_fb: f32,
+    slfo_speed: f32,
+    feedback: u8,
+    forms: [(u8, u8, u8); OPS],
+    slfo_fbk: [f32; 8],
 }
+
+/// What the sound LFO moves: pitch (frequency or detune), level, what the kernels play (form or
+/// feedback), the voice LFO's speed.
+const SLFO_PITCH: u8 = 1;
+const SLFO_AMP: u8 = 2;
+const SLFO_KERN: u8 = 4;
+const SLFO_SPEED: u8 = 8;
+
+/// The sound LFO's running state, one a sound: phase (2^32 a cycle), frames since its envelope
+/// started, frames it still stands still after a reset, its random source and the sample-and-hold
+/// value.
+#[derive(Clone, Copy)]
+struct Slfo {
+    ph: u32,
+    t: u32,
+    wait: u32,
+    rnd: u32,
+    held: f32,
+}
+
+const SLFO0: Slfo = Slfo {
+    ph: 0,
+    t: 0,
+    wait: 0,
+    rnd: SEED,
+    held: 0.0,
+};
 
 impl Prepared {
     pub fn new(s: &Sound) -> Prepared {
@@ -263,6 +317,25 @@ impl Prepared {
             lfo_amp: [0.0; OPS],
             lfo_pitch_on: false,
             lfo_amp_on: false,
+            lfo_speed: (false, 0),
+            slfo: 0,
+            slfo_hz: 0.0,
+            slfo_wave: 0,
+            slfo_start: 0,
+            slfo_reset: 0,
+            slfo_env: [0.0; 4],
+            slfo_user: [0.0; 16],
+            slfo_steps: 16,
+            slfo_slope: 0,
+            slfo_pitch: [0.0; OPS],
+            slfo_detune: [0.0; OPS],
+            slfo_form: [0.0; OPS],
+            slfo_amp: [0.0; OPS],
+            slfo_fb: 0.0,
+            slfo_speed: 0.0,
+            feedback: feedback.clamp(0, 7) as u8,
+            forms: [(0, 0, 0); OPS],
+            slfo_fbk: [0.0; 8],
         };
         let carrier_gain_db =
             laws::CARRIER_FULL_DBFS + laws::routing_gain_db(i32::from(s.get(Common::Algorithm as usize)));
@@ -376,7 +449,13 @@ impl Prepared {
             p.reset |= if o(op, Op::KeyOnReset, 0) != 0 { bit } else { 0 };
         }
         let waves = forms.map(|(f, s, n)| Wave::new(f, s, n));
-        p.plan = Plan::new(&r, audible, feedback > 0, waves);
+        p.forms = forms.map(|(f, s, n)| (f as u8, s as u8, n as u8));
+        // the sound LFO's destinations with depth (the reference's numbers: 70-78 this part's)
+        let slfo_part = |i: usize| i32::from(s.get((Part::SlfoDest as usize).wrapping_add(i)));
+        let dests = [0, 2, 4].map(|i| (slfo_part(i), slfo_part(i + 1)));
+        // (the feedback destination needs the feedback path, at amount 0 where the sound has none)
+        let fb_dest = dests.iter().any(|&(x, depth)| x == 74 && depth > 0);
+        p.plan = Plan::new(&r, audible, feedback > 0 || fb_dest, waves);
         // the voice LFO
         p.lfo_hz = laws::lfo_hz(c(Common::LfoSpeedRange) != 0, {
             if c(Common::LfoSpeedRange) != 0 {
@@ -403,17 +482,99 @@ impl Prepared {
         }
         p.lfo_pitch_on = p.lfo_pitch.iter().any(|&x| x != 0.0);
         p.lfo_amp_on = p.lfo_amp.iter().any(|&x| x != 0.0);
+        p.lfo_speed = (c(Common::LfoSpeedRange) != 0, s.get(Common::LfoSpeed as usize));
+        if p.lfo_speed.0 {
+            p.lfo_speed.1 = s.get(Common::LfoExtendedSpeed as usize);
+        }
         // a carrier feeds back its measured share of a modulator's amount, of its signal before the
         // routing's output level
         let fb_carrier = has(u32::from(r.carriers), usize::from(r.fb_from));
-        let fbk = laws::feedback_amount(feedback)
-            * if fb_carrier {
-                laws::carrier_feedback_scale(feedback) * 2.0 / laws::db_to_gain(carrier_gain_db)
-            } else {
-                1.0
-            };
-        p.fbk = fbk as f32;
+        let fbk = |feedback: i32| {
+            (laws::feedback_amount(feedback)
+                * if fb_carrier {
+                    laws::carrier_feedback_scale(feedback) * 2.0 / laws::db_to_gain(carrier_gain_db)
+                } else {
+                    1.0
+                }) as f32
+        };
+        p.fbk = fbk(feedback);
+        p.slfo_fbk = core::array::from_fn(|f| fbk(f as i32));
+        p.prepare_slfo(s, &dests);
         p
+    }
+
+    /// The sound LFO's laws (docs/design.md, 3.6), from the sound `s` and its destinations
+    /// (number, depth).
+    fn prepare_slfo(&mut self, s: &Sound, dests: &[(i32, i32); 3]) {
+        let part = |k: Part, i: usize| i32::from(s.get((k as usize).wrapping_add(i)));
+        for (d, &(dest, depth)) in (0..3).zip(dests.iter()).filter(|(_, x)| x.1 > 0) {
+            match dest {
+                71 => self.slfo_speed += (f64::from(depth) * laws::SLFO_SPEED_PER_DEPTH) as f32,
+                74 => self.slfo_fb += (f64::from(depth) * laws::SLFO_FEEDBACK_PER_DEPTH) as f32,
+                75..=78 => {
+                    let live = (0..OPS).filter(|&op| has(u32::from(self.plan.live), op));
+                    for op in live.filter(|&op| s.get(slfo_box_index(op, d)) != 0) {
+                        let ratio = s.get(op_index(op, Op::SlfoRatio, 0).wrapping_add(d));
+                        let k = laws::slfo_depth(depth, i32::from(ratio));
+                        let fixed = has(u32::from(self.fixed), op);
+                        let (x, add) = match dest {
+                            75 if !fixed => (&mut self.slfo_pitch, laws::slfo_pitch_cents(k) / 1200.0),
+                            76 => (&mut self.slfo_form, f64::from(k) * laws::SLFO_FORM_PER_DEPTH),
+                            77 if !fixed => (&mut self.slfo_detune, f64::from(k) * laws::SLFO_DETUNE_PER_DEPTH),
+                            78 => (&mut self.slfo_amp, laws::slfo_level_db(k) * DPD / 2.0),
+                            _ => continue,
+                        };
+                        if let Some(x) = x.get_mut(op) {
+                            *x += add as f32;
+                        }
+                    }
+                }
+                // pan, filter cutoff and resonance (M5) and the effects' parameters are not played
+                // (the coverage report names them)
+                _ => {}
+            }
+        }
+        let any = |a: &[f32; OPS]| a.iter().any(|&x| x != 0.0);
+        self.slfo = if any(&self.slfo_pitch) || any(&self.slfo_detune) {
+            SLFO_PITCH
+        } else {
+            0
+        } | if any(&self.slfo_amp) { SLFO_AMP } else { 0 }
+            | if any(&self.slfo_form) || self.slfo_fb != 0.0 {
+                SLFO_KERN
+            } else {
+                0
+            }
+            | if self.slfo_speed != 0.0 && (self.lfo_pitch_on || self.lfo_amp_on) {
+                SLFO_SPEED
+            } else {
+                0
+            };
+        // shortcut: tempo sync and random speed are not played (the coverage report names them)
+        self.slfo_hz = laws::slfo_hz(part(Part::SlfoSpeed, 0)) as f32;
+        self.slfo_wave = part(Part::SlfoWave, 0).clamp(0, 12) as u8;
+        // phase 0, 90, 120, 180, 240, 270 degrees
+        const PHASES: [u32; 6] = [0, 1 << 30, 0x5555_5555, 1 << 31, 0xaaaa_aaab, 3 << 30];
+        self.slfo_start = PHASES
+            .get(part(Part::SlfoPhase, 0).clamp(0, 5) as usize)
+            .copied()
+            .unwrap_or(0);
+        self.slfo_reset = part(Part::SlfoKeyOnReset, 0).clamp(0, 2) as u8;
+        self.slfo_env = core::array::from_fn(|i| laws::slfo_time_s(part(Part::SlfoTime, i)) as f32);
+        if let (true, Some(h)) = (part(Part::SlfoTime, 2) >= 127, self.slfo_env.get_mut(2)) {
+            *h = f32::INFINITY; // hold for ever
+        }
+        // the user wave: 2-16 steps, +63 playing as full scale
+        const CYCLES: [u8; 7] = [2, 3, 4, 6, 8, 12, 16];
+        self.slfo_steps = CYCLES
+            .get(part(Part::SlfoUserCycle, 0).clamp(0, 6) as usize)
+            .copied()
+            .unwrap_or(16);
+        self.slfo_slope = part(Part::SlfoUserSlope, 0).clamp(0, 3) as u8;
+        self.slfo_user = core::array::from_fn(|i| {
+            let v = part(Part::SlfoStep, i).clamp(-64, 63);
+            (if v == 63 { 64 } else { v }) as f32 / 64.0
+        });
     }
 }
 
@@ -875,6 +1036,10 @@ pub struct Engine {
     /// unit): one clock for every sound.
     clock: u64,
     tick: u64,
+    /// The frame of the block the event being applied is at (0 between blocks).
+    at: usize,
+    /// Each sound's sound LFO.
+    slfo: [Slfo; SOUNDS],
     /// A mono sound's keys still down whose notes another took over, oldest first.
     keys: [[Held; KEYS]; SOUNDS],
     keys_n: [u8; SOUNDS],
@@ -906,6 +1071,8 @@ impl Engine {
             last: [None; SOUNDS],
             clock: 0,
             tick: ((laws::GLIDE_TICK_MS * rate / 1000.0 * 65536.0 + 0.5) as u64).max(1),
+            at: 0,
+            slfo: [SLFO0; SOUNDS],
             keys: [[Held::default(); KEYS]; SOUNDS],
             keys_n: [0; SOUNDS],
             rate,
@@ -920,9 +1087,13 @@ impl Engine {
     /// [`Engine::choke`]); whether it was installed.
     pub fn set_sound(&mut self, sound: usize, p: &Prepared) -> bool {
         let busy = self.busy(sound);
-        match (self.sounds.get_mut(sound), self.rng.get_mut(sound)) {
-            (Some(d), Some(r)) if !busy => {
-                (*d, *r) = (*p, SEED);
+        match (
+            self.sounds.get_mut(sound),
+            self.rng.get_mut(sound),
+            self.slfo.get_mut(sound),
+        ) {
+            (Some(d), Some(r), Some(l)) if !busy => {
+                (*d, *r, *l) = (*p, SEED, SLFO0);
                 self.pending &= !bit(sound);
                 true
             }
@@ -1056,6 +1227,10 @@ impl Engine {
         }
         // a legato note: another key of the sound is down
         let legato = self.lanes.iter().any(|l| l.sound == s8 && l.held & !l.ending != 0);
+        if let Some(l) = self.slfo.get_mut(sound) {
+            let now = self.clock.wrapping_add(self.at as u64);
+            l.key_on(&p, !legato, now, self.rate);
+        }
         let new = Held { id, key, velocity };
         if p.mono {
             if let Some((li, s)) = self.sounding(s8) {
@@ -1431,7 +1606,7 @@ impl Engine {
             for e in events.iter().filter(|e| e.sound == sound) {
                 let at = e.frame.clamp(from, BLOCK);
                 self.render_sound::<V>(sound, out, from, at, end);
-                from = at;
+                (from, self.at) = (at, at);
                 let s = usize::from(sound);
                 match e.kind {
                     Kind::On { id, key, velocity } => self.note_on(s, id, key, velocity, end),
@@ -1443,7 +1618,7 @@ impl Engine {
             }
             self.render_sound::<V>(sound, out, from, BLOCK, end);
         }
-        self.clock = self.clock.wrapping_add(BLOCK as u64);
+        (self.clock, self.at) = (self.clock.wrapping_add(BLOCK as u64), 0);
     }
 
     /// Frames `from..to` of the lanes of `sound`, in control steps of 16 frames from `from` (the
@@ -1474,20 +1649,28 @@ impl Engine {
             lfo_hold: (f64::from(p.lfo_hold) * self.rate) as f32,
         };
         let clock = self.clock;
+        // the sound LFO at each step's end, once for all the sound's lanes
+        let mut sv = [0.0f32; BLOCK / STEP];
+        if let Some(l) = self.slfo.get_mut(usize::from(sound)).filter(|_| p.slfo != 0) {
+            l.steps(p, self.rate, to.saturating_sub(from), &mut sv);
+        }
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
             let mut f = from;
+            let mut k = 0usize;
             while let Some(chunk) = out.get_mut(f..to.min(f.saturating_add(STEP))) {
                 if chunk.is_empty() {
                     break;
                 }
                 let t = clock.wrapping_add(f as u64);
                 f = f.saturating_add(chunk.len());
+                let v = sv.get(k).copied().unwrap_or(0.0);
+                k = k.wrapping_add(1);
                 lane.compact();
                 // the lane's width follows its voices (kept in its first slots)
                 match lane.used {
                     0 => break,
-                    1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, chunk, y1),
-                    _ => step::<W, V>(lane, p, &c, t, end, chunk, y4),
+                    1 => step::<1, scalar::F<1>>(lane, p, &c, t, end, chunk, y1, v),
+                    _ => step::<W, V>(lane, p, &c, t, end, chunk, y4, v),
                 }
             }
         }
@@ -1515,15 +1698,15 @@ fn lfo_inc(hz: f32, rate: f64) -> u32 {
     (f64::from(hz) / rate * 4_294_967_296.0) as u32
 }
 
-/// The voice LFO of a lane's voices over a step of `n` frames, at its end: per voice its pitch
+/// The voice LFO of a lane's voices over a step of `n` frames (`inc` a frame), at its end: per voice its pitch
 /// share (-1 to 1, the swing's) and its amplitude share (0 at its top to 1 at its bottom), each
 /// times the delay's fade in. The waves from phase 0: triangle and saw down from their top, saw up
 /// and square from their bottom, sine from its middle going down, sample and hold a new value each
 /// cycle.
 #[inline(never)]
-fn voice_lfo<const L: usize>(lane: &mut Lane, p: &Prepared, c: &Ctx, n: usize) -> ([f32; W], [f32; W]) {
+fn voice_lfo<const L: usize>(lane: &mut Lane, p: &Prepared, c: &Ctx, n: usize, inc: u32) -> ([f32; W], [f32; W]) {
     let (mut v, mut a) = ([0.0f32; W], [0.0f32; W]);
-    let step = c.lfo_inc.wrapping_mul(n as u32);
+    let step = inc.wrapping_mul(n as u32);
     let live = (lane
         .lfo_ph
         .iter_mut()
@@ -1565,6 +1748,123 @@ fn sine(p: u32) -> f32 {
     a + (b - a) * ((p >> 6) & 0xffff) as f32 * (1.0 / 65536.0)
 }
 
+impl Slfo {
+    /// A key-on of its sound at frame `now` (`first`: no other key of the sound is down): with
+    /// key-on reset each, or first on a first key, the phase starts again (standing still for the
+    /// measured onset first) with a new sample-and-hold value; without reset a first key takes the
+    /// free-running phase. The envelope starts again with the phase, and on a first key without
+    /// reset (shortcut: unmeasured).
+    fn key_on(&mut self, p: &Prepared, first: bool, now: u64, rate: f64) {
+        if p.slfo_reset == 1 || (p.slfo_reset == 2 && first) {
+            self.ph = p.slfo_start;
+            self.wait = (laws::SLFO_START_S * rate) as u32;
+            self.held = random_bipolar(&mut self.rnd);
+            self.t = 0;
+        } else if first {
+            let inc = u64::from(lfo_inc(p.slfo_hz, rate));
+            self.ph = p.slfo_start.wrapping_add(inc.wrapping_mul(now) as u32);
+            self.t = 0;
+        }
+    }
+
+    /// Runs `frames` frames on in control steps of 16 (the last shorter), its value at each step's
+    /// end into `out`: the wave (-1 to 1) times the envelope.
+    fn steps(&mut self, p: &Prepared, rate: f64, frames: usize, out: &mut [f32; BLOCK / STEP]) {
+        let inc = lfo_inc(p.slfo_hz, rate);
+        let env = p.slfo_env.map(|s| s * rate as f32);
+        let mut left = frames;
+        for v in out.iter_mut() {
+            if left == 0 {
+                break;
+            }
+            let n = left.min(STEP) as u32;
+            left = left.saturating_sub(STEP);
+            let still = self.wait.min(n);
+            self.wait = self.wait.saturating_sub(still);
+            let run = n.saturating_sub(still);
+            let next = self.ph.wrapping_add(inc.wrapping_mul(run));
+            if next < self.ph {
+                self.held = random_bipolar(&mut self.rnd);
+            }
+            (self.ph, self.t) = (next, self.t.saturating_add(run));
+            *v = slfo_wave(p, next, self.held) * slfo_env(self.t as f32, &env);
+        }
+    }
+}
+
+/// A uniform value in [-1, 1) from the random source `r`.
+fn random_bipolar(r: &mut u32) -> f32 {
+    next_random(Some(r)) as f32 * (1.0 / 2_147_483_648.0) - 1.0
+}
+
+/// The sound LFO's envelope at `t` frames from its start: 0 through the delay, rising through the
+/// fade in, 1 through the hold (for ever when infinite), falling through the fade out, then 0
+/// (each stage in frames).
+fn slfo_env(t: f32, &[delay, fade_in, hold, fade_out]: &[f32; 4]) -> f32 {
+    let (up, down) = (delay + fade_in, delay + fade_in + hold);
+    if t < delay {
+        0.0
+    } else if t < up {
+        (t - delay) / fade_in
+    } else if t < down {
+        1.0
+    } else if t < down + fade_out {
+        1.0 - (t - down) / fade_out
+    } else {
+        0.0
+    }
+}
+
+/// The sound LFO's wave at phase `ph` (2^32 a cycle; `held`: the sample-and-hold value), as
+/// measured: triangle from 0 up; triangle 0 to 1; saw up 0 to 1; saw down 0 to -1; squares from
+/// their top for 1/4, 1/3, 1/2, 2/3, 3/4 of the cycle; the trapezoid (the triangle doubled and
+/// clipped); two sample and holds (shortcut: the second plays as the first, its difference not
+/// resolved); the user wave's steps with their slopes (up: towards a higher next step, down:
+/// towards a lower one, or both).
+fn slfo_wave(p: &Prepared, ph: u32, held: f32) -> f32 {
+    let x = ph as f32 * (1.0 / 4_294_967_296.0);
+    let tri = if x < 0.25 {
+        4.0 * x
+    } else if x < 0.75 {
+        2.0 - 4.0 * x
+    } else {
+        4.0 * x - 4.0
+    };
+    let top = |duty: u32| if ph < duty { 1.0 } else { -1.0 };
+    match p.slfo_wave {
+        0 => tri,
+        1 => 1.0 - (1.0 - 2.0 * x).abs(),
+        2 => x,
+        3 => -x,
+        4 => top(1 << 30),
+        5 => top(0x5555_5555),
+        6 => top(1 << 31),
+        7 => top(0xaaaa_aaab),
+        8 => top(3 << 30),
+        9 => (2.0 * tri).clamp(-1.0, 1.0),
+        10 | 11 => held,
+        _ => {
+            let n = u64::from(p.slfo_steps.clamp(2, 16));
+            let pos = u64::from(ph).wrapping_mul(n);
+            let i = (pos >> 32) as usize;
+            let f = (pos & 0xffff_ffff) as f32 * (1.0 / 4_294_967_296.0);
+            let a = p.slfo_user.get(i).copied().unwrap_or(0.0);
+            let b = if i.wrapping_add(1) as u64 >= n {
+                0
+            } else {
+                i.wrapping_add(1)
+            };
+            let b = p.slfo_user.get(b).copied().unwrap_or(0.0);
+            let ramp = p.slfo_slope == 3 || (p.slfo_slope == 1 && b > a) || (p.slfo_slope == 2 && b < a);
+            if ramp {
+                a + (b - a) * f
+            } else {
+                a
+            }
+        }
+    }
+}
+
 impl Ctx {
     /// Whether the glide clock ticks in the step of `n` frames from frame `t`.
     fn ticks(&self, t: u64, n: usize) -> bool {
@@ -1592,26 +1892,42 @@ fn step<const L: usize, V: F4<L>>(
     end: &mut impl FnMut(NoteEnd),
     out: &mut [f32],
     y: &mut [[[f32; L]; STEP]; OPS],
+    sv: f32,
 ) {
     let n = out.len().clamp(1, STEP);
-    // a sound without a voice LFO skips this
-    let lfo = (p.lfo_pitch_on || p.lfo_amp_on).then(|| voice_lfo::<L>(lane, p, c, n));
-    let (g0, dg) = envelopes::<L, V>(lane, p, c, n, end, lfo.as_ref().map(|l| &l.1));
+    // a sound without a voice LFO skips this; the sound LFO's speed destination moves its rate
+    let lfo = (p.lfo_pitch_on || p.lfo_amp_on).then(|| {
+        let inc = if p.slfo & SLFO_SPEED != 0 {
+            let speed = i32::from(p.lfo_speed.1).saturating_add((sv * p.slfo_speed) as i32);
+            lfo_inc(laws::lfo_hz(p.lfo_speed.0, speed) as f32, c.rate)
+        } else {
+            c.lfo_inc
+        };
+        voice_lfo::<L>(lane, p, c, n, inc)
+    });
+    let (g0, dg) = envelopes::<L, V>(lane, p, c, n, end, lfo.as_ref().map(|l| &l.1), sv);
+    // the sound LFO's pitch (a sound without it skips this)
+    let sp = (p.slfo & SLFO_PITCH != 0).then(|| slfo_pitch::<L>(lane, p, sv));
     // a lane whose pitch does not move skips this
-    let ramp = if lane.moving != 0 || lane.jump || lane.bend != c.bend || p.lfo_pitch_on {
-        pitch::<L, V>(lane, p, c, t, n, lfo.as_ref().map_or(&[0.0; W], |l| &l.0))
+    let ramp = if lane.moving != 0 || lane.jump || lane.bend != c.bend || p.lfo_pitch_on || sp.is_some() {
+        pitch::<L, V>(lane, p, c, t, n, lfo.as_ref().map_or(&[0.0; W], |l| &l.0), sp.as_ref())
     } else {
         None
     };
+    // what the kernels play: the sound's plan, or its forms and feedback where the sound LFO
+    // moves them
+    let kern = (p.slfo & SLFO_KERN != 0).then(|| slfo_kern(p, sv));
+    let (plan, fbk) = kern.as_ref().map_or((&p.plan, p.fbk), |k| (&k.0, k.1));
     let start = (n < STEP).then(|| (lane.ph, lane.fb[0]));
     let mut vout = [[0.0f32; L]; STEP];
     // a sound with sines only runs the kernels without the forms' branches; the increments ramp
     // only while a pitch envelope moves them
-    match (p.plan.forms, &ramp) {
-        (true, None) => ops::<L, V, true, false>(lane, p, &g0, &dg, &[[0; L]; OPS], y, &mut vout),
-        (false, None) => ops::<L, V, false, false>(lane, p, &g0, &dg, &[[0; L]; OPS], y, &mut vout),
-        (true, Some((d, _))) => ops::<L, V, true, true>(lane, p, &g0, &dg, d, y, &mut vout),
-        (false, Some((d, _))) => ops::<L, V, false, true>(lane, p, &g0, &dg, d, y, &mut vout),
+    let k = Kern { plan, fbk };
+    match (plan.forms, &ramp) {
+        (true, None) => ops::<L, V, true, false>(lane, k, &g0, &dg, &[[0; L]; OPS], y, &mut vout),
+        (false, None) => ops::<L, V, false, false>(lane, k, &g0, &dg, &[[0; L]; OPS], y, &mut vout),
+        (true, Some((d, _))) => ops::<L, V, true, true>(lane, k, &g0, &dg, d, y, &mut vout),
+        (false, Some((d, _))) => ops::<L, V, false, true>(lane, k, &g0, &dg, d, y, &mut vout),
     }
     if let Some((ph0, fb0)) = start {
         short(lane, p, n, &ph0, &fb0, y, ramp.as_ref().map(|r| &r.0));
@@ -1630,6 +1946,61 @@ fn step<const L: usize, V: F4<L>>(
             _ => 0.0,
         };
     }
+}
+
+/// What the operator kernels play: a plan and its feedback amount.
+#[derive(Clone, Copy)]
+struct Kern<'a> {
+    plan: &'a Plan,
+    fbk: f32,
+}
+
+/// The sound LFO's pitch at its value `sv`, per operator and voice (octaves): the frequency
+/// destination's share of its swing, and the detune destination's move (steps rounded towards 0,
+/// the detune held within -15..+15) at each voice's key.
+#[inline(never)]
+fn slfo_pitch<const L: usize>(lane: &Lane, p: &Prepared, sv: f32) -> [[f32; W]; OPS] {
+    let mut out = [[0.0f32; W]; OPS];
+    for (op, o) in (0..OPS).zip(out.iter_mut()) {
+        let swing = sv * at(&p.slfo_pitch, op);
+        let d0 = i32::from(p.detune.get(op).copied().unwrap_or(0));
+        let d = d0.saturating_add((sv * at(&p.slfo_detune, op)) as i32).clamp(-15, 15);
+        for (x, &key) in o.iter_mut().zip(lane.key.iter()).take(L) {
+            let k = i32::from(key).wrapping_add(i32::from(p.note_shift));
+            let detune = if d == d0 {
+                0
+            } else {
+                laws::detune_steps(d, k).wrapping_sub(laws::detune_steps(d0, k))
+            };
+            *x = swing + detune as f32 / 2048.0;
+        }
+    }
+    out
+}
+
+/// What the kernels play while the sound LFO (at its value `sv`) moves operators' forms or the
+/// feedback: the plan with the moved forms (steps rounded towards 0, within 0-6) and the feedback
+/// amount at the moved feedback (within 0-7).
+#[inline(never)]
+fn slfo_kern(p: &Prepared, sv: f32) -> (Plan, f32) {
+    let fb = i32::from(p.feedback)
+        .saturating_add((sv * p.slfo_fb) as i32)
+        .clamp(0, 7);
+    let waves = core::array::from_fn(|op| {
+        let k = at(&p.slfo_form, op);
+        match (p.forms.get(op), p.plan.waves.get(op)) {
+            (Some(&(f, s, n)), _) if k != 0.0 => Wave::new(
+                i32::from(f).saturating_add((sv * k) as i32).clamp(0, 6),
+                i32::from(s),
+                i32::from(n),
+            ),
+            (_, w) => w.copied().unwrap_or(Wave::Sine),
+        }
+    });
+    (
+        p.plan.with_waves(waves),
+        p.slfo_fbk.get(fb as usize).copied().unwrap_or(0.0),
+    )
 }
 
 /// After a step of `n` frames (fewer than 16) rendered whole: the phases `n` increments on from
@@ -1682,6 +2053,7 @@ fn pitch<const L: usize, V: F4<L>>(
     t: u64,
     n: usize,
     lfo: &[f32; W],
+    sp: Option<&[[f32; W]; OPS]>,
 ) -> Option<(Incs<L>, Incs<L>)> {
     let pt = &mut lane.pt;
     let mut gliding = 0;
@@ -1702,12 +2074,13 @@ fn pitch<const L: usize, V: F4<L>>(
     }
     if lane.jump || lane.bend != c.bend {
         (lane.jump, lane.bend) = (false, c.bend);
-        for (inc, to) in lane.inc.iter_mut().zip(incs::<L, V>(pt, p, c, lfo).iter()) {
+        for (inc, to) in lane.inc.iter_mut().zip(incs::<L, V>(pt, p, c, lfo, sp).iter()) {
             V::U::load(*to).store4(inc);
         }
     }
     let moves = |seg: u8| matches!(seg, ATTACK | DECAY1 | DECAY2 | RELEASE);
-    if pt.op_attack | pt.op_decay == 0 && !pt.c_seg.iter().take(L).any(|&s| moves(s)) && !p.lfo_pitch_on {
+    if pt.op_attack | pt.op_decay == 0 && !pt.c_seg.iter().take(L).any(|&s| moves(s)) && !p.lfo_pitch_on && sp.is_none()
+    {
         lane.moving = gliding;
         return None;
     }
@@ -1764,7 +2137,7 @@ fn pitch<const L: usize, V: F4<L>>(
         }
     }
     lane.moving = moving | gliding;
-    let to = incs::<L, V>(pt, p, c, lfo);
+    let to = incs::<L, V>(pt, p, c, lfo, sp);
     let mut d = [[0u32; L]; OPS];
     for ((d, to), from) in d.iter_mut().zip(to.iter()).zip(lane.inc.iter()) {
         for ((d, &to), &from) in d.iter_mut().zip(to.iter()).zip(from.iter()) {
@@ -1777,11 +2150,17 @@ fn pitch<const L: usize, V: F4<L>>(
 
 /// Each live operator's increment from a lane's pitch state: its base times 2 to the octaves
 /// that move it (the common pitch envelope and portamento for ratio-mode operators, the
-/// operator's own envelope, the bend, the voice LFO's share `lfo` of each operator's swing), held
-/// under Nyquist (fixed-mode ones at their highest frequency); a voice that nothing moves keeps its
-/// base exactly.
+/// operator's own envelope, the bend, the voice LFO's share `lfo` of each operator's swing, the
+/// sound LFO's pitch `sp`), held under Nyquist (fixed-mode ones at their highest frequency); a
+/// voice that nothing moves keeps its base exactly.
 #[inline(always)]
-fn incs<const L: usize, V: F4<L>>(pt: &Pitch, p: &Prepared, c: &Ctx, lfo: &[f32; W]) -> [[u32; L]; OPS] {
+fn incs<const L: usize, V: F4<L>>(
+    pt: &Pitch,
+    p: &Prepared,
+    c: &Ctx,
+    lfo: &[f32; W],
+    sp: Option<&[[f32; W]; OPS]>,
+) -> [[u32; L]; OPS] {
     let zero = V::splat(0.0);
     let bend = V::splat(c.bend);
     let common = V::load4(&pt.c) + V::load4(&pt.glide) + bend;
@@ -1798,6 +2177,9 @@ fn incs<const L: usize, V: F4<L>>(pt: &Pitch, p: &Prepared, c: &Ctx, lfo: &[f32;
         if p.lfo_pitch_on && !fixed {
             m = V::load4(lfo).mul_add(V::splat(at(&p.lfo_pitch, op)), m);
         }
+        if let Some(s) = sp.and_then(|s| s.get(op)) {
+            m = m + V::load4(s);
+        }
         let base = V::U::load4(pt.base.get(op).unwrap_or(&[0; W]));
         // 2^m as 2^(m - 16) 2^16, within the vector exp2's range
         let f = base.i32_to_f32() * (m - V::splat(16.0)).exp2() * V::splat(65536.0);
@@ -1812,8 +2194,8 @@ fn incs<const L: usize, V: F4<L>>(pt: &Pitch, p: &Prepared, c: &Ctx, lfo: &[f32;
 
 /// One control step of a lane's envelopes: returns each operator's gain at the step's start and
 /// its ramp a frame (with the voice LFO's amplitude share `lfo`, each operator's loss through the
-/// bend); moves segments on, fades shed voices, and ends voices (the end rule, a fade's end: the
-/// bound leaves the LFO's loss out).
+/// bend, and the sound LFO's at its value `sv`, straight in dB); moves segments on, fades shed
+/// voices, and ends voices (the end rule, a fade's end: the bound leaves the LFOs' losses out).
 #[inline(always)]
 fn envelopes<const L: usize, V: F4<L>>(
     lane: &mut Lane,
@@ -1822,8 +2204,11 @@ fn envelopes<const L: usize, V: F4<L>>(
     n: usize,
     end: &mut impl FnMut(NoteEnd),
     lfo: Option<&[f32; W]>,
+    sv: f32,
 ) -> ([[f32; L]; OPS], [[f32; L]; OPS]) {
     let amp = lfo.filter(|_| p.lfo_amp_on);
+    // the sound LFO's level destination: none lost at its top, all at its bottom
+    let slfo_amp = (p.slfo & SLFO_AMP != 0).then_some(1.0 - sv);
     // a step of `n` frames moves each envelope `k` of a 16-frame step's way
     let (k, per_frame) = (n as f32 / STEP as f32, V::splat(1.0 / n as f32));
     let (shed, retrig) = (c.shed_step * k, c.retrig_step * k);
@@ -1875,6 +2260,10 @@ fn envelopes<const L: usize, V: F4<L>>(
             }
             None => l2,
         };
+        let heard = match slfo_amp {
+            Some(u) => (heard - V::splat(u * at(&p.slfo_amp, i))).max(V::splat(FLOOR)),
+            None => heard,
+        };
         let target = heard.exp2() * fade;
         let g_last = V::load4(gain);
         *g = g_last.store();
@@ -1924,7 +2313,7 @@ fn envelopes<const L: usize, V: F4<L>>(
 #[allow(clippy::too_many_arguments)]
 fn ops<const L: usize, V: F4<L>, const FORMS: bool, const RAMP: bool>(
     lane: &mut Lane,
-    p: &Prepared,
+    p: Kern,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
     di: &[[u32; L]; OPS],
@@ -1959,7 +2348,7 @@ fn ops<const L: usize, V: F4<L>, const FORMS: bool, const RAMP: bool>(
 #[allow(clippy::too_many_arguments)]
 fn single<const L: usize, V: F4<L>, const FORMS: bool, const RAMP: bool>(
     lane: &mut Lane,
-    p: &Prepared,
+    p: Kern,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
     di: &[[u32; L]; OPS],
@@ -2133,7 +2522,7 @@ fn run<const L: usize, V: F4<L>, const RAMP: bool>(
 #[allow(clippy::too_many_arguments)]
 fn interleaved_forms<const L: usize, V: F4<L>, const RAMP: bool>(
     lane: &mut Lane,
-    p: &Prepared,
+    p: Kern,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
     di: &[[u32; L]; OPS],
@@ -2154,7 +2543,7 @@ const LOOP: usize = 3;
 #[allow(clippy::too_many_arguments)]
 fn interleaved<const L: usize, V: F4<L>, const MIXED: bool, const RAMP: bool>(
     lane: &mut Lane,
-    p: &Prepared,
+    p: Kern,
     g0: &[[f32; L]; OPS],
     dg: &[[f32; L]; OPS],
     di: &[[u32; L]; OPS],
@@ -2419,6 +2808,283 @@ mod tests {
         let late: Vec<f64> = x[(2.0 * hold) as usize + BLOCK..].chunks(BLOCK).map(peak_db).collect();
         let lo = late.iter().fold(0.0f64, |l, &b| l.min(b));
         assert!((laws::CARRIER_FULL_DBFS - lo - 6.0).abs() < 0.1, "{lo}");
+    }
+
+    /// The sound LFO's waves, phases, user wave, envelope and onset against the laws written out
+    /// here, at each step's end: its value after a key-on reset at frame 0.
+    #[test]
+    fn sound_lfo_waves_and_envelope() {
+        let tri = |x: f64| {
+            if x < 0.25 {
+                4.0 * x
+            } else if x < 0.75 {
+                2.0 - 4.0 * x
+            } else {
+                4.0 * x - 4.0
+            }
+        };
+        let sq = |x: f64, d: f64| if x < d { 1.0 } else { -1.0 };
+        let user = [40, -64, 63, 0, 10, -20, 30, -40, 50, -60, 5, 15, 25, 35, 45, 55];
+        let steps: String = (0..16).map(|i| format!(" slfo_step{}={}", i + 1, user[i])).collect();
+        let step_v = move |i: usize| f64::from(if user[i] == 63 { 64 } else { user[i] }) / 64.0;
+        // wave 12 at user cycle 4 (8 steps) and each slope
+        let user_law = move |x: f64, slope: i32| {
+            let pos = x * 8.0;
+            let i = (pos as usize).min(7);
+            let (a, b) = (step_v(i), step_v((i + 1) % 8));
+            let ramp = slope == 3 || (slope == 1 && b > a) || (slope == 2 && b < a);
+            if ramp {
+                a + (b - a) * pos.fract()
+            } else {
+                a
+            }
+        };
+        type Law = Box<dyn Fn(f64) -> f64>;
+        let mut cases: Vec<(String, Law)> = vec![
+            ("slfo_wave=0".into(), Box::new(tri)),
+            ("slfo_wave=1".into(), Box::new(|x: f64| 1.0 - (1.0 - 2.0 * x).abs())),
+            ("slfo_wave=2".into(), Box::new(|x| x)),
+            ("slfo_wave=3".into(), Box::new(|x: f64| -x)),
+            ("slfo_wave=4".into(), Box::new(move |x| sq(x, 0.25))),
+            ("slfo_wave=5".into(), Box::new(move |x| sq(x, 1.0 / 3.0))),
+            ("slfo_wave=6".into(), Box::new(move |x| sq(x, 0.5))),
+            ("slfo_wave=7".into(), Box::new(move |x| sq(x, 2.0 / 3.0))),
+            ("slfo_wave=8".into(), Box::new(move |x| sq(x, 0.75))),
+            ("slfo_wave=9".into(), Box::new(move |x| (2.0 * tri(x)).clamp(-1.0, 1.0))),
+            (
+                "slfo_wave=0 slfo_phase=2".into(),
+                Box::new(move |x| tri((x + 1.0 / 3.0).fract())),
+            ),
+            (
+                "slfo_wave=6 slfo_phase=5".into(),
+                Box::new(move |x| sq((x + 0.75).fract(), 0.5)),
+            ),
+        ];
+        for slope in 0..4 {
+            let text = format!("slfo_wave=12 slfo_user_cycle=4 slfo_user_slope={slope}{steps}");
+            cases.push((text, Box::new(move |x| user_law(x, slope))));
+        }
+        let (hz, onset) = (laws::slfo_hz(40), (laws::SLFO_START_S * RATE) as u32);
+        for (text, law) in &cases {
+            let p = sound(&format!("slfo_speed=40 slfo_dest1=75 slfo_depth1=8 {text}"));
+            let mut l = SLFO0;
+            l.key_on(&p, true, 0, RATE);
+            let inc = lfo_inc(p.slfo_hz, RATE);
+            let mut out = [0.0f32; BLOCK / STEP];
+            for b in 0..300u32 {
+                l.steps(&p, RATE, BLOCK, &mut out);
+                for (k, &v) in out.iter().enumerate() {
+                    let run = (b * BLOCK as u32 + 16 * (k as u32 + 1)).saturating_sub(onset);
+                    let ph = inc.wrapping_mul(run);
+                    let x = f64::from(ph) / 4_294_967_296.0;
+                    // (single precision; a square's edge may fall either side of a step's end)
+                    let want = law(x);
+                    let edge = (law((x + 1e-6).fract()) - law((x + 1.0 - 1e-6).fract())).abs() > 0.1;
+                    assert!(edge || (f64::from(v) - want).abs() < 1e-5, "{text}: {v} {want} at {x}");
+                }
+            }
+            assert!((f64::from(inc) / 4_294_967_296.0 * RATE / hz - 1.0).abs() < 1e-5);
+        }
+        // sample and hold: one uniform value a cycle, new at each wrap (both waves)
+        for w in [10, 11] {
+            let p = sound(&format!("slfo_speed=63 slfo_dest1=78 slfo_depth1=8 slfo_wave={w}"));
+            let mut l = SLFO0;
+            l.key_on(&p, true, 0, RATE);
+            let (mut out, mut held) = ([0.0f32; BLOCK / STEP], Vec::new());
+            for _ in 0..3000 {
+                let before = l.ph;
+                l.steps(&p, RATE, BLOCK, &mut out);
+                assert!(out.iter().all(|&v| (-1.0..1.0).contains(&v)));
+                if l.ph < before || held.is_empty() {
+                    held.push(out[7]);
+                }
+            }
+            let mean = held.iter().map(|&v| f64::from(v)).sum::<f64>() / held.len() as f64;
+            assert!(held.len() > 90 && mean.abs() < 0.15, "{} {mean}", held.len());
+        }
+        // the envelope: delay 40 (151 ms), fade in 64 (452 ms), hold 48 (211 ms), fade out 80 (1.024 s)
+        let p = sound("slfo_wave=4 slfo_speed=0 slfo_delay=40 slfo_fade_in=64 slfo_hold=48 slfo_fade_out=80 slfo_dest1=78 slfo_depth1=8");
+        let [d, fi, h, fo] = [0.151, 0.452, 0.211, 1.024].map(|s| s * RATE);
+        let env = |t: f64| (((t - d) / fi).min(1.0).min(1.0 - (t - d - fi - h) / fo)).clamp(0.0, 1.0);
+        let mut l = SLFO0;
+        l.key_on(&p, true, 0, RATE);
+        let mut out = [0.0f32; BLOCK / STEP];
+        for b in 0..(2.0 * RATE) as usize / BLOCK {
+            l.steps(&p, RATE, BLOCK, &mut out);
+            for (k, &v) in out.iter().enumerate() {
+                let t = ((b * BLOCK + 16 * (k + 1)) as f64 - f64::from(onset)).max(0.0);
+                assert!((f64::from(v) - env(t)).abs() < 1e-4, "{t}: {v} {}", env(t));
+            }
+        }
+        // hold 127 holds for ever
+        let p = sound("slfo_wave=4 slfo_speed=0 slfo_fade_in=10 slfo_hold=127 slfo_dest1=78 slfo_depth1=8");
+        let mut l = SLFO0;
+        l.key_on(&p, true, 0, RATE);
+        for _ in 0..(30.0 * RATE) as usize / BLOCK {
+            l.steps(&p, RATE, BLOCK, &mut out);
+        }
+        assert_eq!(out[7], 1.0);
+    }
+
+    /// The sound LFO's destinations through the engine: frequency and detune (pitch), level, and
+    /// the stepped ones (feedback, form, the voice LFO's speed: at the LFO's top the same bits as
+    /// the sound with the moved value); key-on reset modes; the pitch route against the
+    /// per-sample law.
+    #[test]
+    fn sound_lfo_destinations() {
+        // a square from its top, slow (speed 10: 3.7 s a half cycle) so the first second is the top
+        let slow = "slfo_wave=6 slfo_speed=10 slfo_key_on_reset=1";
+        let f0 = zero_crossing_hz(&play::<Native>(&carrier(1, ""), 69, 100.0, 1000, 40)[BLOCK * 4..]);
+        let cents = |x: &[f32]| 1200.0 * (zero_crossing_hz(x) / f0).log2();
+        let x = play::<Native>(
+            &carrier(1, &format!("{slow} slfo_dest1=75 slfo_depth1=8")),
+            69,
+            100.0,
+            1000,
+            300,
+        );
+        assert!((cents(&x[2000..]) - laws::slfo_pitch_cents(8)).abs() < 0.2);
+        // the depth ratio (64: depth 4) and the box (off: none)
+        let x = play::<Native>(
+            &carrier(1, &format!("{slow} slfo_dest1=75 slfo_depth1=8 op1.slfo_ratio1=64")),
+            69,
+            100.0,
+            1000,
+            40,
+        );
+        assert!((cents(&x[2000..]) - laws::slfo_pitch_cents(4)).abs() < 0.2);
+        let x = play::<Native>(
+            &carrier(1, &format!("{slow} slfo_dest1=75 slfo_depth1=8 op1.slfo_box1=0")),
+            69,
+            100.0,
+            1000,
+            40,
+        );
+        assert!(cents(&x[2000..]).abs() < 0.05);
+        // detune: depth 64 is 16 steps at the top, held at +15
+        let x = play::<Native>(
+            &carrier(1, &format!("{slow} slfo_dest1=77 slfo_depth1=64")),
+            69,
+            100.0,
+            1000,
+            40,
+        );
+        let want = 1200.0
+            * (laws::steps_hz(laws::key_steps(69) + laws::detune_steps(15, 69)) / laws::steps_hz(laws::key_steps(69)))
+                .log2();
+        assert!((cents(&x[2000..]) - want).abs() < 0.2, "{} {want}", cents(&x[2000..]));
+        // level: depth 32 loses 18.85 dB at the bottom, nothing at the top (a fast square)
+        let s = carrier(
+            1,
+            "slfo_wave=6 slfo_speed=40 slfo_key_on_reset=1 slfo_dest1=78 slfo_depth1=32",
+        );
+        let x = play::<Native>(&s, 69, 100.0, 1000, 400);
+        let blocks: Vec<f64> = x.chunks(BLOCK * 4).skip(2).map(peak_db).collect();
+        let (hi, lo) = blocks
+            .iter()
+            .fold((-200.0f64, 0.0f64), |(h, l), &b| (h.max(b), l.min(b)));
+        assert!(
+            (hi - laws::CARRIER_FULL_DBFS).abs() < 0.05 && (hi - lo - laws::slfo_level_db(32)).abs() < 0.1,
+            "{hi} {lo}"
+        );
+        // stepped destinations at the top: the same bits as the moved value
+        let same = |lfo: &str, moved: &str| {
+            let base = "algorithm=1 op1.level=99 op2.level=80 op8.level=0 portamento=0";
+            let a = play::<Native>(&sound(&format!("{base} {slow} {lfo}")), 60, 100.0, 1000, 300);
+            let b = play::<Native>(&sound(&format!("{base} {moved}")), 60, 100.0, 1000, 300);
+            assert!(a.iter().zip(&b).all(|(a, b)| a.to_bits() == b.to_bits()), "{lfo}");
+        };
+        same("slfo_dest1=74 slfo_depth1=112", "feedback=7");
+        same("feedback=2 slfo_dest2=74 slfo_depth2=40", "feedback=4");
+        same(
+            "slfo_dest1=76 slfo_depth1=96 op2.spread=3 op1.slfo_box1=0",
+            "op2.form=6 op2.spread=3",
+        );
+        same("slfo_dest3=76 slfo_depth3=127 op2.form=3 op1.slfo_box3=0", "op2.form=6");
+        let vlfo = "lfo_speed_range=0 lfo_pitch_depth=30 op2.lfo_pitch_offset=7";
+        same(
+            &format!("{vlfo} lfo_speed=20 slfo_dest1=71 slfo_depth1=64"),
+            &format!("{vlfo} lfo_speed=70"),
+        );
+        // the pitch route against the per-sample law: a triangle from 0 up, 8 cycles at a time
+        let s = carrier(
+            1,
+            "slfo_wave=0 slfo_speed=40 slfo_key_on_reset=1 slfo_dest1=75 slfo_depth1=8",
+        );
+        let x = play::<Native>(&s, 69, 100.0, 1000, 800);
+        let (hz, swing, onset) = (
+            laws::slfo_hz(40),
+            laws::slfo_pitch_cents(8) / 1200.0,
+            laws::SLFO_START_S * RATE,
+        );
+        let law = |k: f64| {
+            let u = (hz * (k - onset).max(0.0) / RATE).fract();
+            let t = if u < 0.25 {
+                4.0 * u
+            } else if u < 0.75 {
+                2.0 - 4.0 * u
+            } else {
+                4.0 * u - 4.0
+            };
+            f0 * (swing * t).exp2()
+        };
+        let mut c = Vec::new();
+        for i in 1..x.len() {
+            if x[i - 1] < 0.0 && x[i] >= 0.0 {
+                c.push(i as f64 - 1.0 + f64::from(x[i - 1] / (x[i - 1] - x[i])));
+            }
+        }
+        let mut worst = 0.0f64;
+        for w in c.windows(9).step_by(8) {
+            let (a, b) = (w[0], w[8]);
+            let want = (a.ceil() as usize..b.floor() as usize)
+                .map(|k| law(k as f64))
+                .sum::<f64>()
+                / (b.floor() - a.ceil());
+            worst = worst.max((1200.0 * (8.0 / (b - a) * RATE / want).log2()).abs());
+        }
+        assert!(worst < 0.2, "worst {worst} cents");
+    }
+
+    /// Key-on reset: each note starts the phase again; first only when no key of the sound is
+    /// down; off keeps it free-running from the engine's clock (a first key starts the envelope).
+    #[test]
+    fn sound_lfo_key_on_reset() {
+        let run = |reset: i32, events: &[Event]| {
+            let p = sound(&format!(
+                "slfo_wave=2 slfo_speed=40 slfo_dest1=75 slfo_depth1=8 slfo_key_on_reset={reset}"
+            ));
+            let mut e = engine(&p);
+            let mut out = [0.0; BLOCK];
+            e.render_events::<Native>(&mut out, events, &mut |_| {});
+            e.slfo[0]
+        };
+        let inc = lfo_inc(laws::slfo_hz(40) as f32, RATE);
+        let onset = (laws::SLFO_START_S * RATE) as u32;
+        let two = [on(10, 0, 1, 60), on(100, 0, 2, 64)];
+        // each: the second note at 100 starts it again (still at the block's end, 28 frames on)
+        let l = run(1, &two);
+        assert_eq!((l.ph, l.wait, l.t), (0, onset - 28, 0));
+        // first: the second note is legato, the phase runs on from the first note's start
+        let l = run(2, &two);
+        assert_eq!((l.ph, l.wait), (0, onset - 118));
+        // off: free-running from frame 0 of the clock
+        let l = run(0, &two);
+        assert_eq!((l.ph, l.t, l.wait), (inc.wrapping_mul(128), 118, 0));
+        // first after a release: starts again
+        let l = run(
+            2,
+            &[
+                on(10, 0, 1, 60),
+                Event {
+                    frame: 50,
+                    sound: 0,
+                    kind: Kind::Off { id: 1 },
+                },
+                on(100, 0, 2, 64),
+            ],
+        );
+        assert_eq!((l.ph, l.wait), (0, onset - 28));
     }
 
     /// A parameter event takes effect at its frame (the same bits as the change made between two

@@ -128,6 +128,26 @@ pub extern "C" fn fm_nopanic_engine(pick: u32, key: u8, velocity: f32, blocks: u
         (40, (pick / 7 % 199) as i16 - 99),
         (249, (pick % 128) as i16 - 64),
         (251, (pick / 3 % 128) as i16 - 64),
+        // the sound LFO: phase, wave, speed, the envelope, key-on reset, its three destinations
+        // (the reference's numbers 70-78) and depths, the user wave
+        (214, (pick / 3 % 6) as i16),
+        (215, (pick / 11 % 13) as i16),
+        (216, (pick % 64) as i16),
+        (219, (pick / 13 % 128) as i16),
+        (220, (pick / 17 % 128) as i16),
+        (221, (pick / 19 % 128) as i16),
+        (222, (pick / 23 % 128) as i16),
+        (223, (pick / 61 % 3) as i16),
+        (224, (pick % 9) as i16 + 70),
+        (225, (pick / 3 % 128) as i16),
+        (226, (pick / 7 % 9) as i16 + 70),
+        (227, (pick / 11 % 128) as i16),
+        (228, (pick / 13 % 9) as i16 + 70),
+        (229, (pick / 17 % 128) as i16),
+        (230, (pick / 19 % 7) as i16),
+        (231, (pick / 23 % 4) as i16),
+        (232, (pick % 128) as i16 - 64),
+        (247, (pick / 5 % 128) as i16 - 64),
     ] {
         let _ = s.set(id, v);
     }

@@ -3,11 +3,23 @@
 //! it. `docs/coverage.md` is the same table with each law's accuracy, and a test ties the two.
 //! A sound's report lists its parameters at non-default values that the engine does not play.
 
-use crate::params::Param;
+use crate::params::{Param, Part, PARAMS};
 use crate::sound::Sound;
 
 /// Played, or why not (the milestone that brings it).
 pub const PLAYED: &str = "played";
+
+/// Tempo sync: the core has no tempo input.
+const NO_TEMPO: &str = "not covered (no tempo input)";
+
+/// Why a sound LFO destination (the reference's number) with depth is not played, or `None`.
+pub fn slfo_destination(dest: i16) -> Option<&'static str> {
+    match dest {
+        71 | 74..=78 => None,
+        70 | 72 | 73 => Some("M5 (filter and output)"),
+        _ => Some("not covered (an effect's parameter, not the engine's)"),
+    }
+}
 
 /// The coverage of one parameter.
 pub fn status(p: &Param) -> &'static str {
@@ -72,6 +84,14 @@ pub fn status(p: &Param) -> &'static str {
     let starts = |prefixes: &[&str]| prefixes.iter().any(|x| n.starts_with(x));
     if (op && played_op.contains(&n)) || (!op && played_part.contains(&n)) {
         PLAYED
+    } else if starts(&["slfo_tempo"]) {
+        NO_TEMPO
+    } else if n == "slfo_random_speed" {
+        "M7 (unmeasured)"
+    } else if starts(&["slfo_"]) {
+        // M4: the sound LFO, its destinations (those not played: `slfo_destination`), boxes and
+        // ratios
+        PLAYED
     } else if starts(&["ctrl_set", "key_ctrl_set", "tuning_"]) || n.ends_with("_ctrl_sens") {
         "M7 (controllers, tuning)"
     } else if starts(&[
@@ -105,12 +125,19 @@ pub fn status(p: &Param) -> &'static str {
 }
 
 /// Calls `f` with each parameter of `s` at a non-default value that the engine does not play,
-/// its value and why.
+/// its value and why, and each sound LFO destination with depth that it does not play.
 pub fn not_covered(s: &Sound, mut f: impl FnMut(&'static Param, i16, &'static str)) {
     for (p, v) in s.changed() {
         let why = status(p);
         if why != PLAYED {
             f(p, v, why);
+        }
+    }
+    for d in 0..3 {
+        let i = Part::SlfoDest as usize + 2 * d;
+        let (dest, depth) = (s.get(i), s.get(i + 1));
+        if let (true, Some(why), Some(p)) = (depth > 0, slfo_destination(dest), PARAMS.get(i)) {
+            f(p, dest, why);
         }
     }
 }
@@ -156,12 +183,22 @@ mod tests {
     #[test]
     fn report() {
         let s = Sound::from_text(
-            "fm-sound/1\nalgorithm=5 random_pan=3 slfo_depth1=3\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
+            "fm-sound/1\nalgorithm=5 random_pan=3 slfo_depth1=3 slfo_dest2=72 slfo_depth2=9 slfo_dest3=75 \
+             slfo_depth3=1 slfo_tempo_sync=1\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
         )
         .unwrap();
         let mut got = Vec::new();
         not_covered(&s, |p, v, why| got.push((p.id, v, why)));
-        assert_eq!(got, vec![(0, 3, "M5 (filter and output)"), (225, 3, "M4 (modulators)")]);
+        let effect = "not covered (an effect's parameter, not the engine's)";
+        assert_eq!(
+            got,
+            vec![
+                (0, 3, "M5 (filter and output)"),
+                (217, 1, NO_TEMPO),
+                (224, 2, effect),
+                (226, 72, "M5 (filter and output)")
+            ]
+        );
         let mut n = 0;
         not_covered(&Sound::default(), |_, _, _| n += 1);
         assert_eq!(n, 0);

@@ -12,9 +12,11 @@ FM plugin profile's measured accuracy against the reference (docs/design.md, sec
 the laws here reuse; "the engine" figures are this repository's tests. Known differences from the
 reference: docs/known-differences.md.
 
-At M4 (in part: the sound LFO is not built yet): the laws below are played on every routing, the
-operator forms, pitch, the voice LFO, the macros, level scaling and the part's envelope offsets
-included; nothing else. Pitch that moves (both pitch envelopes, portamento, bend, the voice LFO) is
+At M4: the laws below are played on every routing, the operator forms, pitch, the voice LFO, the
+sound LFO, the macros, level scaling and the part's envelope offsets included; nothing else. A
+sound LFO destination with depth that is not played (pan, filter, an effect's parameter) is
+reported by `fmbench coverage` beside the parameters. Pitch that moves (both pitch envelopes,
+portamento, bend, the voice and sound LFOs) is
 evaluated every 16 frames, the increments ramped linearly across a step while something moves them
 (docs/design.md, 2.3); the pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 
@@ -110,41 +112,41 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 | `tuning_root` | 211 | M7 (controllers, tuning) | 0 to 11 (0) |  |
 | `velocity_depth` | 212 | played | 0 to 127 (64) | v d / 64 + 2 (o - 64), at most 127; 0 or below plays no note (it ends at once); fractions go on to the level velocity law; existing profile: 40 combinations measured |
 | `velocity_offset` | 213 | played | 0 to 127 (64) | as velocity_depth |
-| `slfo_phase` | 214 | M4 (modulators) | 0 to 5 (0) |  |
-| `slfo_wave` | 215 | M4 (modulators) | 0 to 12 (0) |  |
-| `slfo_speed` | 216 | M4 (modulators) | 0 to 63 (32) |  |
-| `slfo_tempo_sync` | 217 | M4 (modulators) | 0 to 1 (0) |  |
-| `slfo_tempo_speed` | 218 | M4 (modulators) | 5 to 24 (11) |  |
-| `slfo_delay` | 219 | M4 (modulators) | 0 to 127 (0) |  |
-| `slfo_fade_in` | 220 | M4 (modulators) | 0 to 127 (0) |  |
-| `slfo_hold` | 221 | M4 (modulators) | 0 to 127 (127) |  |
-| `slfo_fade_out` | 222 | M4 (modulators) | 0 to 127 (64) |  |
-| `slfo_key_on_reset` | 223 | M4 (modulators) | 0 to 2 (2) |  |
-| `slfo_dest1` | 224 | M4 (modulators) | 0 to 69 (2) |  |
-| `slfo_depth1` | 225 | M4 (modulators) | 0 to 127 (0) |  |
-| `slfo_dest2` | 226 | M4 (modulators) | 0 to 69 (4) |  |
-| `slfo_depth2` | 227 | M4 (modulators) | 0 to 127 (0) |  |
-| `slfo_dest3` | 228 | M4 (modulators) | 0 to 69 (4) |  |
-| `slfo_depth3` | 229 | M4 (modulators) | 0 to 127 (0) |  |
-| `slfo_user_cycle` | 230 | M4 (modulators) | 0 to 6 (6) |  |
-| `slfo_user_slope` | 231 | M4 (modulators) | 0 to 3 (0) |  |
-| `slfo_step1` | 232 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step2` | 233 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step3` | 234 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step4` | 235 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step5` | 236 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step6` | 237 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step7` | 238 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step8` | 239 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step9` | 240 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step10` | 241 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step11` | 242 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step12` | 243 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step13` | 244 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step14` | 245 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step15` | 246 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_step16` | 247 | M4 (modulators) | -64 to 63 (0) |  |
-| `slfo_random_speed` | 248 | M4 (modulators) | 0 to 127 (0) |  |
+| `slfo_phase` | 214 | played | 0 to 5 (0) | the sound LFO, one a sound, evaluated every 16 frames (docs/design.md, 3.6): starts at 0, 90, 120, 180, 240 or 270 degrees; existing profile: the phases 4.8-8.0 cents (95th percentile at depth 8); the engine plays the law (test) |
+| `slfo_wave` | 215 | played | 0 to 12 (0) | triangle from 0 up, triangle 0 to 1, saw up 0 to 1, saw down 0 to -1, squares from their top for 1/4, 1/3, 1/2, 2/3, 3/4 of the cycle, trapezoid (the triangle doubled and clipped), two sample and holds (a uniform value a cycle; the second plays as the first: docs/known-differences.md), the user wave; existing profile: every wave 0.1-10.1 cents (95th percentile at depth 8, peak 227 cents); the engine within 1e-5 of the law at every step's end (test) |
+| `slfo_speed` | 216 | played | 0 to 63 (32) | measured rate table, every value (0 stands still, 1 is 0.0019 Hz, 2 is 0.062 Hz, about a doubling every 8 values to 11.86 Hz); existing profile: speeds 2-63 within 0.23 % (against the renders the table came from) |
+| `slfo_tempo_sync` | 217 | not covered (no tempo input) | 0 to 1 (0) | the core has no tempo input; the LFO plays at slfo_speed |
+| `slfo_tempo_speed` | 218 | not covered (no tempo input) | 5 to 24 (11) | as slfo_tempo_sync |
+| `slfo_delay` | 219 | played | 0 to 127 (0) | an envelope on the LFO from its start: delay (0), fade in (straight up), hold (1; 127 for ever), fade out (straight down), then 0; one measured time table for the four (0 to 11.5 s), made non-decreasing where values 1-30 scatter by about 10 ms; existing profile: the delay at every value, 109 of 111 within 2 % or 10 ms (values 9 and 23 11 ms early); the engine plays the law within 1e-4 (test) |
+| `slfo_fade_in` | 220 | played | 0 to 127 (0) | as slfo_delay; measured every eighth value, agreeing with the delay from 48 up (below about 100 ms taken from the delay) |
+| `slfo_hold` | 221 | played | 0 to 127 (127) | as slfo_fade_in; 127 holds for ever (test) |
+| `slfo_fade_out` | 222 | played | 0 to 127 (64) | as slfo_fade_in |
+| `slfo_key_on_reset` | 223 | played | 0 to 2 (2) | each: every note starts the phase and envelope again; first: only a note with no other key of the sound down; after a reset the LFO stands still 12 ms (the measured onset); off: free-running from the engine's clock, a first key starting the envelope (unmeasured); existing profile: each and first 4 of 4 within 15 cents (95th percentile, worst 9.6), off not compared; the engine (test) |
+| `slfo_dest1` | 224 | played | 0 to 78 (2) | the reference's numbers: 71 the voice LFO's speed, 74 feedback, 75 operator frequency, 76 form, 77 detune, 78 level played; 70 pan, 72 cutoff, 73 resonance M5 (reported as not covered); 0-69 effects' parameters, not the engine's (reported); range widened from 0-69 to cover 70-78 |
+| `slfo_depth1` | 225 | played | 0 to 127 (0) | at the LFO's top (bottom for level), after each operator's box and ratio: frequency 3600/127 cents a step (17 depths within 0.3 cents); level 0.589 dB a step lost at the bottom, none at the top, straight in dB (square wave at 8, 32, 64 within 0.2 dB; depth 127 silent in the reference, 74.8 dB down here); detune depth / 4 steps, form depth / 16, feedback depth / 16, the voice LFO's speed depth × 100 / 128, each move cut towards 0 and held in range (detune within 0.08 cents, speed within 0.3 %); frequency and detune ratio-mode operators only; existing profile: measured with a square wave only (values between top and bottom taken as straight); the engine: frequency, ratio, box, detune within 0.2 cent, level within 0.1 dB, the stepped ones the same bits as the moved value at the top (test) |
+| `slfo_dest2` | 226 | played | 0 to 78 (4) | as slfo_dest1 |
+| `slfo_depth2` | 227 | played | 0 to 127 (0) | as slfo_depth1 |
+| `slfo_dest3` | 228 | played | 0 to 78 (4) | as slfo_dest1 |
+| `slfo_depth3` | 229 | played | 0 to 127 (0) | as slfo_depth1 |
+| `slfo_user_cycle` | 230 | played | 0 to 6 (6) | the user wave: 2, 3, 4, 6, 8, 12 or 16 steps a cycle, a step s plays s / 64, +63 as full scale; existing profile: 0.5-10.5 cents (95th percentile; 16 steps 137 at the step edges); the engine plays the law (test) |
+| `slfo_user_slope` | 231 | played | 0 to 3 (0) | off; up: ramps to a higher next step; down: to a lower one; both; as slfo_user_cycle |
+| `slfo_step1` | 232 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step2` | 233 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step3` | 234 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step4` | 235 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step5` | 236 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step6` | 237 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step7` | 238 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step8` | 239 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step9` | 240 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step10` | 241 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step11` | 242 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step12` | 243 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step13` | 244 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step14` | 245 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step15` | 246 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_step16` | 247 | played | -64 to 63 (0) | as slfo_user_cycle |
+| `slfo_random_speed` | 248 | M7 (unmeasured) | 0 to 127 (0) | no law: neither measured nor documented as numbers |
 | `amp_eg_attack_offset` | 249 | played | -64 to 63 (0) | every operator's attack time times 2^(offset / 4), held within attack times 0-99's, a positive offset on carriers only; existing profile: within one time value from -12 to +26, faster below -12, sooner at +28 and +30 (up to 5.6 dB); the engine plays the law (test) |
 | `amp_eg_decay_offset` | 250 | played | -64 to 63 (0) | 1.5 time values a step (rounded) added to every operator's decay 1 and decay 2 times; existing profile: 18 of 18 offsets within 0.3 dB (with release); the engine plays the law (test) |
 | `amp_eg_sustain_offset` | 251 | played | -64 to 63 (0) | decay 2 level steps from a measured table at even offsets -22 to +32 (odd ones halfway, 1.5 a step beyond, unmeasured); existing profile: 1.2-2.3 dB off; the engine plays the law (test) |
@@ -188,9 +190,9 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 | `opN.key_ctrl_set2` | 1000 + 100 op + 33 | M7 (controllers, tuning) | 0 to 1 (1) |  |
 | `opN.key_ctrl_set3` | 1000 + 100 op + 34 | M7 (controllers, tuning) | 0 to 1 (1) |  |
 | `opN.key_ctrl_set4` | 1000 + 100 op + 35 | M7 (controllers, tuning) | 0 to 1 (1) |  |
-| `opN.slfo_box1` | 1000 + 100 op + 36 | M4 (modulators) | 0 to 1 (1) |  |
-| `opN.slfo_box2` | 1000 + 100 op + 37 | M4 (modulators) | 0 to 1 (1) |  |
-| `opN.slfo_box3` | 1000 + 100 op + 38 | M4 (modulators) | 0 to 1 (1) |  |
+| `opN.slfo_box1` | 1000 + 100 op + 36 | played | 0 to 1 (1) | off: the sound LFO's destination 1 does not reach the operator (its operator destinations only); the engine (test) |
+| `opN.slfo_box2` | 1000 + 100 op + 37 | played | 0 to 1 (1) | as opN.slfo_box1, destination 2 |
+| `opN.slfo_box3` | 1000 + 100 op + 38 | played | 0 to 1 (1) | as opN.slfo_box1, destination 3 |
 | `opN.key_on_reset` | 1000 + 100 op + 40 | played | 0 to 1 (1) | on: phase 0 at key-on; off: the slot's phase runs on from its last note (the reference's free-running phase not modelled) |
 | `opN.mode` | 1000 + 100 op + 41 | played | 0 to 1 (0) | ratio or fixed, as below |
 | `opN.coarse` | 1000 + 100 op + 42 | played | 0 to 31 (1) | the pitch grid of 1/2048 octave: keys rounded up to the 1/1024-octave grid from A, ratios to their nearest 1/1024-octave step (coarse 0-31 and fine 0-99 measured tables, fine 100 and above carries; past coarse 31 0.5, then a fixed ratio), fixed frequencies on 1/128-octave steps from A4's step (440.169 Hz), held at 22.04 kHz; existing profile: 1 cent met; the engine plays the grid within 0.05 cent (test) |
@@ -226,6 +228,6 @@ evaluated every 16 frames, the increments ramped linearly across a step while so
 | `opN.lfo_amp_offset` | 1000 + 100 op + 72 | played | 0 to 7 (3) | the operator's share of the voice LFO's amplitude loss: 0, 1, 2, 4, 5, 6, 7, 8 eighths (measured at depths 16, 30, 70 and 99); as lfo_amp_depth |
 | `opN.pitch_ctrl_sens` | 1000 + 100 op + 73 | M7 (controllers, tuning) | -7 to 7 (0) |  |
 | `opN.level_ctrl_sens` | 1000 + 100 op + 74 | M7 (controllers, tuning) | -7 to 7 (0) |  |
-| `opN.slfo_ratio1` | 1000 + 100 op + 75 | M4 (modulators) | 0 to 127 (127) |  |
-| `opN.slfo_ratio2` | 1000 + 100 op + 76 | M4 (modulators) | 0 to 127 (127) |  |
-| `opN.slfo_ratio3` | 1000 + 100 op + 77 | M4 (modulators) | 0 to 127 (127) |  |
+| `opN.slfo_ratio1` | 1000 + 100 op + 75 | played | 0 to 127 (127) | the operator's share of destination 1's depth: depth × ratio / 128 rounded down, 127 as 128; existing profile: 7 ratios within 0.4 cents (the ratio rule on level, detune and form unmeasured); the engine (test) |
+| `opN.slfo_ratio2` | 1000 + 100 op + 76 | played | 0 to 127 (127) | as opN.slfo_ratio1, destination 2 |
+| `opN.slfo_ratio3` | 1000 + 100 op + 77 | played | 0 to 127 (127) | as opN.slfo_ratio1, destination 3 |
