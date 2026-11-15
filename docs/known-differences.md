@@ -7,7 +7,7 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 
 ## Open: for a ruling
 
-| What | The reference | The engine (M4, in part) | Why |
+| What | The reference | The engine (M4) | Why |
 |---|---|---|---|
 | Output clipping | not measured whether the part's output clips | no clip (the platform's mixer clips) | the existing profile's choice, unmeasured either way |
 | Envelope resolution | per sample (as far as measured) | every 16 frames (0.33 ms at 48 kHz; a step is cut short where an event of the voice's sound falls), exact at the steps, gains ramped linearly between; a segment shorter than a step becomes one ramp; the hold in whole steps | the design's control rate; the fastest decay (time 0) moves 5.2 dB a step, the fastest attack about 18 dB |
@@ -31,6 +31,16 @@ reference's behaviour or listed here. The per-law accuracy is in `docs/coverage.
 | Voice LFO amplitude bend | measured at envelope level 99 on a lone carrier | the bend acts on the LFO's loss alone, on modulators as on carriers | as the existing profile, unmeasured |
 | Level scaling | not measured | the six-operator model's documented curves in dB, a level raised to level 99's at most | documented, not measured (as the existing profile) |
 | Ratio macro on fixed-mode operators | not measured | not moved | as the existing profile, unmeasured |
+| Sound LFO resolution | per sample (as far as measured) | every 16 frames, its value at each step's end ramped across the step (pitch through the increments, level through the gains); a square, sample-and-hold or user-wave edge becomes a 16-frame ramp; a triangle's corner is cut by at most 29 cents for one step at the fastest speed and deepest depth (1.8 cents at depth 8); the stepped destinations (detune, form, feedback, the voice LFO's speed) change at a step's start | the design's control rate; the sound LFO's fastest speed (11.86 Hz) is 253 steps a cycle |
+| Sound LFO tempo sync | 1/16 to 64 beats a cycle at the host's tempo | not played: the LFO runs at its speed (reported as not covered) | the core has no tempo input |
+| Sound LFO random speed | its law neither measured nor documented as numbers | not played (reported as not covered) | no law |
+| Sound LFO sample and hold 2 | its held values include many zeros (not resolved) | plays as sample and hold 1, a uniform value a cycle | as the existing profile |
+| Sound LFO key-on reset off | free-running, its phase from the time since the performance loaded (not compared) | free-running from the engine's clock; a first key starts the envelope (delay, fades, hold) again | as the existing profile, unmeasured |
+| Sound LFO envelope below about 100 ms | the fades and hold measured from 48 up | the fades and hold take the delay's times below that | as the existing profile, unmeasured |
+| Sound LFO between its top and bottom | every destination measured with a square wave only | values between the top and bottom straight (in cents, dB, steps cut towards 0); the depth ratio rule on level, detune and form unmeasured; frequency and detune do not reach fixed-mode operators (unmeasured) | as the existing profile |
+| Sound LFO level at depth 127 | silent at the bottom | 74.8 dB down at the bottom | the measured 0.589 dB a step, straight |
+| Sound LFO pan, cutoff and resonance destinations | played | parsed and reported as not covered | M5 (pan and the filter) |
+| Sound LFO destinations 0-69 | the insertion effects' parameters | not played (reported as not covered) | the engine has no effects |
 | A parameter changed while a sound plays | not measured | from the next control step for what moves, the next note for what a note keeps; a change of the operators heard, their forms, the feedback path, mono or key assign waits until the sound is silent | a voice's state stays valid |
 
 ## Adopted from the reference where the existing profile departs from it
