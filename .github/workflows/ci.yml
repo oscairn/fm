@@ -54,7 +54,9 @@ jobs:
       - name: The plugin builds and loads (its entry, factory, one instance)
         run: |
           cargo build --locked --release -p fm-clap
-          lib=$(ls target/release/libfm_clap.so target/release/libfm_clap.dylib target/release/fm_clap.dll 2>/dev/null | head -n 1)
+          for lib in target/release/libfm_clap.so target/release/libfm_clap.dylib target/release/fm_clap.dll; do
+            if [ -f "$lib" ]; then break; fi
+          done
           python3 tools/load-plugin.py "$lib" || python tools/load-plugin.py "$lib"
 
   cost:
