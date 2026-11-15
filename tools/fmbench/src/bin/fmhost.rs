@@ -5,15 +5,19 @@
 //! CASE: `sleep` (no note, no event: the asleep call), `idle` (no note, one ignored controller a
 //! block, CC 65: a call that wakes and renders nothing), `voices` (VOICES held notes of one sound),
 //! `sounds` (one note in each of VOICES sounds, each on its own channel); fmbench's routing 12 case
-//! with eight sine operators.
+//! with eight sine operators. `shared` and `shared-idle`: as a host shares one instance among five
+//! parts (case.rs's `shared_text`, controller boxes at rest values), each sound in its own slot on
+//! its own channel and output bus (buses 1-5 activated): one note in each of the first VOICES
+//! sounds, or (`shared-idle`) none and the ignored controller every block.
 #[path = "../case.rs"]
 mod case;
 
-use case::case_text;
+use case::{case_text, shared_text};
 use fm_clap::clap_entry;
 use oscairn_clap_sys::clap_sys::{
-    audio_buffer::clap_audio_buffer, events::*, ext::state::*, factory::plugin_factory::*, host::clap_host,
-    plugin::clap_plugin, process::*, stream::clap_istream, version::CLAP_VERSION,
+    audio_buffer::clap_audio_buffer, events::*, ext::audio_ports_activation::*, ext::state::*,
+    factory::plugin_factory::*, host::clap_host, plugin::clap_plugin, process::*, stream::clap_istream,
+    version::CLAP_VERSION,
 };
 use std::ffi::{c_char, c_void};
 
@@ -86,19 +90,38 @@ fn run(voices: usize, blocks: usize, case: &str) -> f64 {
         request_process: Some(nothing),
         request_callback: Some(nothing),
     };
+    let shared = case.starts_with("shared");
     let sounds = if case == "sounds" { voices.clamp(1, 8) } else { 1 };
     let mut state = String::from("fm-state 1\nselected");
     for c in 0..16 {
-        state += &format!(" {}", if c < sounds { c } else { 0 });
+        let s = match (shared, c < 5, c < sounds) {
+            (true, true, _) => c + 1,
+            (false, _, true) => c,
+            _ => 0,
+        };
+        state += &format!(" {s}");
     }
     state += "\n";
-    for s in 0..sounds {
+    if shared {
+        state += "sound 0 bus 0 Default\nfm-sound/1\nend\n";
+        for s in 1..=5 {
+            state += &format!("sound {s} bus {s} part\n{}end\n", shared_text(s));
+        }
+    }
+    for s in 0..if shared { 0 } else { sounds } {
         state += &format!("sound {s} bus 0 case\n{}end\n", case_text(12, 8, "sine"));
     }
     let p = unsafe {
         let f = clap_entry.get_factory.expect("entry")(CLAP_PLUGIN_FACTORY_ID.as_ptr()).cast::<clap_plugin_factory>();
         let p = (*f).create_plugin.expect("factory")(f, &host, fm_clap::PLUGIN_ID.as_ptr());
         assert!((*p).init.expect("init")(p) && (*p).activate.expect("activate")(p, 48000.0, 1, 4096));
+        if shared {
+            let a = (*p).get_extension.expect("ext")(p, CLAP_EXT_AUDIO_PORTS_ACTIVATION.as_ptr())
+                .cast::<clap_plugin_audio_ports_activation>();
+            for k in 1..=5 {
+                assert!((*a).set_active.expect("set_active")(p, false, k, true, 32));
+            }
+        }
         let st = (*p).get_extension.expect("ext")(p, CLAP_EXT_STATE.as_ptr()).cast::<clap_plugin_state>();
         let mut ctx = (state.into_bytes(), 0usize);
         let s = clap_istream {
@@ -124,6 +147,7 @@ fn run(voices: usize, blocks: usize, case: &str) -> f64 {
     let notes: Vec<Ev> = match case {
         "voices" => (0..voices).map(|v| (0, 36 + (v % 60) as i16)).collect(),
         "sounds" => (0..sounds).map(|s| (s as i16, 36 + (7 * s % 60) as i16)).collect(),
+        "shared" => (0..voices.min(5)).map(|s| (s as i16, 60)).collect(),
         _ => vec![],
     }
     .into_iter()
@@ -147,7 +171,7 @@ fn run(voices: usize, blocks: usize, case: &str) -> f64 {
     for b in 0..=blocks {
         let mut events = match (b, case) {
             (0, _) => notes.clone(),
-            (_, "idle") => cc.clone(),
+            (_, "idle" | "shared-idle") => cc.clone(),
             _ => vec![],
         };
         let input = clap_input_events {
@@ -176,7 +200,8 @@ fn run(voices: usize, blocks: usize, case: &str) -> f64 {
         } else {
             fmbench_render_hosted(unsafe { &*p }, &pr);
         }
-        sum += unsafe { std::slice::from_raw_parts(ptrs[0][0], fm_core::engine::BLOCK) }
+        // (main, or the first shared sound's bus)
+        sum += unsafe { std::slice::from_raw_parts(ptrs[usize::from(shared)][0], fm_core::engine::BLOCK) }
             .iter()
             .map(|x| f64::from(x.abs()))
             .sum::<f64>();

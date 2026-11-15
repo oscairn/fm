@@ -8,7 +8,7 @@
 # data reads and writes a voice-block, and first-level data misses a block; then, with the cache
 # simulator set to the device (32 KB 4-way first level, 512 KB 16-way shared second level, 64-byte
 # lines), first-level and last-level data misses a voice-block of the engine at 1, 8, 25 and 64
-# voices. "check" fails (exit 1) when a case is more than 10 % over tools/cost/baseline.txt (cache
+# voices and of the plugin's shared case (fmhost: one voice in each of three of five sounds). "check" fails (exit 1) when a case is more than 10 % over tools/cost/baseline.txt (cache
 # misses: tools/cost/cache-baseline.txt, 10 % and half a miss) or over the absolute gates: at most
 # 2,000 a block at rest, at most 28,000 a voice-block for the worst plan with all eight operators
 # (the engine's cases, fm-*-8 with or without a filter, and the spike's operator-major cases on its non-sine forms; the
@@ -95,18 +95,27 @@ run hosted-sleep 0 h sleep
 run hosted-idle 0 h idle
 run hosted-v8 8 h voices
 run hosted-s5 5 h sounds
+# a host's shared instance: five sounds prepared on five channels and buses, controller boxes at
+# rest values; one voice in each of three of them, and awake with no voice (a controller a block)
+run hosted-shared 3 h shared
+run hosted-shared-idle 0 h shared-idle
 for f in table window; do echo "footprint $f: $("$B" footprint 0 x x $f)"; done
 } | tee "$OUT/summary.txt"
-cache() {  # name voices forms: the device's caches, routing 12 with eight operators
-  vg --D1=32768,4,64 --LL=524288,16,64 --callgrind-out-file="$OUT/c$1.cg" \
-    ./fmbench engine "$2" $BLOCKS 12 8 native "$3" > /dev/null 2> "$OUT/c$1.err"
+cache() {  # name voices forms: the device's caches, routing 12 with eight operators (forms h: fmhost's shared case)
+  if [ "$3" = h ]; then set -- "$1" "$2" ./fmhost "$2" $BLOCKS shared
+  else set -- "$1" "$2" ./fmbench engine "$2" $BLOCKS 12 8 native "$3"; fi
+  n=$1; v=$2; shift 2
+  vg --D1=32768,4,64 --LL=524288,16,64 --callgrind-out-file="$OUT/c$n.cg" "$@" > /dev/null 2> "$OUT/c$n.err"
+  set -- "$n" "$v"
   awk -v n="$1" -v v="$2" -v b=$BLOCKS '/^summary:/ { d = v * b
       printf "%-18s voices %2d  D1miss/voice-block %7.1f  LLmiss/voice-block %6.1f\n", n, v, ($6 + $7) / d, ($9 + $10) / d }' "$OUT/c$1.cg"
   rm -f "$OUT/c$1.cg"
 }
 # sines, and eight operators on eight different form tables and pitches (the worst case for locality)
 { for v in 1 8 25 64; do cache "cache-$v" $v sine; done
-  for v in 1 8 25 64; do cache "cache-mixed-$v" $v mixed; done; } | tee "$OUT/cache.txt"
+  for v in 1 8 25 64; do cache "cache-mixed-$v" $v mixed; done
+  # the shared instance through CLAP: the data a block touches (the plugin runs beside others)
+  cache cache-hosted-shared 3 h; } | tee "$OUT/cache.txt"
 if [ "$MODE" = check ]; then
   fail=0
   rest=$(awk '$1=="rest" || $1=="fm-rest" {if ($5 > m) m = $5} END {print m}' "$OUT/summary.txt")

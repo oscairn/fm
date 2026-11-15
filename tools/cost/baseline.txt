@@ -64,6 +64,10 @@ hosted-sleep 1148
 hosted-idle 3291
 hosted-v8 15824
 hosted-s5 38197
+# a host's shared instance (fmhost shared): five sounds with controller boxes at rest values on five
+# channels and buses, one voice in each of three a voice-block; awake with none, a block
+hosted-shared 57464
+hosted-shared-idle 3405
 # The lane gate (tools/cost/cg.sh check, at most 2 % over): one voice alone and two voices of a sound
 # against a voice of 32 (fm-s1-v1, fm-s1-v2 against fm-r12-8), one voice in each of five sounds
 # against five voices in one (fm-s5-v1 against fm-s1-v5). Reached, not the targets (1.5, 1.25 and

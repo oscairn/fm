@@ -14,6 +14,39 @@ fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
     }
 }
 
+/// A sound like the parts of a converted multi-sound setting (`n` varies it a little, as such
+/// parts vary): eight operators on routing 13, two of them on a non-sine form, decaying
+/// envelopes, level scaling and velocity, the 24 dB low-pass with its envelope, and two controller
+/// boxes at rest values: the mod wheel at 0 on the voice LFO's amplitude depth (moving nothing)
+/// and knob 3 a little off centre on the cutoff (moving it a little).
+pub fn shared_text(n: usize) -> String {
+    let mut t = format!(
+        "fm-sound/1\nalgorithm=13 feedback=6 lfo_speed={} lfo_key_on_reset=1 lfo_pitch_depth=1 random_pitch=3 \
+         filter_type=0 cutoff_velocity=5 resonance=5 filter_eg_time_decay1=75 filter_eg_level_attack=127 \
+         filter_eg_level_decay1=80 filter_eg_level_decay2=80 filter_eg_depth=50 detune={}\n\
+         knob3=514 box1_dst=91 box1_ratio=40 box2_src=10 box2_dst=102 box2_ratio=127 box2_pol=1\n",
+        24 + n,
+        n as i32 - 2
+    );
+    for o in 1..=8usize {
+        let (level, decay) = (
+            [60, 70, 85, 99, 85, 99, 90, 99][o - 1],
+            [60, 60, 58, 70, 64, 60, 56, 56][o - 1],
+        );
+        t += &format!(
+            "op{o}.level={level} op{o}.detune={} op{o}.eg_time_decay1={decay} op{o}.eg_level_decay1=0 \
+             op{o}.eg_time_decay2={decay} op{o}.eg_level_decay2=0 op{o}.eg_time_key_follow=4 \
+             op{o}.level_velocity=2 op{o}.scaling_break={} op{o}.scaling_high_depth=30\n",
+            o as i32 % 7 - 3,
+            if o > 4 { 15 } else { 0 }
+        );
+        if o <= 2 {
+            t += &format!("op{o}.form=1 op{o}.spread=3\n");
+        }
+    }
+    t
+}
+
 /// A cost case's sound, in the text form (fmbench's `case_sound` says what each case is).
 pub fn case_text(routing: u32, ops: u32, forms: &str) -> String {
     // FORMS+fT: filter type T (the stored value) on the case, its envelope moving; FORMS+fx: the

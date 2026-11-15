@@ -129,6 +129,15 @@ fn time(blocks: usize) {
         let name = format!("routing 12, {sounds} sounds");
         rows.push((name, engine(12, 8, voices, "sine", sounds), voices * sounds));
     }
+    // one voice in each of three sounds like a shared instance's parts, controller boxes at rest
+    // values (case.rs's `shared_text`; the hosted gate's `shared` case without the shell)
+    let mut e = Box::new(Engine::new(RATE));
+    for s in 0..3 {
+        let text = case::shared_text(s + 1);
+        e.set_sound(s, &Prepared::new(&Sound::from_text(&text).expect("case sound")));
+        e.note_on(s, s as u32, 60, 100.0, &mut |_| {});
+    }
+    rows.push(("shared, 3 sounds with boxes".into(), e, 3));
     for (name, mut e, voices) in rows {
         let mut t = Vec::with_capacity(blocks);
         for _ in 0..blocks {

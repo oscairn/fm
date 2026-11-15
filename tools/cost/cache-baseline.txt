@@ -20,3 +20,8 @@ cache-mixed-1 102.0 5.2
 cache-mixed-8 83.9 0.7
 cache-mixed-25 96.7 0.2
 cache-mixed-64 142.4 0.1
+# The plugin's shared case (fmhost 3 64 shared: five sounds prepared, one voice in each of three), a
+# voice-block: the data a block touches, which counts on the device, where the plugin's worker shares the
+# second level with many others. 62.7 first-level misses before the lane bits and the shell's limits
+# and bus map stopped reading every lane and slot each block.
+cache-hosted-shared 40.3 0.3
