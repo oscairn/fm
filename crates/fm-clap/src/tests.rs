@@ -817,6 +817,30 @@ fn a_lowered_voice_limit_gives_voices_up_in_order() {
 }
 
 #[test]
+fn the_selected_sounds_limit_reaches_a_sound_selected_after_it() {
+    let mut a = Inst::new();
+    let b = a.budget();
+    let selected = oscairn_voice_budget_context {
+        context: OSCAIRN_VOICE_BUDGET_SELECTED,
+        limit: 2,
+        reserve: 0,
+        priority: 0,
+        flags: 0,
+    };
+    audio(|| unsafe { b.set_limits.unwrap()(a.p, 16, &selected, 1) });
+    // (a note on channel 0, so the block runs and the limits are made before the selection)
+    a.block(BLOCK, vec![on(0, 0, 60, 60)]);
+    let x = a.prepare(c"x", LEAD);
+    assert!(unsafe { a.contexts().select.unwrap()(a.p, x, 1) });
+    a.block(BLOCK, [48, 52, 55].iter().map(|&k| on(0, 1, k, i32::from(k))).collect());
+    for _ in 0..4 {
+        a.block(BLOCK, vec![]);
+    }
+    // two of the new sound's three and channel 0's note
+    assert_eq!(audio(|| unsafe { b.active_voices.unwrap()(a.p, &mut 0.0) }), 3);
+}
+
+#[test]
 fn a_blocks_parameter_events_prepare_a_sound_once() {
     let mut a = Inst::new();
     a.block(BLOCK, vec![on(0, 0, 60, 1)]);

@@ -193,6 +193,8 @@ pub struct Audio {
     /// The sound whose values the parameters show (channel 0's).
     shown: u8,
     budget: (u32, [oscairn_voice_budget_context; 16], usize),
+    /// Whether the core's limits are to be made again (the budget or a selection changed).
+    limits_due: bool,
     /// Sounds whose sustain pedal is down, a bit each.
     pedal: u8,
     /// `ring_out`'s buffer for the next block (its four channels), or null.
@@ -289,6 +291,7 @@ impl Plugin {
                 selected: [0; 16],
                 shown: 0,
                 budget: (u32::MAX, [oscairn_voice_budget_context::default(); 16], 0),
+                limits_due: true,
                 pedal: 0,
                 ring: core::ptr::null(),
                 next: -1,
@@ -442,6 +445,7 @@ impl Plugin {
     fn apply_selections(&self, a: &mut Audio, out: Option<&Out>) {
         let head = self.head.load(Acquire);
         let mut tail = self.tail.load(Relaxed);
+        a.limits_due |= tail != head;
         while tail != head {
             let e = self
                 .queue
@@ -567,6 +571,7 @@ impl Plugin {
                 x.store(s, Relaxed);
             }
             a.shown = a.selected[0];
+            a.limits_due = true;
         });
         // the NOTE_ENDs owed go out in the next block
         self.wake();
@@ -952,16 +957,17 @@ impl Plugin {
         for (d, s) in a.budget.1.iter_mut().zip(contexts) {
             *d = *s;
         }
+        a.limits_due = true;
     }
 
     /// The host's limits as the core keeps them: per sound, the entry naming it, else (selected)
-    /// the entry for the selected sounds.
+    /// the entry for the selected sounds; made again only when the budget or a selection changed.
     fn limits(&self, a: &mut Audio) {
-        let (limit, list, n) = a.budget;
-        if limit == u32::MAX {
-            return; // never set
+        if !core::mem::take(&mut a.limits_due) || a.budget.0 == u32::MAX {
+            return; // unchanged, or never set
         }
-        let list = list.get(..n).unwrap_or(&[]);
+        let (limit, n) = (a.budget.0, a.budget.2);
+        let list = a.budget.1.get(..n).unwrap_or(&[]);
         let mut lim = [Limits::default(); SOUNDS];
         for (l, slot) in lim.iter_mut().zip(&self.slots) {
             let id = slot.id.load(Relaxed);
