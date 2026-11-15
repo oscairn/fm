@@ -28,11 +28,13 @@ parameter modulation) is listed there.
 
 At M7: the channel controllers (mod wheel, breath, both foot controllers, aftertouch, expression,
 the sostenuto pedal) and each note's volume expression, and the controller boxes (`boxN_*`) on the
-operator level (each operator's `ctrl_setN`), the cutoff and the resonance, evaluated when a source
-moves and ramped across the next control step (docs/design.md, 3.9). A box on any other
-destination, from a source the host does not send, or on a curve not measured (played as linear)
-is reported by `fmbench coverage` beside the parameters, by its `boxN_dst`. Not played yet: the
-controller sensitivities, the key controller sets, micro tuning, the sound LFO's random speed.
+operator level and frequency (each operator's `ctrl_setN`; the frequency by its
+`pitch_ctrl_sens`), the cutoff and the resonance, the voice LFO's speed, pitch depth and amplitude
+depth, and the sound's pitch, evaluated when a source moves and ramped across the next control
+step (docs/design.md, 3.9). A box on any other destination, from a source the host does not send,
+or on a curve not measured (played as linear) is reported by `fmbench coverage` beside the
+parameters, by its `boxN_dst`. Not played yet: the level controller sensitivity, the key
+controller sets, micro tuning, the sound LFO's random speed.
 
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|
@@ -180,45 +182,45 @@ controller sensitivities, the key controller sets, micro tuning, the sound LFO's
 | `switch1` | 265 | played | 0 to 1 (0) | assignable switch 1 as a box source (16): off 0, on 1024; measured as knob1 |
 | `switch2` | 266 | played | 0 to 1 (0) | as switch1, source 17 |
 | `boxN_src` | 300 + 8 (N - 1) | played | 0 to 41 (1) | the source, the reference's number: 0 pitch bend (its 14-bit value / 16), 1 mod wheel, 2 aftertouch, 3 foot controller 1 (CC 11), 4 foot controller 2 (CC 4), 7 breath, a controller's value v as 8 v up to 64 and 512 + (v - 64) x 512 / 63 above (measured on the reference through a sibling part's fine tune: 17 values within 0.1 cent); 6, 8-17 the parameters above; 5 and 18-41 are not received (reported) |
-| `boxN_dst` | 301 + 8 (N - 1) | played | 0 to 413 (0) | the destination, the reference's number (0: off). Played: 106 operator level (the operators whose ctrl_setN is on), span 96 level steps; 102 cutoff, span 1024 cutoff values (both measured on the reference on this part type: 0.75 and 8 a ratio unit at the full travel of a unipolar box, ratios up to 64); 103 resonance, span 128 (measured on a sibling part's resonance, the same raw scale; not measured on this part type). The others are reported (no law, or not the engine's: effects, sends, arpeggio) |
+| `boxN_dst` | 301 + 8 (N - 1) | played | 0 to 413 (0) | the destination, the reference's number (0: off). Played: 106 operator level (the operators whose ctrl_setN is on), span 96 level steps; 102 cutoff, span 1024 cutoff values (both measured on the reference on this part type: 0.75 and 8 a ratio unit at the full travel of a unipolar box, ratios up to 64); 103 resonance, span 128 (measured on a sibling part's resonance, the same raw scale; not measured on this part type); 89 the voice LFO's speed (its normal range; the extended range is reported), 90 its pitch depth and 91 its amplitude depth, span 100 of the 0-99 value, the stored value moved by the steps within 0-99 and played by its own law (measured on the reference on this part type: the pitch depth 30 points at two speeds within 0.1 cent of the swing, from depth 0, 20 and 40, ratios -64 to +127; the amplitude depth 4 points within 0.2 dB; the speed 5 points within 0.5 %); 54 the sound's pitch, a cent a step, span 8192 (4 points within 0.5 cent, up to 2048 cents; the limit not measured); 105 an operator's frequency (the ratio-mode operators whose ctrl_setN is on), 3600 cents a full box times its pitch_ctrl_sens / 7 (6 points at -7, +3, +7 within 1.5 cents, none at 0; up to 900 cents; fixed-mode operators not moved: not measured). The others are reported (no law, or not the engine's: effects, sends, arpeggio) |
 | `boxN_ratio` | 302 + 8 (N - 1) | played | -128 to 127 (0) | a box's output (curve(c) + o - 1024) x ratio / 8 within +-8192 (o 1024 unipolar, 512 bipolar; +127 as +128), its destination moved by trunc(output x span / 8192), the boxes on one destination summed within +-span (measured on the reference through a sibling part; the limit at 8192 not measured on this part type). The engine plays the law (boxes tests) |
 | `boxN_pol` | 303 + 8 (N - 1) | played | 0 to 1 (0) | bipolar: o 512 (as boxN_ratio) |
 | `boxN_bank` | 304 + 8 (N - 1) | played | 0 to 25 (0) | with boxN_curve and its parameters: bank 0 type 0 parameter 5 is linear (measured); bank 0 type 0 parameters 0, 2, 6, 8, 9, 10 and type 2 parameters (0, 4) and (10, 4) the sibling parts' measured tables (17 knots, about 5 of 1024); any other curve plays as linear and is reported |
 | `boxN_curve` | 305 + 8 (N - 1) | played | 0 to 31 (0) | as boxN_bank |
 | `boxN_p1` | 306 + 8 (N - 1) | played | 0 to 127 (5) | as boxN_bank |
 | `boxN_p2` | 307 + 8 (N - 1) | played | 0 to 127 (0) | as boxN_bank |
-| `opN.ctrl_set1` | 1000 + 100 op + 0 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set2` | 1000 + 100 op + 1 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set3` | 1000 + 100 op + 2 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set4` | 1000 + 100 op + 3 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set5` | 1000 + 100 op + 4 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set6` | 1000 + 100 op + 5 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set7` | 1000 + 100 op + 6 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set8` | 1000 + 100 op + 7 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set9` | 1000 + 100 op + 8 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set10` | 1000 + 100 op + 9 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set11` | 1000 + 100 op + 10 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set12` | 1000 + 100 op + 11 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set13` | 1000 + 100 op + 12 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set14` | 1000 + 100 op + 13 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set15` | 1000 + 100 op + 14 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set16` | 1000 + 100 op + 15 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set17` | 1000 + 100 op + 16 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set18` | 1000 + 100 op + 17 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set19` | 1000 + 100 op + 18 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set20` | 1000 + 100 op + 19 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set21` | 1000 + 100 op + 20 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set22` | 1000 + 100 op + 21 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set23` | 1000 + 100 op + 22 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set24` | 1000 + 100 op + 23 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set25` | 1000 + 100 op + 24 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set26` | 1000 + 100 op + 25 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set27` | 1000 + 100 op + 26 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set28` | 1000 + 100 op + 27 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set29` | 1000 + 100 op + 28 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set30` | 1000 + 100 op + 29 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set31` | 1000 + 100 op + 30 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
-| `opN.ctrl_set32` | 1000 + 100 op + 31 | played | 0 to 1 (1) | whether controller box N reaches the operator's level (destination 106) |
+| `opN.ctrl_set1` | 1000 + 100 op + 0 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set2` | 1000 + 100 op + 1 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set3` | 1000 + 100 op + 2 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set4` | 1000 + 100 op + 3 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set5` | 1000 + 100 op + 4 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set6` | 1000 + 100 op + 5 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set7` | 1000 + 100 op + 6 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set8` | 1000 + 100 op + 7 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set9` | 1000 + 100 op + 8 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set10` | 1000 + 100 op + 9 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set11` | 1000 + 100 op + 10 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set12` | 1000 + 100 op + 11 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set13` | 1000 + 100 op + 12 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set14` | 1000 + 100 op + 13 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set15` | 1000 + 100 op + 14 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set16` | 1000 + 100 op + 15 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set17` | 1000 + 100 op + 16 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set18` | 1000 + 100 op + 17 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set19` | 1000 + 100 op + 18 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set20` | 1000 + 100 op + 19 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set21` | 1000 + 100 op + 20 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set22` | 1000 + 100 op + 21 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set23` | 1000 + 100 op + 22 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set24` | 1000 + 100 op + 23 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set25` | 1000 + 100 op + 24 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set26` | 1000 + 100 op + 25 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set27` | 1000 + 100 op + 26 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set28` | 1000 + 100 op + 27 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set29` | 1000 + 100 op + 28 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set30` | 1000 + 100 op + 29 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set31` | 1000 + 100 op + 30 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
+| `opN.ctrl_set32` | 1000 + 100 op + 31 | played | 0 to 1 (1) | whether controller box N reaches the operator's level or frequency (destinations 106, 105) |
 | `opN.key_ctrl_set1` | 1000 + 100 op + 32 | M7 (controllers, tuning) | 0 to 1 (1) | the key controller boxes are not in the sound format |
 | `opN.key_ctrl_set2` | 1000 + 100 op + 33 | M7 (controllers, tuning) | 0 to 1 (1) | as key_ctrl_set1 |
 | `opN.key_ctrl_set3` | 1000 + 100 op + 34 | M7 (controllers, tuning) | 0 to 1 (1) | as key_ctrl_set1 |
@@ -259,8 +261,8 @@ controller sensitivities, the key controller sets, micro tuning, the sound LFO's
 | `opN.level_velocity` | 1000 + 100 op + 70 | played | -7 to 7 (0) | measured table at 17 velocities, fractional velocities between; existing profile: 56 of 64 (worst 1.5 dB at velocities 2-3) |
 | `opN.lfo_pitch_offset` | 1000 + 100 op + 71 | played | 0 to 7 (3) | the operator's share of the voice LFO's pitch depth: 0, 10, 20, 33, 56, 96, 160, 256 steps (measured at depths 30 and 99); fixed-mode operators do not follow (as the existing profile); as lfo_pitch_depth |
 | `opN.lfo_amp_offset` | 1000 + 100 op + 72 | played | 0 to 7 (3) | the operator's share of the voice LFO's amplitude loss: 0, 1, 2, 4, 5, 6, 7, 8 eighths (measured at depths 16, 30, 70 and 99); as lfo_amp_depth |
-| `opN.pitch_ctrl_sens` | 1000 + 100 op + 73 | M7 (unmeasured) | -7 to 7 (0) | no law: it scales the operator frequency boxes (destination 105), which have none either |
-| `opN.level_ctrl_sens` | 1000 + 100 op + 74 | M7 (unmeasured) | -7 to 7 (0) | no law; the level boxes play as at 0, where their span was measured |
+| `opN.pitch_ctrl_sens` | 1000 + 100 op + 73 | played | -7 to 7 (0) | the operator frequency boxes' share (destination 105, boxN_dst): sens / 7 of 3600 cents a full box, negative down, none at 0 (measured on the reference: 6 points within 1.5 cents); it leaves the voice LFO's pitch depth boxes as they are (measured at +7) |
+| `opN.level_ctrl_sens` | 1000 + 100 op + 74 | M7 (unmeasured) | -7 to 7 (0) | no law: it left the level boxes (destination 106) as they are at -7, 0, +3 and +7 (measured on the reference), as the engine plays them; what it moves was not found |
 | `opN.slfo_ratio1` | 1000 + 100 op + 75 | played | 0 to 127 (127) | the operator's share of destination 1's depth: depth × ratio / 128 rounded down, 127 as 128; existing profile: 7 ratios within 0.4 cents (the ratio rule on level, detune and form unmeasured); the engine (test) |
 | `opN.slfo_ratio2` | 1000 + 100 op + 76 | played | 0 to 127 (127) | as opN.slfo_ratio1, destination 2 |
 | `opN.slfo_ratio3` | 1000 + 100 op + 77 | played | 0 to 127 (127) | as opN.slfo_ratio1, destination 3 |

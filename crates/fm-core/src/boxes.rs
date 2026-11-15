@@ -6,7 +6,7 @@
 //! cutoff's spans); a box on any other destination, from a source the host cannot send, or on a
 //! curve not measured is reported by the coverage report (a curve not measured plays as linear).
 
-use crate::params::{ctrl_set_index, Part, BOX_BASE, BOX_FIELDS, OPS};
+use crate::params::{ctrl_set_index, Common, Part, BOX_BASE, BOX_FIELDS, OPS};
 use crate::sound::Sound;
 
 pub const BOXES: usize = 32;
@@ -96,32 +96,51 @@ fn at(a: &[f32; 17], i: usize) -> f32 {
 }
 
 /// What a box moves: an operator's level (the reference's destination 106, the operators whose
-/// switch for the box is on), the filter's cutoff (102) or resonance (103).
+/// switch for the box is on), the filter's cutoff (102) or resonance (103), the voice LFO's speed
+/// (89, its normal range), pitch depth (90) or amplitude depth (91), the sound's pitch (54), an
+/// operator's frequency (105, the operators whose switch for the box is on, by their pitch
+/// controller sensitivity).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dest {
     Level,
     Cutoff,
     Resonance,
+    LfoSpeed,
+    LfoPitch,
+    LfoAmp,
+    Pitch,
+    OpPitch,
 }
 
 impl Dest {
     fn of(reference: i16) -> Option<Dest> {
         match reference {
             106 => Some(Dest::Level),
+            105 => Some(Dest::OpPitch),
             102 => Some(Dest::Cutoff),
             103 => Some(Dest::Resonance),
+            89 => Some(Dest::LfoSpeed),
+            90 => Some(Dest::LfoPitch),
+            91 => Some(Dest::LfoAmp),
+            54 => Some(Dest::Pitch),
             _ => None,
         }
     }
 
     /// A full box's steps: the level 96 and the cutoff 1024 (measured on this part type: 0.75 and
     /// 8 a ratio unit at full travel of a unipolar box), the resonance 128 (measured on the sample
-    /// part's resonance, the same raw scale; not measured on this part type).
+    /// part's resonance, the same raw scale; not measured on this part type); the voice LFO's
+    /// speed and depths 100 of their 0-99 values, the pitch 8192 cents, an operator's frequency
+    /// 3600 cents at sensitivity +7 (measured on this part type; the pitches up to a quarter of
+    /// a full box).
     pub fn span(self) -> i32 {
         match self {
             Dest::Level => 96,
             Dest::Cutoff => 1024,
             Dest::Resonance => 128,
+            Dest::LfoSpeed | Dest::LfoPitch | Dest::LfoAmp => 100,
+            Dest::Pitch => 8192,
+            Dest::OpPitch => 3600,
         }
     }
 }
@@ -148,6 +167,9 @@ impl Box {
             return Err(None);
         }
         let dest = Dest::of(dst).ok_or(Some("not covered (a destination without a law, or not the engine's)"))?;
+        if dest == Dest::LfoSpeed && s.get(Common::LfoSpeedRange as usize) != 0 {
+            return Err(Some("not covered (the voice LFO's extended speed range: not measured)"));
+        }
         if !(0..SOURCES as i16).contains(&src) || src == 5 {
             return Err(Some("not covered (a source the host does not send)"));
         }
@@ -181,7 +203,7 @@ impl Box {
 
     /// Whether it reaches operator `op` (that operator's switch for it).
     pub fn reaches(&self, s: &Sound, op: usize) -> bool {
-        self.dest == Dest::Level && s.get(ctrl_set_index(op, self.n)) != 0
+        matches!(self.dest, Dest::Level | Dest::OpPitch) && s.get(ctrl_set_index(op, self.n)) != 0
     }
 }
 
@@ -210,19 +232,35 @@ pub struct Steps {
     pub level: [i32; OPS],
     pub cutoff: i32,
     pub resonance: i32,
+    pub lfo_speed: i32,
+    pub lfo_pitch: i32,
+    pub lfo_amp: i32,
+    /// Cents: the sound's, and each operator's at sensitivity +7.
+    pub pitch: i32,
+    pub op_pitch: [i32; OPS],
 }
 
 pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     let mut t = Steps::default();
     for b in boxes(s) {
         let k = b.steps(src.get(b.src).copied().unwrap_or(0.0));
+        let add = |x: &mut i32| *x = x.saturating_add(k);
         match b.dest {
-            Dest::Cutoff => t.cutoff = t.cutoff.saturating_add(k),
-            Dest::Resonance => t.resonance = t.resonance.saturating_add(k),
-            Dest::Level => {
-                for (op, l) in t.level.iter_mut().enumerate() {
+            Dest::Cutoff => add(&mut t.cutoff),
+            Dest::Resonance => add(&mut t.resonance),
+            Dest::LfoSpeed => add(&mut t.lfo_speed),
+            Dest::LfoPitch => add(&mut t.lfo_pitch),
+            Dest::LfoAmp => add(&mut t.lfo_amp),
+            Dest::Pitch => add(&mut t.pitch),
+            Dest::Level | Dest::OpPitch => {
+                let ops = if b.dest == Dest::Level {
+                    &mut t.level
+                } else {
+                    &mut t.op_pitch
+                };
+                for (op, l) in ops.iter_mut().enumerate() {
                     if b.reaches(s, op) {
-                        *l = (*l).saturating_add(k);
+                        add(l);
                     }
                 }
             }
@@ -230,15 +268,31 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     }
     let clamp = |x: i32, d: Dest| x.clamp(-d.span(), d.span());
     t.level = t.level.map(|x| clamp(x, Dest::Level));
+    t.op_pitch = t.op_pitch.map(|x| clamp(x, Dest::OpPitch));
     t.cutoff = clamp(t.cutoff, Dest::Cutoff);
     t.resonance = clamp(t.resonance, Dest::Resonance);
+    t.lfo_speed = clamp(t.lfo_speed, Dest::LfoSpeed);
+    t.lfo_pitch = clamp(t.lfo_pitch, Dest::LfoPitch);
+    t.lfo_amp = clamp(t.lfo_amp, Dest::LfoAmp);
+    t.pitch = clamp(t.pitch, Dest::Pitch);
     t
+}
+
+/// A voice LFO value 0-99 (speed, pitch or amplitude depth) moved by its boxes' steps: within
+/// 0-99 (measured).
+pub fn lfo_value(stored: i16, steps: i32) -> i32 {
+    i32::from(stored).saturating_add(steps).clamp(0, 99)
+}
+
+/// Whether `s` has a box the engine plays on `d`.
+pub fn moves(s: &Sound, d: Dest) -> bool {
+    boxes(s).any(|b| b.dest == d)
 }
 
 /// The most the boxes can raise each operator's level, in steps (within one span).
 pub fn reach(s: &Sound) -> [i32; OPS] {
     let mut up = [0i32; OPS];
-    for b in boxes(s) {
+    for b in boxes(s).filter(|b| b.dest == Dest::Level) {
         for (op, u) in up.iter_mut().enumerate() {
             if b.reaches(s, op) {
                 *u = (*u).saturating_add(b.up());
@@ -251,6 +305,7 @@ pub fn reach(s: &Sound) -> [i32; OPS] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::laws;
 
     fn sound(t: &str) -> Sound {
         Sound::from_text(&format!("fm-sound/1\n{t}\n")).unwrap()
@@ -293,6 +348,95 @@ mod tests {
         let t = steps(&s, &[1024.0; SOURCES]);
         assert_eq!((t.level[0], t.level[2]), (96, 72));
         assert_eq!(reach(&s), [96, 96, 72, 96, 96, 96, 96, 96]);
+    }
+
+    /// One unipolar box from the wheel at `v` on destination `dst`, with `extra`: its steps.
+    fn one(dst: i16, ratio: i16, v: u8, extra: &str) -> Steps {
+        let s = sound(&format!("box1_dst={dst} box1_ratio={ratio} {extra}"));
+        let mut src = [0.0; SOURCES];
+        src[1] = controller(v);
+        steps(&s, &src)
+    }
+
+    /// The voice LFO's pitch depth (destination 90), measured on the reference: a lone carrier at
+    /// pitch depth offset 5, its swing peak to peak in cents by (ratio, wheel, stored depth); the
+    /// box moves the depth 100 steps at full output, toward zero, within 0-99, and the depth plays
+    /// by its law (within 0.1 cent at every point; a second LFO speed alike).
+    #[test]
+    fn lfo_pitch_depth_box_measured() {
+        #[rustfmt::skip]
+        let points: [(i16, u8, i16, f64); 30] = [
+            (16, 32, 0, 105.41), (16, 64, 0, 210.94), (16, 96, 0, 323.42), (16, 127, 0, 449.98),
+            (64, 32, 0, 450.00), (64, 64, 0, 900.00), (64, 96, 0, 1357.05), (64, 127, 0, 1800.02),
+            (8, 32, 0, 49.14), (8, 64, 0, 105.41), (8, 96, 0, 161.67), (8, 127, 0, 210.95),
+            (127, 32, 0, 900.00), (127, 64, 0, 1800.03),
+            (32, 96, 0, 667.92), (48, 32, 0, 323.44), (48, 96, 0, 1012.51), (48, 127, 0, 1357.04),
+            (16, 0, 40, 724.18), (16, 32, 40, 829.66), (16, 64, 40, 942.13), (16, 96, 40, 1047.60),
+            (127, 32, 40, 1631.25), (-16, 32, 40, 611.66), (-16, 96, 40, 393.73), (-16, 127, 40, 267.17),
+            (-64, 64, 40, 0.0), (32, 96, 20, 1026.60), (32, 127, 20, 1265.59), (-32, 32, 20, 140.61),
+        ];
+        for (ratio, v, depth, cents) in points {
+            let st = one(90, ratio, v, &format!("lfo_pitch_depth={depth}")).lfo_pitch;
+            let d = laws::lfo_pitch_d(lfo_value(depth, st));
+            let pp = 2.0 * d * laws::lfo_pitch_offset(5) * 1200.0 / 32768.0;
+            assert!((pp - cents).abs() < 0.1, "{ratio} {v} {depth}: {pp} against {cents}");
+        }
+    }
+
+    /// The voice LFO's amplitude depth (91), speed (89, the normal range) and the sound's pitch
+    /// (54), measured on the reference: the amplitude swing peak to peak at offset 7 (dB, within
+    /// 0.2: depth 37 falls between the depth law's measured points), the rate (within 0.5 %) and
+    /// the pitch (cents, within 0.5), the first two moved 100 steps a full box like the depth.
+    #[test]
+    fn lfo_amp_speed_and_pitch_boxes_measured() {
+        for (v, db) in [(32, 1.881), (64, 4.893), (96, 7.905), (127, 12.047)] {
+            let got = laws::lfo_amp_db(lfo_value(0, one(91, 32, v, "").lfo_amp));
+            assert!((got - db).abs() < 0.2, "{v}: {got} against {db}");
+        }
+        for (ratio, v, hz) in [
+            (32, 32, 5.299),
+            (32, 64, 7.486),
+            (32, 96, 9.421),
+            (32, 127, 16.823),
+            (127, 64, 49.796),
+        ] {
+            let st = one(89, ratio, v, "lfo_speed_range=0 lfo_speed=20").lfo_speed;
+            let got = laws::lfo_hz(false, lfo_value(20, st));
+            assert!((got / hz - 1.0).abs() < 0.005, "{ratio} {v}: {got} against {hz}");
+        }
+        for (v, cents) in [(32, 511.56), (64, 1023.58), (96, 1544.19), (127, 2047.92)] {
+            let got = f64::from(one(54, 16, v, "").pitch);
+            assert!((got - cents).abs() < 0.5, "{v}: {got} against {cents}");
+        }
+        // the extended speed range is not measured: reported
+        let s = sound("box1_dst=89 box1_ratio=8 lfo_speed_range=1");
+        assert!(not_played(&s, 0).unwrap().contains("extended"));
+    }
+
+    /// An operator's frequency (105) by its pitch controller sensitivity, measured on the
+    /// reference: a lone carrier's pitch (cents) by (sensitivity, wheel) with ratio 16, 3600 cents
+    /// a full box at +7, sensitivity / 7 of that (within 1.5 cents; none at 0). The level
+    /// controller sensitivity left the level boxes as they are at -7, 0, +3 and +7: ratio -32 at
+    /// the wheel's 64 and top, 18.07 and 37.00 dB down from level 99 at each.
+    #[test]
+    fn operator_pitch_box_and_the_sensitivities_measured() {
+        #[rustfmt::skip]
+        let points = [
+            (7, 64, 449.66), (7, 127, 899.45), (3, 64, 191.78), (3, 127, 384.40),
+            (-7, 64, -449.22), (-7, 127, -899.20), (0, 64, 0.0), (0, 127, 0.0),
+        ];
+        for (sens, v, cents) in points {
+            let t = one(105, 16, v, &format!("op1.pitch_ctrl_sens={sens} op2.ctrl_set1=0"));
+            let got = f64::from(t.op_pitch[0]) * f64::from(sens) / 7.0;
+            assert!((got - cents).abs() < 1.5, "{sens} {v}: {got} against {cents}");
+            assert_eq!(t.op_pitch[1], 0);
+        }
+        // (level 51 falls between the level law's measured points: 0.62 dB off there)
+        for (v, db, within) in [(64, -18.07, 0.2), (127, -37.00, 0.65)] {
+            let t = one(106, -32, v, "");
+            let got = laws::carrier_level_db(99 + t.level[0]) - laws::carrier_level_db(99);
+            assert!((got - db).abs() < within, "{v}: {got} against {db}");
+        }
     }
 
     #[test]

@@ -127,7 +127,8 @@ const CTL_REST: [u8; CTLS] = [0, 0, 0, 0, 0, 127];
 /// prepared) and read every control step: whether anything moves, the output gain (expression);
 /// from the controller boxes (docs/design.md, 3.9) each operator's level against the level it was
 /// prepared at (log2, at most 0) and whether any operator has one, the cutoff's values and the
-/// resonance's steps.
+/// resonance's steps, the voice LFO's pitch and amplitude depths (as [`Prepared::lfo_depths`])
+/// and speed value, the sound's pitch and each operator's (octaves).
 #[derive(Clone, Copy)]
 struct Mods {
     on: bool,
@@ -136,6 +137,10 @@ struct Mods {
     lvl: [f32; OPS],
     cut: f32,
     res: f32,
+    lfo_depths: (f32, f32),
+    lfo_speed: i16,
+    pitch: f32,
+    op_pitch: [f32; OPS],
 }
 
 const MODS0: Mods = Mods {
@@ -145,6 +150,10 @@ const MODS0: Mods = Mods {
     lvl: [0.0; OPS],
     cut: 0.0,
     res: 0.0,
+    lfo_depths: (1.0, 1.0),
+    lfo_speed: 0,
+    pitch: 0.0,
+    op_pitch: [0.0; OPS],
 };
 
 /// A sound's place in the voice budget's order (oscairn.voice-budget): voices it keeps from other
@@ -236,6 +245,9 @@ pub struct Prepared {
     lfo_amp: [f32; OPS],
     lfo_pitch_on: bool,
     lfo_amp_on: bool,
+    /// What `lfo_pitch` and `lfo_amp` are multiplied by: 1, or where a box moves the depth, its
+    /// stored depth (in the swing's units; straight loss steps) and they per unit of it.
+    lfo_depths: (f32, f32),
     /// Whether the voice LFO reaches anything (pitch, amplitude, the cutoff).
     lfo_on: bool,
     /// The voice LFO's speed value and range (for the sound LFO's speed destination).
@@ -273,6 +285,10 @@ pub struct Prepared {
     /// controller boxes reach); whether the sound has a box the engine plays.
     levels: [(u8, u8); OPS],
     boxed: bool,
+    /// Whether a box moves an operator's frequency, and each operator's pitch controller
+    /// sensitivity / 7 (ratio-mode live operators).
+    op_pitch_box: bool,
+    op_sens: [f32; OPS],
 }
 
 /// What the sound LFO moves: pitch (frequency or detune), level, what the kernels play (form or
@@ -382,6 +398,7 @@ impl Prepared {
             lfo_amp: [0.0; OPS],
             lfo_pitch_on: false,
             lfo_amp_on: false,
+            lfo_depths: (1.0, 1.0),
             lfo_on: false,
             lfo_speed: (false, 0),
             slfo: 0,
@@ -405,6 +422,8 @@ impl Prepared {
             filter: Laws::new(s, &dests),
             levels: [(0, 0); OPS],
             boxed: false,
+            op_pitch_box: false,
+            op_sens: [0.0; OPS],
             // shortcut: tempo sync plays the time (no tempo input; the coverage report names it)
             delay_ms: laws::key_on_delay_ms(i32::from(s.get(Common::KeyOnDelay as usize))) as f32,
         };
@@ -545,18 +564,36 @@ impl Prepared {
         p.lfo_wave = c(Common::LfoWave).clamp(0, 5) as u8;
         p.lfo_start = (c(Common::LfoPhase).clamp(0, 3) as u32) << 30;
         p.lfo_reset = c(Common::LfoKeyOnReset) != 0;
-        let amp = laws::amp_straight_db(laws::lfo_amp_db(c(Common::LfoAmpDepth))) / laws::AMP_BEND_STEP_DB;
+        // a box on a depth: the operators' shares a unit of it, the stored depth in lfo_depths
+        let (pm_box, am_box) = (
+            boxes::moves(s, boxes::Dest::LfoPitch),
+            boxes::moves(s, boxes::Dest::LfoAmp),
+        );
+        let amp = laws::lfo_amp_steps(c(Common::LfoAmpDepth));
+        if pm_box {
+            p.lfo_depths.0 = laws::lfo_pitch_d(c(Common::LfoPitchDepth)) as f32;
+        }
+        if am_box {
+            p.lfo_depths.1 = amp as f32;
+        }
         for op in (0..OPS).filter(|&op| has(u32::from(p.plan.live), op)) {
             let pitch = if has(u32::from(p.fixed), op) {
                 0.0
+            } else if pm_box {
+                laws::lfo_pitch_offset(o(op, Op::LfoPitchOffset, 0)) / 32768.0
             } else {
                 laws::lfo_pitch_cents(c(Common::LfoPitchDepth), o(op, Op::LfoPitchOffset, 0)) / 1200.0
             };
+            let share = laws::lfo_amp_share(o(op, Op::LfoAmpOffset, 0));
             if let (Some(lp), Some(la)) = (p.lfo_pitch.get_mut(op), p.lfo_amp.get_mut(op)) {
                 *lp = pitch as f32;
-                *la = (amp * laws::lfo_amp_share(o(op, Op::LfoAmpOffset, 0))) as f32;
+                *la = (if am_box { share } else { amp * share }) as f32;
+            }
+            if let Some(k) = p.op_sens.get_mut(op).filter(|_| !has(u32::from(p.fixed), op)) {
+                *k = o(op, Op::PitchCtrlSens, 0).clamp(-7, 7) as f32 / 7.0;
             }
         }
+        p.op_pitch_box = boxes::moves(s, boxes::Dest::OpPitch) && p.op_sens.iter().any(|&k| k != 0.0);
         p.lfo_pitch_on = p.lfo_pitch.iter().any(|&x| x != 0.0);
         p.lfo_amp_on = p.lfo_amp.iter().any(|&x| x != 0.0);
         p.lfo_on = p.lfo_pitch_on || p.lfo_amp_on || p.filter.uses_lfo();
@@ -1949,7 +1986,12 @@ impl Engine {
         };
         // expression: assumed to follow the part volume's measured law, about 40 log10(v / 127) dB
         let e = f32::from(c[EXPRESSION]) / 127.0;
-        *m = Mods { gain: e * e, ..MODS0 };
+        *m = Mods {
+            gain: e * e,
+            lfo_depths: p.lfo_depths,
+            lfo_speed: p.lfo_speed.1,
+            ..MODS0
+        };
         if p.boxed {
             let mut src = [0.0; SOURCES];
             boxes::own(&p.sound, &mut src);
@@ -1978,8 +2020,30 @@ impl Engine {
                 m.lvl_on = true;
             }
             (m.cut, m.res) = (t.cutoff as f32, t.resonance as f32);
+            // the voice LFO's values moved by whole steps within 0-99 (measured)
+            let moved = |k: Common, st: i32| boxes::lfo_value(p.sound.get(k as usize), st);
+            if t.lfo_pitch != 0 {
+                m.lfo_depths.0 = laws::lfo_pitch_d(moved(Common::LfoPitchDepth, t.lfo_pitch)) as f32;
+            }
+            if t.lfo_amp != 0 {
+                m.lfo_depths.1 = laws::lfo_amp_steps(moved(Common::LfoAmpDepth, t.lfo_amp)) as f32;
+            }
+            if t.lfo_speed != 0 {
+                m.lfo_speed = moved(Common::LfoSpeed, t.lfo_speed) as i16;
+            }
+            m.pitch = t.pitch as f32 / 1200.0;
+            for ((x, &st), &k) in m.op_pitch.iter_mut().zip(t.op_pitch.iter()).zip(p.op_sens.iter()) {
+                *x = st as f32 * k / 1200.0;
+            }
         }
-        m.on = m.gain != 1.0 || m.lvl_on || m.cut != 0.0 || m.res != 0.0;
+        m.on = m.gain != 1.0
+            || m.lvl_on
+            || m.cut != 0.0
+            || m.res != 0.0
+            || m.lfo_depths != p.lfo_depths
+            || m.lfo_speed != p.lfo_speed.1
+            || m.pitch != 0.0
+            || m.op_pitch.iter().any(|&x| x != 0.0);
     }
 
     /// Starts shedding one note by the platform's voice-budget order, for a new note of `incoming`
@@ -2183,6 +2247,9 @@ impl Engine {
         let panned = p.filter.pan_on;
         let (pan_on, [left, right]) = (&mut self.pan_on, &mut self.pan);
         let mono = &mut out[0];
+        // what the controllers do (a sound they leave alone skips it)
+        let m = self.mods.get(usize::from(sound)).filter(|m| m.on);
+        let lfo_speed = m.map_or(p.lfo_speed.1, |m| m.lfo_speed);
         let c = Ctx {
             rate: self.rate,
             shed_step: self.shed_step,
@@ -2190,15 +2257,20 @@ impl Engine {
             ms: (1000.0 / self.rate) as f32,
             bend: self.bend.get(usize::from(sound)).map_or(0.0, |&b| {
                 laws::bend_steps(i32::from(b), i32::from(p.bend.0), i32::from(p.bend.1)) as f32 / 2048.0
-            }),
+            }) + m.map_or(0.0, |m| m.pitch),
             fixed_max: (laws::FIXED_MAX_HZ / self.rate * 4_294_967_296.0) as f32,
             tick: self.tick,
-            lfo_inc: lfo_inc(p.lfo_hz, self.rate),
+            lfo_inc: if lfo_speed == p.lfo_speed.1 {
+                lfo_inc(p.lfo_hz, self.rate)
+            } else {
+                lfo_inc(laws::lfo_hz(false, i32::from(lfo_speed)) as f32, self.rate)
+            },
             lfo_hold: (f64::from(p.lfo_hold) * self.rate) as f32,
+            lfo_speed,
+            lfo_depths: m.map_or(p.lfo_depths, |m| m.lfo_depths),
+            op_pitch: p.op_pitch_box.then(|| m.map_or(NO_PITCH, |m| &m.op_pitch)),
         };
         let clock = self.clock;
-        // what the controllers do (a sound they leave alone skips it)
-        let m = self.mods.get(usize::from(sound)).filter(|m| m.on);
         // the sound LFO at each step's end, once for all the sound's lanes
         let mut sv = [0.0f32; BLOCK / STEP];
         if let Some(l) = self.slfo.get_mut(usize::from(sound)).filter(|_| p.slfo != 0) {
@@ -2240,7 +2312,7 @@ impl Engine {
 /// milliseconds a frame, the bend of the lane's sound (octaves), the highest increment a
 /// fixed-mode operator plays, the glide clock's period (frames, 2^-16 a unit), and the voice
 /// LFO's increment a frame and its delay's hold (frames).
-struct Ctx {
+struct Ctx<'a> {
     rate: f64,
     shed_step: f32,
     retrig_step: f32,
@@ -2250,7 +2322,14 @@ struct Ctx {
     tick: u64,
     lfo_inc: u32,
     lfo_hold: f32,
+    /// The voice LFO's speed value and depths' multipliers now ([`Mods`]); each operator's
+    /// pitch from the boxes (a sound without a box on it: none, its pitch not recomputed).
+    lfo_speed: i16,
+    lfo_depths: (f32, f32),
+    op_pitch: Option<&'a [f32; OPS]>,
 }
+
+const NO_PITCH: &[f32; OPS] = &[0.0; OPS];
 
 /// The voice LFO's phase increment a frame at `hz` (2^32 a cycle).
 fn lfo_inc(hz: f32, rate: f64) -> u32 {
@@ -2424,7 +2503,7 @@ fn slfo_wave(p: &Prepared, ph: u32, held: f32) -> f32 {
     }
 }
 
-impl Ctx {
+impl Ctx<'_> {
     /// Whether the glide clock ticks in the step of `n` frames from frame `t`.
     fn ticks(&self, t: u64, n: usize) -> bool {
         let at = |t: u64| t.wrapping_mul(65536).checked_div(self.tick);
@@ -2468,7 +2547,7 @@ fn step<const L: usize, V: F4<L>>(
     // a sound without a voice LFO skips this; the sound LFO's speed destination moves its rate
     let lfo = p.lfo_on.then(|| {
         let inc = if p.slfo & SLFO_SPEED != 0 {
-            let speed = i32::from(p.lfo_speed.1).saturating_add((sv * p.slfo_speed) as i32);
+            let speed = i32::from(c.lfo_speed).saturating_add((sv * p.slfo_speed) as i32);
             lfo_inc(laws::lfo_hz(p.lfo_speed.0, speed) as f32, c.rate)
         } else {
             c.lfo_inc
@@ -2480,7 +2559,13 @@ fn step<const L: usize, V: F4<L>>(
     // the sound LFO's pitch (a sound without it skips this)
     let sp = (p.slfo & SLFO_PITCH != 0).then(|| slfo_pitch::<L>(lane, p, sv));
     // a lane whose pitch does not move skips this
-    let ramp = if lane.moving != 0 || lane.jump || lane.bend != c.bend || p.lfo_pitch_on || sp.is_some() {
+    let ramp = if lane.moving != 0
+        || lane.jump
+        || lane.bend != c.bend
+        || p.lfo_pitch_on
+        || sp.is_some()
+        || c.op_pitch.is_some()
+    {
         pitch::<L, V>(lane, p, c, t, n, lfo.as_ref().map_or(&[0.0; W], |l| &l.0), sp.as_ref())
     } else {
         None
@@ -2663,7 +2748,11 @@ fn pitch<const L: usize, V: F4<L>>(
         }
     }
     let moves = |seg: u8| matches!(seg, ATTACK | DECAY1 | DECAY2 | RELEASE);
-    if pt.op_attack | pt.op_decay == 0 && !pt.c_seg.iter().take(L).any(|&s| moves(s)) && !p.lfo_pitch_on && sp.is_none()
+    if pt.op_attack | pt.op_decay == 0
+        && !pt.c_seg.iter().take(L).any(|&s| moves(s))
+        && !p.lfo_pitch_on
+        && sp.is_none()
+        && c.op_pitch.is_none()
     {
         lane.moving = gliding;
         return None;
@@ -2759,10 +2848,13 @@ fn incs<const L: usize, V: F4<L>>(
             m = m + V::load4(e);
         }
         if p.lfo_pitch_on && !fixed {
-            m = V::load4(lfo).mul_add(V::splat(at(&p.lfo_pitch, op)), m);
+            m = V::load4(lfo).mul_add(V::splat(at(&p.lfo_pitch, op) * c.lfo_depths.0), m);
         }
         if let Some(s) = sp.and_then(|s| s.get(op)) {
             m = m + V::load4(s);
+        }
+        if let Some(b) = c.op_pitch {
+            m = m + V::splat(at(b, op));
         }
         let base = V::U::load4(pt.base.get(op).unwrap_or(&[0; W]));
         // 2^m as 2^(m - 16) 2^16, within the vector exp2's range
@@ -2838,7 +2930,7 @@ fn envelopes<const L: usize, V: F4<L>>(
         l2.store4(lv);
         let heard = match amp {
             Some(a) => {
-                let k = at(&p.lfo_amp, i);
+                let k = at(&p.lfo_amp, i) * c.lfo_depths.1;
                 let mut loss = [0.0f32; L];
                 for (l, &a) in loss.iter_mut().zip(a.iter()) {
                     *l = laws::amp_loss_log2(a * k);
@@ -4332,6 +4424,69 @@ mod tests {
             "{base} box1_src=0 box1_dst=106 box1_ratio=16 box1_pol=1 bend_up=0{only1}"
         ));
         assert!(near(&play(&p, &[bend], &[]), &reference(71, 300)));
+    }
+
+    /// The boxes on the voice LFO's speed and depths play as the stored values they move to, and
+    /// the box on the sound's pitch as that many cents; moved under a held note, from the next
+    /// step on.
+    #[test]
+    fn boxes_move_the_voice_lfo_and_the_pitch() {
+        let lfo = "lfo_speed_range=0 lfo_key_on_reset=1 op1.lfo_pitch_offset=5 op1.lfo_amp_offset=7";
+        let s = |extra: &str| carrier(1, &format!("{lfo} {extra}"));
+        let play = |p: &Prepared, before: &[Event]| {
+            let mut e = engine(p);
+            blocks(&mut e, before, 1);
+            e.note_on(0, 1, 69, 100.0, &mut |_| {});
+            blocks(&mut e, &[], 30)
+        };
+        let wheel = |v| control(1, v);
+        let near = |a: &[f32], b: &[f32]| {
+            let worst = a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+            assert!(worst < 1e-3, "{worst}");
+            true
+        };
+        // the pitch depth: 40 + 25 steps (ratio 16 at the top), 40 - 12 (ratio -16 at 64)
+        let pm = |r: i32| s(&format!("lfo_pitch_depth=40 box1_dst=90 box1_ratio={r}"));
+        assert!(near(
+            &play(&pm(16), &[wheel(127)]),
+            &play(&s("lfo_pitch_depth=65"), &[])
+        ));
+        assert!(near(
+            &play(&pm(-16), &[wheel(64)]),
+            &play(&s("lfo_pitch_depth=28"), &[])
+        ));
+        assert!(near(&play(&pm(16), &[]), &play(&s("lfo_pitch_depth=40"), &[])));
+        // the amplitude depth from 0, the speed (with a pitch depth to hear it)
+        let am = s("box1_dst=91 box1_ratio=32");
+        assert!(near(&play(&am, &[wheel(127)]), &play(&s("lfo_amp_depth=50"), &[])));
+        let sp = s("lfo_pitch_depth=30 lfo_speed=20 box1_dst=89 box1_ratio=32");
+        assert!(near(
+            &play(&sp, &[wheel(64)]),
+            &play(&s("lfo_pitch_depth=30 lfo_speed=45"), &[])
+        ));
+        // the pitch: +1024 cents at the wheel's 64 (ratio 16), moved under the note (the vector
+        // exp2 within 0.15 cent)
+        let f0 = zero_crossing_hz(&play(&s(""), &[])[BLOCK * 4..]);
+        let pitch = s("box1_dst=54 box1_ratio=16");
+        let up = zero_crossing_hz(&play(&pitch, &[wheel(64)])[BLOCK * 4..]);
+        assert!((1200.0 * (up / f0).log2() - 1024.0).abs() < 0.15, "{f0} {up}");
+        let mut e = engine(&pitch);
+        e.note_on(0, 1, 69, 100.0, &mut |_| {});
+        blocks(&mut e, &[], 2);
+        let x = blocks(&mut e, &[wheel(64)], 8);
+        assert!((1200.0 * (zero_crossing_hz(&x[BLOCK..]) / f0).log2() - 1024.0).abs() < 0.15);
+        // an operator's frequency: 450 cents at the wheel's 64 (ratio 16) by sensitivity +7, -3
+        // sevenths of it at -3, and back where it was with the wheel at 0
+        let op = |sens: i32| s(&format!("box1_dst=105 box1_ratio=16 op1.pitch_ctrl_sens={sens}"));
+        for (sens, cents) in [(7, 450.0), (-3, -450.0 * 3.0 / 7.0), (0, 0.0)] {
+            let hz = zero_crossing_hz(&play(&op(sens), &[wheel(64)])[BLOCK * 4..]);
+            assert!((1200.0 * (hz / f0).log2() - cents).abs() < 0.15, "{sens}: {hz}");
+        }
+        let mut e = engine(&op(7));
+        e.note_on(0, 1, 69, 100.0, &mut |_| {});
+        blocks(&mut e, &[wheel(64)], 2);
+        let x = blocks(&mut e, &[wheel(0)], 8);
+        assert!((1200.0 * (zero_crossing_hz(&x[BLOCK..]) / f0).log2()).abs() < 0.15);
     }
 
     /// The sostenuto pedal holds the notes whose keys were down when it went down, not later ones;

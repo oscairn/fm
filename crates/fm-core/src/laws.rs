@@ -480,8 +480,23 @@ pub fn lfo_delay_s(delay: i32) -> f64 {
 /// twice the six-operator depth (depth × 165 / 64 steps, 99 as 256; offsets as 0, 10, 20, 33, 56,
 /// 96, 160, 256 steps; 256 × 256 steps swing 2400 cents).
 pub fn lfo_pitch_cents(depth: i32, offset: i32) -> f64 {
-    let d = if depth >= 99 { 256 } else { depth.max(0) * 165 / 64 };
-    f64::from(d) * at(&LFO_PITCH_OFFSET, offset) * 1200.0 / 32768.0
+    lfo_pitch_d(depth) * lfo_pitch_offset(offset) * 1200.0 / 32768.0
+}
+
+/// The pitch depth 0-99 in the swing's units (depth × 165 / 64 truncated, 99 as 256).
+pub fn lfo_pitch_d(depth: i32) -> f64 {
+    f64::from(if depth >= 99 { 256 } else { depth.max(0) * 165 / 64 })
+}
+
+/// An operator's pitch depth offset 0-7 in the swing's units.
+pub fn lfo_pitch_offset(offset: i32) -> f64 {
+    at(&LFO_PITCH_OFFSET, offset)
+}
+
+/// The voice LFO's amplitude depth 0-99 as an operator with offset 7 loses it at the LFO's
+/// bottom: straight, in the bend's steps.
+pub fn lfo_amp_steps(depth: i32) -> f64 {
+    amp_straight_db(lfo_amp_db(depth)) / AMP_BEND_STEP_DB
 }
 
 /// The voice LFO's amplitude depth 0-99: dB an operator with offset 7 loses at the LFO's bottom,

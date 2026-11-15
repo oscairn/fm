@@ -98,7 +98,10 @@ pub fn status(p: &Param) -> &'static str {
         // M7: the controller boxes, their sources and the operators' switches for them (a box the
         // engine does not play: `crate::boxes::not_played`)
         PLAYED
-    } else if n.ends_with("_ctrl_sens") {
+    } else if n == "pitch_ctrl_sens" {
+        // M7: the operator frequency boxes' share
+        PLAYED
+    } else if n == "level_ctrl_sens" {
         "M7 (unmeasured)"
     } else if starts(&["key_ctrl_set", "tuning_"]) {
         "M7 (controllers, tuning)"
@@ -208,7 +211,7 @@ mod tests {
     fn report() {
         let s = Sound::from_text(
             "fm-sound/1\nrandom_pan=3 key_on_delay=4 key_on_delay_sync=1 algorithm=5 filter_type=18 slfo_depth1=3 slfo_dest2=72 \
-             slfo_depth2=9 slfo_dest3=75 slfo_depth3=1 slfo_tempo_sync=1 box1_dst=106 box1_ratio=9 box2_dst=90 \
+             slfo_depth2=9 slfo_dest3=75 slfo_depth3=1 slfo_tempo_sync=1 box1_dst=106 box1_ratio=9 box2_dst=92 \
              box2_ratio=9\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
         )
         .unwrap();
@@ -224,7 +227,7 @@ mod tests {
                 (224, 2, effect),
                 (
                     309,
-                    90,
+                    92,
                     "not covered (a destination without a law, or not the engine's)"
                 )
             ]
