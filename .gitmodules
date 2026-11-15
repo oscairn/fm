@@ -1,0 +1,3 @@
+[submodule "third_party/oscairn-clap"]
+	path = third_party/oscairn-clap
+	url = https://github.com/oscairn/oscairn-clap.git

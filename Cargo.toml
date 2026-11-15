@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/fm-core", "crates/fm-clap", "tools/fmbench", "tools/nopanic"]
+# the platform's bindings keep their own workspace (a submodule)
+exclude = ["third_party"]
 
 [workspace.package]
 version = "0.0.1"

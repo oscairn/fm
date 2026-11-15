@@ -1,13 +1,20 @@
 [package]
 name = "fm-clap"
-description = "CLAP shell of the FM engine (a stub in this round: docs/design.md, \"The shell\")"
-version.workspace = true
+description = "CLAP shell of the FM engine (docs/plugin.md)"
+# the plugin's version, as its descriptor says it
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 fm-core = { path = "../fm-core" }
+# the platform's extension bindings, pre-generated, with clap-sys 0.5.0's own CLAP types
+# (third_party/oscairn-clap is a submodule at the pinned commit)
+oscairn-clap-sys = { path = "../../third_party/oscairn-clap/rust/oscairn-clap-sys" }
 
 [lints]
 workspace = true

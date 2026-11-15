@@ -9,3 +9,5 @@ publish = false
 
 [dependencies]
 fm-core = { path = "../../crates/fm-core" }
+fm-clap = { path = "../../crates/fm-clap" }
+oscairn-clap-sys = { path = "../../third_party/oscairn-clap/rust/oscairn-clap-sys" }

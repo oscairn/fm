@@ -3,10 +3,17 @@
 version = 4
 
 [[package]]
+name = "clap-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a76abbdb2907f6fd97fb6bc0b7be96b77d328f2dd9669d1075cc03369ed22154"
+
+[[package]]
 name = "fm-clap"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "fm-core",
+ "oscairn-clap-sys",
 ]
 
 [[package]]
@@ -24,5 +31,14 @@ dependencies = [
 name = "fmbench"
 version = "0.0.1"
 dependencies = [
+ "fm-clap",
  "fm-core",
+ "oscairn-clap-sys",
+]
+
+[[package]]
+name = "oscairn-clap-sys"
+version = "0.1.0"
+dependencies = [
+ "clap-sys",
 ]
