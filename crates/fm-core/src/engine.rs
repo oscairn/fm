@@ -1190,12 +1190,7 @@ impl Engine {
     /// Fades out every voice of `sound` (each ends after its fade); a mono sound's keys kept to
     /// return to end at once.
     pub fn choke(&mut self, sound: usize, end: &mut impl FnMut(NoteEnd)) {
-        while let Some(i) = self
-            .delayed
-            .iter()
-            .take(self.delayed_n)
-            .position(|d| usize::from(d.0) == sound)
-        {
+        while let Some(i) = self.waiting(|d| usize::from(d.0) == sound) {
             if let Some((s, h, _)) = self.undelay(i) {
                 end(NoteEnd {
                     sound: s,
@@ -1307,10 +1302,17 @@ impl Engine {
     /// A delayed note of `sound` whose start is in this block at or after frame `from`, the
     /// earliest: its place in the list and its frame.
     fn due(&self, sound: u8, from: usize) -> Option<(usize, usize)> {
-        let d = self.delayed.iter().take(self.delayed_n).enumerate();
-        d.filter(|(_, d)| d.0 == sound && (d.2 as usize) < BLOCK)
+        // (a range, not `enumerate`, whose counter would be an overflow check)
+        (0..self.delayed_n)
+            .filter_map(|i| self.delayed.get(i).map(|d| (i, d)))
+            .filter(|(_, d)| d.0 == sound && (d.2 as usize) < BLOCK)
             .map(|(i, d)| (i, (d.2 as usize).max(from)))
             .min_by_key(|x| x.1)
+    }
+
+    /// The first delayed note for which `f` holds.
+    fn waiting(&self, f: impl Fn(&(u8, Held, u32)) -> bool) -> Option<usize> {
+        (0..self.delayed_n).find(|&i| self.delayed.get(i).is_some_and(&f))
     }
 
     /// Takes delayed note `i` out of the list (the last one moves into its place).
@@ -1558,11 +1560,7 @@ impl Engine {
     pub fn note_off(&mut self, sound: usize, id: u32, end: &mut impl FnMut(NoteEnd)) {
         let s8 = sound as u8;
         // a note still waiting out its key-on delay never sounds
-        let waiting = self
-            .delayed
-            .iter()
-            .take(self.delayed_n)
-            .position(|d| d.0 == s8 && d.1.id == id);
+        let waiting = self.waiting(|d| d.0 == s8 && d.1.id == id);
         if let Some((_, h, _)) = waiting.and_then(|i| self.undelay(i)) {
             return end(NoteEnd {
                 sound: s8,

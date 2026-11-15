@@ -644,10 +644,13 @@ pub fn level_scaling_db(key: i32, brk: i32, low: (i32, i32), high: (i32, i32)) -
         ((1 - offset) / 3, low)
     };
     let (depth, curve) = (depth.clamp(0, 99), curve.clamp(0, 3));
+    // (at most 39 × 99 × 329 and 250 × 99 × 329: wrapping, so no overflow check is left where the
+    // optimiser loses the range)
     let steps = if curve == 0 || curve == 3 {
-        (group * depth * 329) >> 12
+        group.wrapping_mul(depth).wrapping_mul(329) >> 12
     } else {
-        (i32::from(EXP_SCALE.get(group.min(32) as usize).copied().unwrap_or(250)) * depth * 329) >> 15
+        let e = i32::from(EXP_SCALE.get(group.min(32) as usize).copied().unwrap_or(250));
+        e.wrapping_mul(depth).wrapping_mul(329) >> 15
     };
     f64::from(if curve < 2 { -steps } else { steps }) * 32.0 * 6.020_599_913_279_624 / 256.0
 }

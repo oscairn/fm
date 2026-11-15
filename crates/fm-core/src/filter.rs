@@ -932,7 +932,10 @@ impl Voices {
         // the sound LFO's resonance steps: the damping times 2^(-steps / 16)
         let dscale = if f.slfo_res != 0.0 {
             let res = f.resonance.saturating_add((sv * f.slfo_res) as i32).clamp(0, 127);
-            scalar::F::<1>::splat((f.resonance - res) as f32 / 16.0 - 8.0).exp2().0[0] * 256.0
+            scalar::F::<1>::splat((f.resonance as f32 - res as f32) / 16.0 - 8.0)
+                .exp2()
+                .0[0]
+                * 256.0
         } else {
             1.0
         };
