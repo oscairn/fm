@@ -115,6 +115,13 @@ pub struct Limits {
     pub limit: u8,
 }
 
+/// The channels a render wrote ([`Engine::render_buses`]), a bit an output pair.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Written {
+    pub left: u16,
+    pub right: u16,
+}
+
 /// A sound as the engine plays it: the laws applied once, off the audio thread.
 #[derive(Clone, Copy)]
 pub struct Prepared {
@@ -747,6 +754,10 @@ fn bit(i: usize) -> u8 {
     u32::try_from(i).ok().and_then(|i| 1u8.checked_shl(i)).unwrap_or(0)
 }
 
+fn bit16(i: usize) -> u16 {
+    u32::try_from(i).ok().and_then(|i| 1u16.checked_shl(i)).unwrap_or(0)
+}
+
 #[inline(always)]
 fn at<const N: usize>(a: &[f32; N], i: usize) -> f32 {
     a.get(i).copied().unwrap_or(0.0)
@@ -1298,13 +1309,13 @@ impl Engine {
         }
     }
 
-    /// A delayed note of `sound` whose start is in this block at or after frame `from`, the
-    /// earliest: its place in the list and its frame.
-    fn due(&self, sound: u8, from: usize) -> Option<(usize, usize)> {
+    /// A delayed note of `sound` whose start is in this block (of `frames`) at or after frame
+    /// `from`, the earliest: its place in the list and its frame.
+    fn due(&self, sound: u8, from: usize, frames: usize) -> Option<(usize, usize)> {
         // (a range, not `enumerate`, whose counter would be an overflow check)
         (0..self.delayed_n)
             .filter_map(|i| self.delayed.get(i).map(|d| (i, d)))
-            .filter(|(_, d)| d.0 == sound && (d.2 as usize) < BLOCK)
+            .filter(|(_, d)| d.0 == sound && (d.2 as usize) < frames)
             .map(|(i, d)| (i, (d.2 as usize).max(from)))
             .min_by_key(|x| x.1)
     }
@@ -1716,11 +1727,34 @@ impl Engine {
         events: &[Event],
         end: &mut impl FnMut(NoteEnd),
     ) {
-        // the sounds without pan add to the left channel, copied to the right at the end; those
-        // with pan to their own pair
-        (out[0], self.pan_on) = ([0.0; BLOCK], false);
+        let w = self.render_buses::<V>(core::slice::from_mut(out), &[0; SOUNDS], BLOCK, events, end);
+        let [l, r] = out;
+        if w.left & 1 == 0 {
+            *l = [0.0; BLOCK];
+        }
+        if w.right & 1 == 0 {
+            *r = *l;
+        }
+    }
+
+    /// [`Engine::render_events`] over the first `frames` frames of the block (at most `BLOCK`;
+    /// the clock moves on by as many), each sound into its own output pair: sound `s` into
+    /// `out[bus[s]]` (into `out[0]` when that is past the end). Only what sounds is written: an
+    /// output's left channel only when a voice played into it (bit `o` of `left`), its right only
+    /// when a sound with pan did (bit `o` of `right`), else the right is the left; the caller
+    /// copies or flags it. The sounds of one output are summed in the order of their numbers.
+    pub fn render_buses<V: F4>(
+        &mut self,
+        out: &mut [[[f32; BLOCK]; 2]],
+        bus: &[u8; SOUNDS],
+        frames: usize,
+        events: &[Event],
+        end: &mut impl FnMut(NoteEnd),
+    ) -> Written {
+        let frames = frames.min(BLOCK);
+        let mut w = Written::default();
         // parameter changes that waited for their sound to fall silent
-        for sound in 0..SOUNDS {
+        for sound in 0..if self.pending != 0 { SOUNDS } else { 0 } {
             if !has(u32::from(self.pending), sound) || self.busy(sound) {
                 continue;
             }
@@ -1734,54 +1768,73 @@ impl Engine {
             .iter()
             .filter(|l| l.used != 0)
             .fold(0, |m, l| m | bit(usize::from(l.sound)));
-        // (without a voice there is nothing to shed)
+        // (without a voice there is nothing to shed; a note starts only within the limit, so at the
+        // pool's own nothing is over it)
         if busy != 0 {
-            while self.keeping(None) > self.limit && self.shed(None, None) {}
+            while self.limit < VOICES && self.keeping(None) > self.limit && self.shed(None, None) {}
             for (sound, lim) in (0..SOUNDS as u8).zip(self.limits).filter(|(_, l)| l.limit > 0) {
                 while self.keeping(Some(sound)) > usize::from(lim.limit) && self.shed(None, Some(sound)) {}
             }
         }
         let busy = events.iter().fold(busy, |m, e| m | bit(usize::from(e.sound)));
         let busy = (self.delayed.iter().take(self.delayed_n)).fold(busy, |m, d| m | bit(usize::from(d.0)));
-        for sound in (0..SOUNDS as u8).filter(|&s| has(u32::from(busy), usize::from(s))) {
-            let mut from = 0;
-            let mut ext = events.iter().filter(|e| e.sound == sound).peekable();
-            loop {
-                // the next event, or the next delayed note to start (before an event at its frame)
-                let next = ext.peek().map(|e| e.frame.clamp(from, BLOCK));
-                let due = self.due(sound, from).filter(|d| next.is_none_or(|f| d.1 < f));
-                let Some(at) = due.map(|d| d.1).or(next) else { break };
-                self.render_sound::<V>(sound, out, from, at, end);
-                (from, self.at) = (at, at);
-                let s = usize::from(sound);
-                if let Some((_, h, _)) = due.and_then(|d| self.undelay(d.0)) {
-                    self.play(s, h.id, h.key, h.velocity, end);
-                    continue;
+        let outs = out.len().min(16);
+        let port = |s: u8| {
+            bus.get(usize::from(s))
+                .map(|&b| usize::from(b))
+                .filter(|&b| b < outs)
+                .unwrap_or(0)
+        };
+        for (o, pair) in (0..outs).zip(out.iter_mut()) {
+            // the sounds without pan add to the left channel (cleared when first written); those
+            // with pan to the engine's pair, added to both channels at the output's end
+            let (mut left, b) = (false, bit16(o));
+            self.pan_on = false;
+            for sound in (0..SOUNDS as u8).filter(|&s| has(u32::from(busy), usize::from(s)) && port(s) == o) {
+                let mut from = 0;
+                let mut ext = events.iter().filter(|e| e.sound == sound).peekable();
+                loop {
+                    // the next event, or the next delayed note to start (before an event at its frame)
+                    let next = ext.peek().map(|e| e.frame.max(from).min(frames));
+                    let due = self.due(sound, from, frames).filter(|d| next.is_none_or(|f| d.1 < f));
+                    let Some(at) = due.map(|d| d.1).or(next) else { break };
+                    self.render_sound::<V>(sound, pair, &mut left, from, at, end);
+                    (from, self.at) = (at, at);
+                    let s = usize::from(sound);
+                    if let Some((_, h, _)) = due.and_then(|d| self.undelay(d.0)) {
+                        self.play(s, h.id, h.key, h.velocity, end);
+                        continue;
+                    }
+                    let Some(e) = ext.next() else { break };
+                    match e.kind {
+                        Kind::On { id, key, velocity } => self.note_on(s, id, key, velocity, end),
+                        Kind::Off { id } => self.note_off(s, id, end),
+                        Kind::Pedal { down } => self.pedal(s, down),
+                        Kind::Bend { value } => self.bend(s, value),
+                        Kind::Param { id, value } => self.param(s, id, value),
+                    }
                 }
-                let Some(e) = ext.next() else { break };
-                match e.kind {
-                    Kind::On { id, key, velocity } => self.note_on(s, id, key, velocity, end),
-                    Kind::Off { id } => self.note_off(s, id, end),
-                    Kind::Pedal { down } => self.pedal(s, down),
-                    Kind::Bend { value } => self.bend(s, value),
-                    Kind::Param { id, value } => self.param(s, id, value),
+                self.render_sound::<V>(sound, pair, &mut left, from, frames, end);
+            }
+            let [l, r] = pair;
+            if self.pan_on {
+                if !left {
+                    *l = [0.0; BLOCK];
                 }
+                let [pl, pr] = &self.pan;
+                for (((l, r), pl), pr) in l.iter_mut().zip(r.iter_mut()).zip(pl).zip(pr) {
+                    (*l, *r) = (*l + *pl, *l + *pr);
+                }
+                (w.left, w.right) = (w.left | b, w.right | b);
+            } else if left {
+                w.left |= b;
             }
-            self.render_sound::<V>(sound, out, from, BLOCK, end);
-        }
-        let [l, r] = out;
-        if self.pan_on {
-            let [pl, pr] = &self.pan;
-            for (((l, r), pl), pr) in l.iter_mut().zip(r.iter_mut()).zip(pl).zip(pr) {
-                (*l, *r) = (*l + *pl, *l + *pr);
-            }
-        } else {
-            *r = *l;
         }
         for d in self.delayed.iter_mut().take(self.delayed_n) {
-            d.2 = d.2.saturating_sub(BLOCK as u32);
+            d.2 = d.2.saturating_sub(frames as u32);
         }
-        (self.clock, self.at) = (self.clock.wrapping_add(BLOCK as u64), 0);
+        (self.clock, self.at) = (self.clock.wrapping_add(frames as u64), 0);
+        w
     }
 
     /// Frames `from..to` of the lanes of `sound`, in control steps of 16 frames from `from` (the
@@ -1790,6 +1843,7 @@ impl Engine {
         &mut self,
         sound: u8,
         out: &mut [[f32; BLOCK]; 2],
+        written: &mut bool,
         from: usize,
         to: usize,
         end: &mut impl FnMut(NoteEnd),
@@ -1798,12 +1852,10 @@ impl Engine {
         let Some(p) = self.sounds.get(usize::from(sound)) else {
             return;
         };
-        // a sound with pan adds to the block's pair for those, cleared when first used
+        // a sound with pan adds to the block's pair for those, the others to the left channel,
+        // each cleared when a lane first plays into it
         let panned = p.filter.pan_on;
-        if panned && !self.pan_on && self.lanes.iter().any(|l| l.used != 0 && l.sound == sound) {
-            (self.pan, self.pan_on) = ([[0.0; BLOCK]; 2], true);
-        }
-        let [left, right] = &mut self.pan;
+        let (pan_on, [left, right]) = (&mut self.pan_on, &mut self.pan);
         let mono = &mut out[0];
         let c = Ctx {
             rate: self.rate,
@@ -1825,6 +1877,11 @@ impl Engine {
             l.steps(p, self.rate, to.saturating_sub(from), &mut sv);
         }
         for lane in self.lanes.iter_mut().filter(|l| l.used != 0 && l.sound == sound) {
+            if panned && !*pan_on {
+                (*left, *right, *pan_on) = ([0.0; BLOCK], [0.0; BLOCK], true);
+            } else if !panned && !*written {
+                (*mono, *written) = ([0.0; BLOCK], true);
+            }
             let mut f = from;
             let mut k = 0usize;
             while f < to {
@@ -4779,5 +4836,97 @@ mod tests {
         let mut out = [0.0; BLOCK];
         e.render1::<Native>(&mut out, &mut |_| {});
         assert!(out.iter().all(|&x| x == 0.0));
+    }
+
+    /// Two sounds, one with pan, playing a note each: (sound, pan) settings.
+    fn two_sounds() -> Engine {
+        let mut e = Engine::new(RATE);
+        e.set_sound(0, &carrier(1, ""));
+        e.set_sound(1, &carrier(5, "alternate_pan=40"));
+        e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        e.note_on(1, 2, 64, 90.0, &mut |_| {});
+        e
+    }
+
+    #[test]
+    fn buses_take_each_sound_as_it_plays_alone() {
+        // together on one pair, as render_events
+        let mut a = two_sounds();
+        let mut both = [[0.0; BLOCK]; 2];
+        a.render_events::<Native>(&mut both, &[], &mut |_| {});
+        // sound 0 on output 2, sound 1 on output 1, output 0 untouched; the outputs add to the pair
+        let mut b = two_sounds();
+        let mut outs = [[[f32::NAN; BLOCK]; 2]; 3];
+        let w = b.render_buses::<Native>(&mut outs, &[2, 1, 0, 0, 0, 0, 0, 0], BLOCK, &[], &mut |_| {});
+        assert_eq!(
+            w,
+            Written {
+                left: 0b110,
+                right: 0b010
+            }
+        );
+        assert!(outs[0].as_flattened().iter().all(|x| x.is_nan()));
+        assert!(
+            outs[2][1].iter().all(|x| x.is_nan()),
+            "a channel without pan is left for the caller"
+        );
+        for i in 0..BLOCK {
+            assert_eq!((outs[2][0][i] + outs[1][0][i]).to_bits(), both[0][i].to_bits());
+            assert_eq!((outs[2][0][i] + outs[1][1][i]).to_bits(), both[1][i].to_bits());
+        }
+        // a bus past the outputs is output 0; nothing sounding writes nothing
+        let mut c = Engine::new(RATE);
+        assert_eq!(
+            c.render_buses::<Native>(&mut outs, &[9; SOUNDS], BLOCK, &[], &mut |_| {}),
+            Written::default()
+        );
+    }
+
+    #[test]
+    fn a_block_in_parts_plays_its_frames() {
+        // two halves of a block, on the step grid, play as the whole block
+        let ev = |frame, kind| Event { frame, sound: 0, kind };
+        let events = [
+            ev(
+                0,
+                Kind::On {
+                    id: 1,
+                    key: 60,
+                    velocity: 100.0,
+                },
+            ),
+            ev(96, Kind::Off { id: 1 }),
+        ];
+        let mut a = engine(&carrier(1, ""));
+        let mut whole = Vec::new();
+        for b in 0..4 {
+            let mut o = [[0.0; BLOCK]; 2];
+            a.render_events::<Native>(&mut o, if b == 1 { &events } else { &[] }, &mut |_| {});
+            whole.extend_from_slice(&o[0]);
+        }
+        let mut b = engine(&carrier(1, ""));
+        let mut parts = Vec::new();
+        for blk in 0..4 {
+            for half in 0..2 {
+                let mut o = [[[0.0; BLOCK]; 2]];
+                let ev: Vec<Event> = if blk == 1 {
+                    events
+                        .iter()
+                        .filter(|e| e.frame / 64 == half)
+                        .map(|e| Event {
+                            frame: e.frame % 64,
+                            ..*e
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                b.render_buses::<Native>(&mut o, &[0; SOUNDS], 64, &ev, &mut |_| {});
+                parts.extend_from_slice(&o[0][0][..64]);
+            }
+        }
+        assert_eq!(whole.len(), parts.len());
+        assert!(whole.iter().zip(&parts).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(whole.iter().any(|&x| x != 0.0));
     }
 }

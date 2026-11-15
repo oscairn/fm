@@ -17,7 +17,7 @@
 //!
 //! Under callgrind, `--toggle-collect='fmbench_render*'` counts only the rendering (tools/cost/cg.sh).
 use fm_core::coverage::not_covered;
-use fm_core::engine::{Engine, Event, Kind, NoteEnd, Prepared, BLOCK, VOICES};
+use fm_core::engine::{Engine, Event, Kind, NoteEnd, Prepared, BLOCK, SOUNDS, VOICES};
 use fm_core::simd::{scalar, Native, F4};
 use fm_core::sound::Sound;
 use fm_core::spike::{self, footprint, Form, Layout, Routing};
@@ -35,21 +35,30 @@ pub extern "C" fn fmbench_render(e: &mut spike::Engine, out: &mut [f32; BLOCK], 
     }
 }
 
+// The engine's cases render as a host shell does (`render_buses`): a channel no voice wrote is left
+// as it was, a right channel that is the left is not copied (the shell copies its output anyway).
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn fmbench_render_engine(e: &mut Engine, out: &mut [[f32; BLOCK]; 2], scalar: bool) {
-    let mut end = |_: NoteEnd| {};
+    let (mut end, out) = (|_: NoteEnd| {}, core::slice::from_mut(out));
     if scalar {
-        e.render::<scalar::F>(out, &mut end)
+        e.render_buses::<scalar::F>(out, &[0; SOUNDS], BLOCK, &[], &mut end);
     } else {
-        e.render::<Native>(out, &mut end)
+        e.render_buses::<Native>(out, &[0; SOUNDS], BLOCK, &[], &mut end);
     }
 }
 
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn fmbench_render_event(e: &mut Engine, out: &mut [[f32; BLOCK]; 2], ev: &Event) {
-    e.render_events::<Native>(out, core::slice::from_ref(ev), &mut |_: NoteEnd| {});
+    let out = core::slice::from_mut(out);
+    e.render_buses::<Native>(
+        out,
+        &[0; SOUNDS],
+        BLOCK,
+        core::slice::from_ref(ev),
+        &mut |_: NoteEnd| {},
+    );
 }
 
 /// Operator `o`'s (1-8) form, spread and formant in a cost case: `mixed` puts the eight on eight
