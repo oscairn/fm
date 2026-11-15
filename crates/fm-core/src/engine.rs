@@ -2884,7 +2884,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let p = sound(&format!("algorithm={r} feedback=6\n{text}"));
+            let p = sound(&format!("algorithm={r} feedback=6 portamento=0\n{text}"));
             let mut e = engine(&p);
             for v in 0..6 {
                 e.note_on(0, v, 40 + 7 * v as u8, 30.0 + 15.0 * v as f32, &mut |_| {});
@@ -2940,7 +2940,7 @@ mod tests {
                 .replace('#', &o.to_string())
             })
             .collect();
-        let p = sound(&format!("algorithm=12 feedback=6\n{text}"));
+        let p = sound(&format!("algorithm=12 feedback=6 portamento=0\n{text}"));
         // (block, note id, on): note 0 is the voice followed
         let scenes: [&[(usize, u32, bool)]; 4] = [
             &[(0, 0, true)],
@@ -3257,7 +3257,7 @@ mod tests {
                 )
             })
             .collect();
-        let p = sound(&format!("algorithm=12 feedback=6\n{text}"));
+        let p = sound(&format!("algorithm=12 feedback=6 portamento=0\n{text}"));
         let quiet = sound(&(1..=8).map(|o| format!("op{o}.level=0\n")).collect::<String>());
         let render = |events: &[Event], other: bool| {
             let mut e = engine(&p);

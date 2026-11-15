@@ -56,6 +56,9 @@ for f in all odd res mixed; do run "fm-r12-8-$f" 32 e 12 8 native $f; done
 run fm-r80-8-res 32 e 80 8 native res
 run fm-r1-8-res 32 e 1 8 native res
 run fm-r12-8-mixed-v8 8 e 12 8 native mixed
+# both pitch envelopes moving and portamento gliding on every voice
+run fm-r12-8-pitch 32 e 12 8 native pitch
+run fm-s1-v1-pitch 1 e 12 8 native pitch 1
 # voices few a sound: 1 and 2 voices in each of 1, 5 and 8 sounds (a voice-block: by all the voices)
 for s in 1 5 8; do for v in 1 2; do TOTAL=$((s * v)); run "fm-s$s-v$v" "$v" e 12 8 native sine $s; done; done; TOTAL=
 run fm-s1-v5 5 e 12 8 native sine 1

@@ -107,7 +107,7 @@ const FILTER: [Row; 35] = [
 const PART: [Row; 56] = [
     ("mono_poly", 0, 1, 1),
     ("key_assign", 0, 1, 1),
-    ("portamento", 0, 1, 0),
+    ("portamento", 0, 1, 1),
     ("portamento_time", 0, 127, 64),
     ("portamento_mode", 0, 1, 1),
     ("portamento_time_mode", 0, 3, 0),

@@ -57,9 +57,18 @@ fn case_form(forms: &str, o: usize) -> (usize, usize, usize) {
 }
 
 /// The cost case: the top `ops` operators at full level on `forms`, feedback 7, a slow decay 1 (so
-/// every envelope is in a segment that can change: the costlier path), held notes.
+/// every envelope is in a segment that can change: the costlier path), held notes, no portamento;
+/// `pitch`: sines with both pitch envelopes moving and portamento gliding on every voice.
 fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
-    let mut t = format!("fm-sound/1\nalgorithm={routing} feedback=7\n");
+    let pitch = forms == "pitch";
+    let mut t = format!(
+        "fm-sound/1\nalgorithm={routing} feedback=7 portamento={}\n",
+        u8::from(pitch)
+    );
+    let peg = "pitch_eg_level_initial=-50 pitch_eg_level_attack=50 pitch_eg_time_attack=60";
+    if pitch {
+        t += &format!("portamento_time=100 {peg}\n");
+    }
     for o in 1..=8 {
         let level = if o > 8 - ops { 99 } else { 0 };
         let (f, s, r) = case_form(forms, o as usize);
@@ -68,6 +77,9 @@ fn case_sound(routing: u32, ops: u32, forms: &str) -> Prepared {
              op{o}.form={f} op{o}.spread={s} op{o}.formant={r}\n",
             o % 4
         );
+        if pitch {
+            t += &format!("op{o}.{}\n", peg.replace(' ', &format!(" op{o}.")));
+        }
     }
     Prepared::new(&Sound::from_text(&t).expect("case sound"))
 }
@@ -97,6 +109,7 @@ fn time(blocks: usize) {
         ("one operator, routing 1", 1, 1, "sine"),
         ("eight resonant, routing 12", 12, 8, "res"),
         ("eight mixed forms, routing 12", 12, 8, "mixed"),
+        ("pitch envelopes, portamento", 12, 8, "pitch"),
     ];
     let mut rows: Vec<(String, Box<Engine>, usize)> = Vec::new();
     for (name, routing, ops, forms) in cases {
