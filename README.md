@@ -3,10 +3,17 @@
 An eight-operator FM synthesis engine for the Oscairn platform, in Rust: a platform-free DSP core
 and a CLAP shell. Licence: AGPL-3.0-or-later.
 
-**State: milestone M2, "waves": the engine plays the seven operator forms (sine, all harmonics,
-odd harmonics, resonant, with spread and formant) on every routing with the measured level,
-envelope, feedback and pitch laws, in the core only. It does not make sound in a
-host yet.**
+**State: preview, version 0.1.0 (plugin id `org.oscairn.fm2`, shown as "Oscairn FM (preview)").
+The engine plays the seven operator forms (sine, all harmonics, odd harmonics, resonant, with
+spread and formant) on every routing with the measured level, envelope, feedback, pitch, LFO and
+filter laws, in stereo, and a CLAP plugin exists that builds and loads on macOS, Linux and
+Windows. Not done yet: the controllers other than sustain and pitch bend (see below), a packaged
+and signed release. "The reference" in these docs is the FM engine this project is measured
+against.**
+
+This project is independent and is not affiliated with or endorsed by any instrument
+manufacturer. It contains and distributes no manufacturer samples, presets, firmware or code.
+Product names, where they appear at all, belong to their owners.
 
 What exists:
 
@@ -33,7 +40,8 @@ What exists:
 - `crates/fm-clap`: the CLAP plugin `org.oscairn.fm2` (`docs/plugin.md`); `tools/load-plugin.py`
   loads a built one as a host would.
 
-What does not exist yet: the controller sets and micro tuning (M7), the output high-pass, tempo
+What does not exist yet: the modulation wheel, breath, foot, expression, sostenuto, soft pedal and
+pressure (accepted, not played), the controller sets and micro tuning, the output high-pass, tempo
 sync, packaging. See `docs/design.md`, section 7.
 
 ## Build and test
