@@ -632,6 +632,11 @@ struct Lane {
     lfo_ph: [u32; W],
     lfo_t: [u32; W],
     lfo_rnd: [u32; W],
+    /// The sound LFO's detune destination, read only when its sound has one: per operator the
+    /// detune whose move (octaves, per voice) `sdt` holds, made again when it changes or a voice
+    /// starts.
+    sdt_d: [i8; OPS],
+    sdt: [[f32; W]; OPS],
 }
 
 /// What a lane's increments are made of while a voice's pitch moves (docs/design.md, 2.3), read
@@ -702,7 +707,12 @@ const LANE0: Lane = Lane {
     lfo_ph: [0; W],
     lfo_t: [0; W],
     lfo_rnd: [0; W],
+    sdt_d: [SDT_NONE; OPS],
+    sdt: [[0.0; W]; OPS],
 };
+
+/// No sound LFO detune move held (`Lane::sdt_d`).
+const SDT_NONE: i8 = i8::MIN;
 
 /// Bit `i` of `m` (false past the end; no shift can overflow).
 #[inline(always)]
@@ -845,6 +855,7 @@ impl Lane {
             }
         }
         col(&mut self.ph, from, to);
+        col(&mut self.sdt, from, to);
         col(&mut self.inc, from, to);
         col(&mut self.gain, from, to);
         col(&mut self.fb, from, to);
@@ -1396,6 +1407,7 @@ impl Engine {
             lane.bend = 0.0; // (a lane's first voice: its increments hold no bend)
         }
         lane.tune(&p, s, key, v, r, rate, true, glide);
+        lane.sdt_d = [SDT_NONE; OPS]; // (the new voice's detune moves are not made yet)
         if let (Some(ph), Some(t), Some(rnd)) = (lane.lfo_ph.get_mut(s), lane.lfo_t.get_mut(s), lane.lfo_rnd.get_mut(s))
         {
             // without key-on reset a note takes the sound's free-running phase
@@ -1959,20 +1971,23 @@ struct Kern<'a> {
 /// destination's share of its swing, and the detune destination's move (steps rounded towards 0,
 /// the detune held within -15..+15) at each voice's key.
 #[inline(never)]
-fn slfo_pitch<const L: usize>(lane: &Lane, p: &Prepared, sv: f32) -> [[f32; W]; OPS] {
+fn slfo_pitch<const L: usize>(lane: &mut Lane, p: &Prepared, sv: f32) -> [[f32; W]; OPS] {
     let mut out = [[0.0f32; W]; OPS];
-    for (op, o) in (0..OPS).zip(out.iter_mut()) {
+    let ops = (0..OPS).zip(out.iter_mut().zip(lane.sdt.iter_mut().zip(lane.sdt_d.iter_mut())));
+    for (op, (o, (moved, held))) in ops {
         let swing = sv * at(&p.slfo_pitch, op);
         let d0 = i32::from(p.detune.get(op).copied().unwrap_or(0));
         let d = d0.saturating_add((sv * at(&p.slfo_detune, op)) as i32).clamp(-15, 15);
-        for (x, &key) in o.iter_mut().zip(lane.key.iter()).take(L) {
-            let k = i32::from(key).wrapping_add(i32::from(p.note_shift));
-            let detune = if d == d0 {
-                0
-            } else {
-                laws::detune_steps(d, k).wrapping_sub(laws::detune_steps(d0, k))
-            };
-            *x = swing + detune as f32 / 2048.0;
+        // the move is made again only when the detune changes (or a voice started)
+        if d != d0 && i32::from(*held) != d {
+            for (m, &key) in moved.iter_mut().zip(lane.key.iter()).take(L) {
+                let k = i32::from(key).wrapping_add(i32::from(p.note_shift));
+                *m = laws::detune_steps(d, k).wrapping_sub(laws::detune_steps(d0, k)) as f32 / 2048.0;
+            }
+            *held = d as i8;
+        }
+        for (x, &m) in o.iter_mut().zip(moved.iter()).take(L) {
+            *x = swing + if d == d0 { 0.0 } else { m };
         }
     }
     out
@@ -2973,6 +2988,15 @@ mod tests {
             * (laws::steps_hz(laws::key_steps(69) + laws::detune_steps(15, 69)) / laws::steps_hz(laws::key_steps(69)))
                 .log2();
         assert!((cents(&x[2000..]) - want).abs() < 0.2, "{} {want}", cents(&x[2000..]));
+        // a voice joining the lane while the detune holds gets its own key's move
+        let mut e = engine(&carrier(1, "slfo_wave=6 slfo_speed=10 slfo_dest1=77 slfo_depth1=64"));
+        let mut out = [0.0; BLOCK];
+        e.note_on(0, 1, 36, 100.0, &mut |_| {});
+        e.render::<Native>(&mut out, &mut |_| {});
+        e.note_on(0, 2, 96, 100.0, &mut |_| {});
+        e.render::<Native>(&mut out, &mut |_| {});
+        let law = |k: i32| (laws::detune_steps(15, k) - laws::detune_steps(0, k)) as f32 / 2048.0;
+        assert_eq!((e.lanes[0].sdt[0][0], e.lanes[0].sdt[0][1]), (law(36), law(96)));
         // level: depth 32 loses 18.85 dB at the bottom, nothing at the top (a fast square)
         let s = carrier(
             1,
@@ -4109,6 +4133,9 @@ mod tests {
         lane_widths("one resonant", |o| if o == 1 { "op#.form=5" } else { "" }, false);
         // every operator resonant, formant 60: the neighbours' centres are above Nyquist
         lane_widths("resonant", |_| "op#.form=5 op#.formant=60", true);
+        // the sound LFO free-running on detune and frequency (the detune moves a lane holds)
+        let slfo = "slfo_key_on_reset=0 slfo_speed=56 slfo_dest1=77 slfo_depth1=64 slfo_dest2=75 slfo_depth2=8";
+        lane_widths("sound LFO", |o| if o == 1 { slfo } else { "" }, false);
     }
 
     fn on(frame: usize, sound: u8, id: u32, key: u8) -> Event {
