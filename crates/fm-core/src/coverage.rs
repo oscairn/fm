@@ -57,7 +57,9 @@ pub fn status(p: &Param) -> &'static str {
         "fixed_key",
     ]) || (!op && n == "detune")
     {
-        "M3 (pitch)"
+        // M3: both pitch envelopes, key follow, velocity, random pitch, detune, bend,
+        // portamento, mono and key assign
+        PLAYED
     } else if starts(&[
         "filter_",
         "cutoff",
@@ -126,10 +128,16 @@ mod tests {
 
     #[test]
     fn report() {
-        let s = Sound::from_text("fm-sound/1\nalgorithm=5 random_pan=3\nop2.level=50 op2.pitch_velocity=3\n").unwrap();
+        let s = Sound::from_text(
+            "fm-sound/1\nalgorithm=5 random_pan=3\nop2.level=50 op2.pitch_velocity=3 op2.scaling_low_depth=3\n",
+        )
+        .unwrap();
         let mut got = Vec::new();
         not_covered(&s, |p, v, why| got.push((p.id, v, why)));
-        assert_eq!(got, vec![(0, 3, "M5 (filter and output)"), (1146, 3, "M3 (pitch)")]);
+        assert_eq!(
+            got,
+            vec![(0, 3, "M5 (filter and output)"), (1166, 3, "M4 (modulators)")]
+        );
         let mut n = 0;
         not_covered(&Sound::default(), |_, _, _| n += 1);
         assert_eq!(n, 0);

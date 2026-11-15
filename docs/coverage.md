@@ -12,7 +12,10 @@ FM plugin profile's measured accuracy against the reference (docs/design.md, sec
 the laws here reuse; "the engine" figures are this repository's tests. Known differences from the
 reference: docs/known-differences.md.
 
-At M2: the laws below are played on every routing, the operator forms included; nothing else.
+At M3: the laws below are played on every routing, the operator forms and pitch included; nothing
+else. Pitch that moves (both pitch envelopes, portamento, bend) is evaluated every 16 frames, the
+increments ramped linearly across a step while an envelope moves them (docs/design.md, 2.3); the
+pitch a note keeps is on the grid of 1/2048 octave, what moves is not.
 
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|
@@ -22,22 +25,22 @@ At M2: the laws below are played on every routing, the operator forms included; 
 | `key_on_delay` | 3 | M5 (filter and output) | 0 to 127 (0) |  |
 | `key_on_delay_sync` | 4 | M5 (filter and output) | 0 to 1 (0) |  |
 | `key_on_delay_length` | 5 | M5 (filter and output) | 5 to 21 (14) |  |
-| `pitch_velocity` | 6 | M3 (pitch) | -64 to 63 (0) |  |
-| `random_pitch` | 7 | M3 (pitch) | 0 to 127 (0) |  |
-| `pitch_key_follow` | 8 | M3 (pitch) | 0 to 127 (96) |  |
-| `pitch_key_centre` | 9 | M3 (pitch) | 0 to 127 (60) |  |
-| `pitch_eg_level_initial` | 10 | M3 (pitch) | -50 to 50 (0) |  |
-| `pitch_eg_level_attack` | 11 | M3 (pitch) | -50 to 50 (0) |  |
-| `pitch_eg_level_decay1` | 12 | M3 (pitch) | -50 to 50 (0) |  |
-| `pitch_eg_level_decay2` | 13 | M3 (pitch) | -50 to 50 (0) |  |
-| `pitch_eg_level_release` | 14 | M3 (pitch) | -50 to 50 (0) |  |
-| `pitch_eg_time_attack` | 15 | M3 (pitch) | 0 to 99 (0) |  |
-| `pitch_eg_time_decay1` | 16 | M3 (pitch) | 0 to 99 (0) |  |
-| `pitch_eg_time_decay2` | 17 | M3 (pitch) | 0 to 99 (0) |  |
-| `pitch_eg_time_release` | 18 | M3 (pitch) | 0 to 99 (0) |  |
-| `pitch_eg_depth_velocity` | 19 | M3 (pitch) | 0 to 7 (0) |  |
-| `pitch_eg_depth` | 20 | M3 (pitch) | 0 to 3 (0) |  |
-| `pitch_eg_time_key_follow` | 21 | M3 (pitch) | 0 to 7 (0) |  |
+| `pitch_velocity` | 6 | played | -64 to 63 (0) | measured depth table times a measured velocity curve, cents, every operator, on the grid; existing profile: worst 1.12 cents; the engine plays the law on the grid within 0.05 cent (test) |
+| `random_pitch` | 7 | played | 0 to 127 (0) | whole steps of 18.75 cents, uniform within depth / 4 steps either way, cut towards 0, ratio-mode operators, a draw a note from the sound's own source (started again when the sound is installed); existing profile: the reference's extra step down at depths 32-127 not modelled (inherited); the engine: on the 18.75-cent steps within 0.6 cent, within 31 steps (test) |
+| `pitch_key_follow` | 8 | played | 0 to 127 (96) | measured percent table (96 is 100 %), straight in cents about the centre key, ratio-mode operators; existing profile: 157 of 157 within 1 cent; the engine within 0.05 cent of the law on the grid (test) |
+| `pitch_key_centre` | 9 | played | 0 to 127 (60) | as pitch_key_follow |
+| `pitch_eg_level_initial` | 10 | played | -50 to 50 (0) | the common pitch envelope (ratio-mode operators): 37.5-cent steps at depth 8 octaves (wider beyond +-35), straight in cents between levels; existing profile: 101 of 101, worst 0.31 cents; the engine within 0.2 cent of the law at every block's end (test) |
+| `pitch_eg_level_attack` | 11 | played | -50 to 50 (0) | as pitch_eg_level_initial |
+| `pitch_eg_level_decay1` | 12 | played | -50 to 50 (0) | as pitch_eg_level_initial |
+| `pitch_eg_level_decay2` | 13 | played | -50 to 50 (0) | as pitch_eg_level_initial; held while the key is down |
+| `pitch_eg_level_release` | 14 | played | -50 to 50 (0) | as pitch_eg_level_initial; from the key's release |
+| `pitch_eg_time_attack` | 15 | played | 0 to 99 (0) | a constant rate, a whole multiple of 0.05619 cents/ms (time 0 instant); existing profile: within 0.05 % of the multiples, worst 0.33 %; the engine within 0.2 cent of the law (test) |
+| `pitch_eg_time_decay1` | 16 | played | 0 to 99 (0) | as pitch_eg_time_attack |
+| `pitch_eg_time_decay2` | 17 | played | 0 to 99 (0) | as pitch_eg_time_attack |
+| `pitch_eg_time_release` | 18 | played | 0 to 99 (0) | as pitch_eg_time_attack |
+| `pitch_eg_depth_velocity` | 19 | played | 0 to 7 (0) | levels and rates times the measured share left at the velocity (times unchanged); existing profile: met, worst 0.22 cents; the engine within 0.2 cent (test) |
+| `pitch_eg_depth` | 20 | played | 0 to 3 (0) | 1, 1/4, 1/8, 1/16 of the widest (8, 2, 1, 0.5 octaves); existing profile: met; the engine within 0.2 cent (test) |
+| `pitch_eg_time_key_follow` | 21 | played | 0 to 7 (0) | rates times 1 + s (key - 3) / 33; existing profile: within 0.6 %; the engine within 0.2 cent (test) |
 | `lfo_wave` | 22 | M4 (modulators) | 0 to 5 (0) |  |
 | `lfo_speed` | 23 | M4 (modulators) | 0 to 99 (30) |  |
 | `lfo_phase` | 24 | M4 (modulators) | 0 to 3 (0) |  |
@@ -92,15 +95,15 @@ At M2: the laws below are played on every routing, the operator forms included; 
 | `cutoff_offset3` | 132 | M5 (filter and output) | -128 to 127 (0) |  |
 | `cutoff_offset4` | 133 | M5 (filter and output) | -128 to 127 (0) |  |
 | `hpf_key_follow` | 134 | M5 (filter and output) | -64 to 63 (0) |  |
-| `mono_poly` | 200 | M3 (pitch) | 0 to 1 (1) |  |
-| `key_assign` | 201 | M3 (pitch) | 0 to 1 (1) |  |
-| `portamento` | 202 | M3 (pitch) | 0 to 1 (0) |  |
-| `portamento_time` | 203 | M3 (pitch) | 0 to 127 (64) |  |
-| `portamento_mode` | 204 | M3 (pitch) | 0 to 1 (1) |  |
-| `portamento_time_mode` | 205 | M3 (pitch) | 0 to 3 (0) |  |
-| `bend_up` | 206 | M3 (pitch) | -48 to 24 (2) |  |
-| `bend_down` | 207 | M3 (pitch) | -48 to 24 (-2) |  |
-| `detune` | 208 | M3 (pitch) | -128 to 127 (0) |  |
+| `mono_poly` | 200 | played | 0 to 1 (1) | mono: one voice, last-note priority; with portamento a note whose predecessor's key is down takes over its voice (legato: amplitude envelopes, common pitch envelope and phases go on; the operator pitch envelopes start again), otherwise the sounding note fades out as a retrigger (13.3 ms, gain the square of the share left) while the new one starts; releasing the sounding key returns to the newest key still down (the same two ways); a held mono key is never shed; existing profile: 18 of 18 and 12 of 13, the fade about 1 ms ahead (inherited); the engine: every note ends exactly once (tests, fuzz) |
+| `key_assign` | 201 | played | 0 to 1 (1) | single (poly): a key played again retriggers its sounding note (the same fade, unmeasured); multi: both sound (test) |
+| `portamento` | 202 | played | 0 to 1 (1) | on (the documented default): from the pitch the sound's latest note has now, ratio-mode operators only; fingered glides only when another key of the sound is down |
+| `portamento_time` | 203 | played | 0 to 127 (64) | measured rate table every fourth value, straight in log rate between, straight in semitones, in steps of 9.977 ms of a clock shared by every sound (the reference's period; its phase against a note is not known); existing profile: 22 of 29 and 27 of 28 within 2 % (fast times slower, inherited); the engine: the steps and the glide's time within two steps (test) |
+| `portamento_mode` | 204 | played | 0 to 1 (1) | fingered, full-time; as portamento (test) |
+| `portamento_time_mode` | 205 | played | 0 to 3 (0) | rate 1 keeps the rate; time 1 takes as long for any distance as rate 1 for an octave; rate 2 and time 2 start at most an octave away; existing profile: measured at 5, 12, 19, 24 semitones; the engine (test) |
+| `bend_up` | 206 | played | -48 to 24 (2) | the pitch at full bend up (+8191), whole cents then whole steps, each cut towards 0, every operator, from the event's frame; documented, not measured (the existing profile widened the range to +-127: docs/known-differences.md); the engine (test) |
+| `bend_down` | 207 | played | -48 to 24 (-2) | the pitch at full bend down (-8192), as bend_up |
+| `detune` | 208 | played | -128 to 127 (0) | cents, not hertz (the same at every key): measured every eighth value, nothing within 2 of 0, straight between, ratio-mode operators; existing profile: 37 of 49 within 1 cent (inherited); the engine within 0.05 cent of the law on the grid (test) |
 | `note_shift` | 209 | played | -48 to 48 (0) | whole semitones before the pitch grid; the reference's range (+-48) |
 | `tuning_scale` | 210 | M7 (controllers, tuning) | 0 to 212 (0) |  |
 | `tuning_root` | 211 | M7 (controllers, tuning) | 0 to 11 (0) |  |
@@ -192,15 +195,15 @@ At M2: the laws below are played on every routing, the operator forms included; 
 | `opN.coarse` | 1000 + 100 op + 42 | played | 0 to 31 (1) | the pitch grid of 1/2048 octave: keys rounded up to the 1/1024-octave grid from A, ratios to their nearest 1/1024-octave step (coarse 0-31 and fine 0-99 measured tables, fine 100 and above carries; past coarse 31 0.5, then a fixed ratio), fixed frequencies on 1/128-octave steps from A4's step (440.169 Hz), held at 22.04 kHz; existing profile: 1 cent met; the engine plays the grid within 0.05 cent (test) |
 | `opN.fine` | 1000 + 100 op + 43 | played | 0 to 127 (0) | as coarse |
 | `opN.detune` | 1000 + 100 op + 44 | played | -15 to 15 (0) | measured table by key (cents), on 1/1024-octave steps; fixed-mode operators too; existing profile: 5 of 20 one grid step off, up to 1.18 cents |
-| `opN.fixed_key_follow` | 1000 + 100 op + 45 | M3 (pitch) | 0 to 99 (0) |  |
-| `opN.pitch_velocity` | 1000 + 100 op + 46 | M3 (pitch) | -7 to 7 (0) |  |
+| `opN.fixed_key_follow` | 1000 + 100 op + 45 | played | 0 to 99 (0) | fixed-mode operators: measured cents a key about key 60, on the grid; existing profile: worst 1.77 cents; the engine within 0.05 cent of the law (test) |
+| `opN.pitch_velocity` | 1000 + 100 op + 46 | played | -7 to 7 (0) | fixed-mode operators: the measured cents at velocity 127, straight in velocity from 64 (4 and 6 halfway, unmeasured); ratio-mode operators do not move (measured); the engine within 0.05 cent of the law (test) |
 | `opN.form` | 1000 + 100 op + 47 | played | 0 to 6 (0) | sine; all harmonics 1 and 2 (one table); odd harmonics 1 and 2 (E(2t + m) sin(t + m)); resonant 1 and 2 (window(t + m) sin(centre t + m)); tables from the existing profile's measured amplitudes and phases, not band-limited (as the reference); the engine: every form and spread within 0.06 dB of the measured levels of its first 16 harmonics relative to a sine and its loudness within 0.05 dB of the measured (worst 0.009 and 0.034 dB), the tables' phases within 0.002 rad; modulated forms within 1 dB of three of the reference's renders (tests); existing profile: the four harmonic forms within 0.06 dB of the reference (first 16 harmonics), as modulators 100 of 111 cases within 1 dB; a resonant form whose centre is at or above Nyquist is silent (the reference plays a tone near Nyquist: docs/known-differences.md); a non-sine modulator's spectrum is not checked against the reference here |
 | `opN.spread` | 1000 + 100 op + 48 | played | 0 to 7 (0) | a table per form and spread; as form; existing profile, resonant forms: spread 7 meets 10 of 24 formant cases (3 to over 100 dB off), resonant 2 at formant 0 off by 2-7 dB at spreads 4-5, low centres at spreads 4-7 off by up to 13 dB (inherited) |
 | `opN.formant` | 1000 + 100 op + 49 | played | 0 to 99 (0) | the centre harmonic formant + 1; the engine: the strongest harmonic is the centre at formants 9-99 (spreads 0 and 3) and 18-99 (spread 7), and resonant 2 at spread 5, formant 0 plays harmonic 15 within 1.5 dB of the reference's -75.75 dB (tests); existing profile: spreads 0-3 48 of 48 (worst 0.58 dB), spread 7 as spread |
-| `opN.pitch_eg_level_initial` | 1000 + 100 op + 50 | M3 (pitch) | -50 to 50 (0) |  |
-| `opN.pitch_eg_level_attack` | 1000 + 100 op + 51 | M3 (pitch) | -50 to 50 (0) |  |
-| `opN.pitch_eg_time_attack` | 1000 + 100 op + 52 | M3 (pitch) | 0 to 99 (0) |  |
-| `opN.pitch_eg_time_decay` | 1000 + 100 op + 53 | M3 (pitch) | 0 to 99 (0) |  |
+| `opN.pitch_eg_level_initial` | 1000 + 100 op + 50 | played | -50 to 50 (0) | the operator's pitch envelope (fixed-mode operators too): from the initial level to the attack level, then to 0, straight in cents, measured level table; existing profile: 101 of 101; the engine within 0.2 cent of the law at every block's end, its phase within 0.0022 cycles of the per-sample law at the fastest time (tests) |
+| `opN.pitch_eg_level_attack` | 1000 + 100 op + 51 | played | -50 to 50 (0) | as pitch_eg_level_initial |
+| `opN.pitch_eg_time_attack` | 1000 + 100 op + 52 | played | 0 to 99 (0) | a constant rate in cents/ms, measured table; existing profile: within 2 %, times 90-99 unmeasured (inherited); as pitch_eg_level_initial |
+| `opN.pitch_eg_time_decay` | 1000 + 100 op + 53 | played | 0 to 99 (0) | as pitch_eg_time_attack |
 | `opN.eg_level_attack` | 1000 + 100 op + 54 | played | 0 to 99 (99) | carrier curve (from 20 up in steps of two) and modulator curve (0.75 dB a step, in steps of two); the carrier table checked only against the renders it was fitted to |
 | `opN.eg_level_decay1` | 1000 + 100 op + 55 | played | 0 to 99 (99) | as eg_level_attack |
 | `opN.eg_level_decay2` | 1000 + 100 op + 56 | played | 0 to 99 (99) | as eg_level_attack |
