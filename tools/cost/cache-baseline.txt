@@ -3,6 +3,8 @@
 # under callgrind with the device's caches (tools/cost/cg.sh); check allows 10 % and half a miss.
 # The counts move with the binary's layout (where the linker puts the tables against the stack):
 # the same tree gives the same counts; an unrelated change to fmbench moved cache-mixed-8 from 40.6 to 90.4.
+# They also moved with the stack's place, which the caller's environment set (the CI runner read cache-8 at
+# 4.4 against 0.3 in the container); cg.sh now runs fmbench with an empty environment from its own directory.
 cache-1 2.0 1.1
 cache-8 0.3 0.1
 cache-25 0.5 0.0

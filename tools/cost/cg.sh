@@ -21,11 +21,13 @@ BLOCKS=64
 export CARGO_TARGET_DIR="$OUT/target" RUSTFLAGS="-C target-cpu=cortex-a53"
 (cd "$SRC" && cargo build --release --locked -p fmbench -j4)
 B="$OUT/target/release/fmbench"
+# callgrind on fmbench with an empty environment, from the binary's own directory: the stack's
+# place, and with it the cache misses, then does not depend on the caller's environment or paths
+vg() { (cd "$OUT/target/release" && env -i valgrind --tool=callgrind --cache-sim=yes --toggle-collect='fmbench_render*' "$@"); }
 run() {  # name voices then fmbench's arguments after VOICES BLOCKS (the engine's: e VOICES BLOCKS ...)
   n=$1; v=$2; shift 2
   if [ "$1" = e ]; then shift; set -- engine "$v" $BLOCKS "$@"; else set -- "$v" $BLOCKS "$@"; fi
-  valgrind --tool=callgrind --cache-sim=yes --toggle-collect='fmbench_render*' --callgrind-out-file="$OUT/$n.cg" \
-    "$B" "$@" > "$OUT/$n.txt" 2> "$OUT/$n.err"
+  vg --callgrind-out-file="$OUT/$n.cg" ./fmbench "$@" > "$OUT/$n.txt" 2> "$OUT/$n.err"
   # events: Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw
   awk -v n="$n" -v v="$v" -v t="${TOTAL:-0}" -v b=$BLOCKS '/^summary:/ {
       d = (t > 0 ? t : (v > 0 ? v : 1)) * b
@@ -60,8 +62,8 @@ run fm-s1-v5 5 e 12 8 native sine 1
 for f in table window; do echo "footprint $f: $("$B" footprint 0 x x $f)"; done
 } | tee "$OUT/summary.txt"
 cache() {  # name voices forms: the device's caches, routing 12 with eight operators
-  valgrind --tool=callgrind --cache-sim=yes --D1=32768,4,64 --LL=524288,16,64 --toggle-collect='fmbench_render*' \
-    --callgrind-out-file="$OUT/c$1.cg" "$B" engine "$2" $BLOCKS 12 8 native "$3" > /dev/null 2> "$OUT/c$1.err"
+  vg --D1=32768,4,64 --LL=524288,16,64 --callgrind-out-file="$OUT/c$1.cg" \
+    ./fmbench engine "$2" $BLOCKS 12 8 native "$3" > /dev/null 2> "$OUT/c$1.err"
   awk -v n="$1" -v v="$2" -v b=$BLOCKS '/^summary:/ { d = v * b
       printf "%-18s voices %2d  D1miss/voice-block %7.1f  LLmiss/voice-block %6.1f\n", n, v, ($6 + $7) / d, ($9 + $10) / d }' "$OUT/c$1.cg"
   rm -f "$OUT/c$1.cg"
