@@ -819,6 +819,39 @@ translation, copying the output pairs to the host's channels and the idle test's
 (a pass over the lanes). A parameter change costs one preparation a sound a stretch (about 17,200),
 however many events.
 
+### 3.9 Controllers and controller boxes at M7 (measured)
+
+Events: `Kind::Control` (a controller by its MIDI number, or `PRESSURE`) and `Kind::Volume` (a
+note's volume) join the timed events of 2.3; the shell sends each to the sound its channel selects
+(`docs/plugin.md`). Each sound keeps its channel controllers (mod wheel, aftertouch, both foot
+controllers, breath, expression) and, when one moves, the bend moves (if the sound has boxes) or the
+sound is prepared or installed, makes again what they do to it (`Mods`: the output gain, each
+operator's level offset, the cutoff and resonance offsets): once an event, never a step. A step
+reads it only when it moves something (`on`), so a sound without a route pays a test a segment and a
+flag a lane step. The sostenuto pedal is a bit a lane (`latch`: the voices whose keys were down
+when it went down), released as the sustain pedal's are.
+
+Boxes (`crates/fm-core/src/boxes.rs`, laws in `docs/coverage.md`, `boxN_*`): a box's steps are
+summed per destination within its span. The operator level: an operator a box can raise is
+prepared at the top the boxes reach (its envelope levels, the attack's overshoot, the plan's live
+operators: a silent operator a box can raise is rendered), and the boxes' offset, the level law at
+(level + steps) against the law at that top (log2, at most 0), is added where the LFOs' losses are,
+so it rides the gain ramp of each step. The cutoff's values and the resonance's steps join the sound
+LFO's in the filter's step (coefficients ramped). Expression and the notes' volumes multiply the
+lane's output after the filter, ramped linearly across a step (the lane's voices at once, not
+inlined: inlined, it moved a voice alone 0.9 % with no controller at work).
+
+Cost (callgrind, Cortex-A53 tuning, against 4e5803c before M7): sounds without a route render the
+same bits (golden hashes unchanged) at +0.0 to +0.9 % (a voice alone 37,923 → 37,920, routing 12
+at 32 voices 14,863 → 14,973, the costliest filter plan 26,927 → 27,091, one operator 2,850 →
+2,876); a parameter event's preparation 55,586 → 57,055 (the bigger sound, the boxes read once).
+Every box at work (30 on the operators' levels, the cutoff, the resonance, expression, a controller
+every block, so the boxes are evaluated again each block) on the costliest plan with the costliest
+filter: 27,389 a voice-block (the 28,000 gate met); a voice alone so 44,727. Lane gate: one voice
+2.533 against 2.509 + 2 % (met), two voices 1.967, five sounds 1.888. State: a lane 34 bytes of
+fields more (`latch`, `vol`, `og`, `vol_on`; the 32 bytes of gains read only while one is not 1),
+`Mods` (46 bytes of fields) a sound read once a segment, the sound itself 534 bytes more (the boxes' 267 values: cold).
+
 ## 4. Audio-thread safety, and how it is proven
 
 - **No allocation**, by construction: the core is `#![no_std]` and does not link the `alloc` crate;
