@@ -400,8 +400,8 @@ fn descriptor_and_every_required_callback() {
         let f = clap_entry.get_factory.unwrap()(CLAP_PLUGIN_FACTORY_ID.as_ptr()).cast::<clap_plugin_factory>();
         assert_eq!((*f).get_plugin_count.unwrap()(f), 1);
         let d = &*(*f).get_plugin_descriptor.unwrap()(f, 0);
-        assert_eq!(CStr::from_ptr(d.id), c"org.oscairn.fm2");
-        assert_eq!(CStr::from_ptr(d.name), c"Oscairn FM (preview)");
+        assert_eq!(CStr::from_ptr(d.id), c"org.oscairn.fm");
+        assert_eq!(CStr::from_ptr(d.name), c"Oscairn FM");
         assert_eq!(CStr::from_ptr(d.vendor), c"Oscairn");
         assert_eq!(CStr::from_ptr(d.version), c"0.3.1");
         assert!((*f).create_plugin.unwrap()(f, core::ptr::null(), c"org.oscairn.other".as_ptr()).is_null());
@@ -703,6 +703,9 @@ fn state_round_trip_and_a_load_owes_its_note_ends() {
     a.block(BLOCK, vec![]);
     assert_eq!(a.ended(11), 1);
     assert!(!a.load(b"fm-state 1\nselected 0\n"));
+    // a state under another plugin's format header is refused
+    let foreign = [b"other-state".as_slice(), &saved[b"fm-state".len()..]].concat();
+    assert!(!b.load(&foreign));
 }
 
 fn until_ended(a: &mut Inst, id: i32) {

@@ -27,8 +27,8 @@ use oscairn_clap_sys::clap_sys::{
 };
 use oscairn_clap_sys::*;
 
-pub const PLUGIN_ID: &CStr = c"org.oscairn.fm2";
-pub const PLUGIN_NAME: &CStr = c"Oscairn FM (preview)";
+pub const PLUGIN_ID: &CStr = c"org.oscairn.fm";
+pub const PLUGIN_NAME: &CStr = c"Oscairn FM";
 const VERSION: &CStr = match CStr::from_bytes_with_nul(concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()) {
     Ok(v) => v,
     Err(_) => c"0",

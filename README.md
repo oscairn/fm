@@ -3,7 +3,7 @@
 An eight-operator FM synthesis engine for the Oscairn platform, in Rust: a platform-free DSP core
 and a CLAP shell. Licence: AGPL-3.0-or-later.
 
-**State: preview, version 0.3.1 (plugin id `org.oscairn.fm2`, shown as "Oscairn FM (preview)").
+**State: preview, version 0.3.1 (plugin id `org.oscairn.fm`, shown as "Oscairn FM").
 The engine plays the seven operator forms (sine, all harmonics, odd harmonics, resonant, with
 spread and formant) on every routing with the measured level, envelope, feedback, pitch, LFO and
 filter laws, in stereo, and a CLAP plugin exists that builds and loads on macOS, Linux and
@@ -40,7 +40,7 @@ What exists:
   lane gate (a voice's cost with few voices a sound).
 - `tools/check-no-panic.sh`: the link-time proof that the block path, and everything the plugin's
   audio-thread callbacks run, has no panic path.
-- `crates/fm-clap`: the CLAP plugin `org.oscairn.fm2` (`docs/plugin.md`); `tools/load-plugin.py`
+- `crates/fm-clap`: the CLAP plugin `org.oscairn.fm` (`docs/plugin.md`); `tools/load-plugin.py`
   loads a built one as a host would.
 
 What does not exist yet: the controller boxes' destinations other than the operator level and

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The CLAP shell of the FM engine: the plugin `org.oscairn.fm2` (docs/plugin.md). The audio
+//! The CLAP shell of the FM engine: the plugin `org.oscairn.fm` (docs/plugin.md). The audio
 //! thread never allocates, locks, logs or waits; `tools/check-no-panic.sh` proves at link time
 //! that nothing its callbacks run can panic.
 // tests may index and unwrap: a panic there is a failed test
