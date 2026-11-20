@@ -743,9 +743,7 @@ struct Lane {
     /// The note's velocity as played (for a mono note taken over and returned to).
     vel: [f32; W],
     id: [u32; W],
-    /// Each note's serial (a note-on's, unique to the note) and the frame it started at.
-    age: [u64; W],
-    on: [u64; W],
+    age: [u32; W],
     /// The carriers' gain bound at the last step: the end rule's measure, and loudness for shedding.
     bound: [f32; W],
     pt: Pitch,
@@ -818,7 +816,6 @@ const LANE0: Lane = Lane {
     vel: [0.0; W],
     id: [0; W],
     age: [0; W],
-    on: [0; W],
     bound: [0.0; W],
     pt: Pitch {
         base: [[0; W]; OPS],
@@ -1034,9 +1031,13 @@ impl Lane {
             one(x, from, to);
         }
         one(&mut self.key, from, to);
-        one(&mut self.age, from, to);
-        one(&mut self.on, from, to);
-        for x in [&mut self.id, &mut self.lfo_ph, &mut self.lfo_t, &mut self.lfo_rnd] {
+        for x in [
+            &mut self.id,
+            &mut self.age,
+            &mut self.lfo_ph,
+            &mut self.lfo_t,
+            &mut self.lfo_rnd,
+        ] {
             one(x, from, to);
         }
         let pt = &mut self.pt;
@@ -1231,6 +1232,18 @@ pub struct Rank {
     slot: u8,
 }
 
+const RANK0: Rank = Rank {
+    tier: 0,
+    struck: false,
+    db: 0.0,
+    age_ms: 0.0,
+    held: false,
+    audibility: 0.0,
+    serial: 0,
+    lane: 0,
+    slot: 0,
+};
+
 impl Rank {
     /// A voice's rank from its key (`held`: down; `pedaled`: up, a pedal holding it), its gain at
     /// the output (linear), its age and its note-on serial.
@@ -1290,6 +1303,28 @@ impl Rank {
     }
 }
 
+/// What only the voice budget reads of a voice, kept beside the lanes so that rendering never
+/// touches it: its note's serial (whole; its lane keeps the low half, `Lane::age`) and the frame
+/// the note started at. A lane's four are found by that low half, since a lane moves its voices
+/// between slots and these stay where they were written (shortcut: two notes 2^32 note-ons apart
+/// in one lane would share it; a voice does not live that long).
+#[derive(Clone, Copy, Default)]
+struct Born {
+    serial: u64,
+    on: u64,
+}
+
+/// Writes the note-on of `serial` at frame `on` into one of `lane`'s records that no voice of the
+/// lane holds (four records, at most three other voices).
+fn bear(records: &mut [Born; W], lane: &Lane, serial: u64, on: u64) {
+    let free = records
+        .iter_mut()
+        .find(|b| !(0..W).any(|s| has(u32::from(lane.used), s) && lane.age.get(s) == Some(&(b.serial as u32))));
+    if let Some(b) = free {
+        *b = Born { serial, on };
+    }
+}
+
 /// 20 log10 of `gain`, -120 to +24 (-120 for silence).
 fn level_db(gain: f64) -> f32 {
     if gain > 1e-6 {
@@ -1340,8 +1375,7 @@ pub struct Engine {
     pending: u8,
     /// Sounds with parameter values set by [`Engine::stage`] and not yet prepared, a bit each.
     staged: u8,
-    /// The latest note-on's serial.
-    age: u64,
+    age: u32,
     /// Each sound's random source (xorshift32), started again when the sound is installed.
     rng: [u32; SOUNDS],
     /// Each sound's pitch bend, -8192..+8191.
@@ -1382,11 +1416,74 @@ pub struct Engine {
     /// (from the block's start); the first `delayed_n` are in use.
     delayed: [(u8, Held, u32); DELAYED],
     delayed_n: usize,
-    /// Each sound's voices [`Engine::importance`] listed, least important first (the first
-    /// `listed_n`), given up first at the next block's start past a limit.
-    listed: [[Rank; LEAST]; SOUNDS],
-    listed_n: [u8; SOUNDS],
+    budget: Budget,
 }
+
+/// What only the voice budget reads, which rendering never touches (one field of the engine, so
+/// that it lies beside the rendering's data, not among it): the latest note-on's serial, whole (the
+/// engine's `age` is its low half); each lane's voices' records ([`Born`]); each sound's voices
+/// [`Engine::importance`] listed, least important first (the first `listed_n`), given up first at
+/// the next block's start past a limit.
+struct Budget {
+    serial: u64,
+    born: [[Born; W]; LANES],
+    listed: [[Listed; LEAST]; SOUNDS],
+    listed_n: [u8; SOUNDS],
+    /// To a whole way of the device's first-level cache (32 KB, 4-way: 8 KB), so that everything
+    /// after it in memory falls in the cache sets it did without it (measured: the shared hosted
+    /// case's misses moved 10 % with the budget's state unpadded).
+    _pad: [u8; BUDGET_PAD],
+}
+const BUDGET_PAD: usize = 2544;
+const _: () = assert!(core::mem::size_of::<Budget>() == 8192);
+
+/// A listed voice as [`Engine::shed`] reads it: its lane, its serial and its place in the order
+/// (integers and floats alone, no field with a niche, so that the compiler leaves [`Budget`] after
+/// the rendering's data).
+#[derive(Clone, Copy)]
+struct Listed {
+    serial: u64,
+    audibility: f64,
+    lane: u8,
+    tier: u8,
+    struck: u8,
+}
+
+impl Listed {
+    fn of(r: &Rank) -> Listed {
+        Listed {
+            serial: r.serial,
+            audibility: r.audibility,
+            lane: r.lane,
+            tier: r.tier,
+            struck: u8::from(r.struck),
+        }
+    }
+    fn rank(&self) -> Rank {
+        Rank {
+            tier: self.tier,
+            struck: self.struck != 0,
+            audibility: self.audibility,
+            serial: self.serial,
+            lane: self.lane,
+            ..RANK0
+        }
+    }
+}
+
+const BUDGET0: Budget = Budget {
+    serial: 0,
+    born: [[Born { serial: 0, on: 0 }; W]; LANES],
+    listed: [[Listed {
+        serial: 0,
+        audibility: 0.0,
+        lane: 0,
+        tier: 0,
+        struck: 0,
+    }; LEAST]; SOUNDS],
+    listed_n: [0; SOUNDS],
+    _pad: [0; BUDGET_PAD],
+};
 
 impl Engine {
     /// An engine at `rate` Hz, every sound the default sound.
@@ -1425,8 +1522,7 @@ impl Engine {
             pan_on: false,
             delayed: [(0, Held::default(), 0); DELAYED],
             delayed_n: 0,
-            listed: [[Rank::default(); LEAST]; SOUNDS],
-            listed_n: [0; SOUNDS],
+            budget: BUDGET0,
         }
     }
 
@@ -1551,7 +1647,7 @@ impl Engine {
         (self.ctl, self.sost) = ([CTL_REST; SOUNDS], 0);
         (0..SOUNDS).for_each(|s| self.refresh(s));
         (self.clock, self.at, self.slfo, self.keys_n) = (0, 0, [SLFO0; SOUNDS], [0; SOUNDS]);
-        (self.pan_on, self.delayed_n, self.listed_n) = (false, 0, [0; SOUNDS]);
+        (self.pan_on, self.delayed_n, self.budget) = (false, 0, BUDGET0);
     }
 
     /// Moves the engine's clock on by `frames` not rendered (blocks a host skipped while nothing
@@ -1838,16 +1934,19 @@ impl Engine {
         };
         let (rate, r) = (self.rate, next_random(self.rng.get_mut(sound)));
         self.age = self.age.wrapping_add(1);
+        self.budget.serial = self.budget.serial.wrapping_add(1);
         let now = self.clock.wrapping_add(self.at as u64);
         let Some(lane) = self.lanes.get_mut(li) else { return };
-        if let (Some(k), Some(i), Some(a), Some(vl), Some(on)) = (
+        if let (Some(k), Some(i), Some(a), Some(vl)) = (
             lane.key.get_mut(s),
             lane.id.get_mut(s),
             lane.age.get_mut(s),
             lane.vel.get_mut(s),
-            lane.on.get_mut(s),
         ) {
-            (*k, *i, *a, *vl, *on) = (h.key, h.id, self.age, h.velocity, now);
+            (*k, *i, *a, *vl) = (h.key, h.id, self.age, h.velocity);
+        }
+        if let Some(b) = self.budget.born.get_mut(li) {
+            bear(b, lane, self.budget.serial, now);
         }
         (lane.held, lane.sustained) = (lane.held | bit(s), lane.sustained & !bit(s));
         // shortcut: the voice keeps its pan (unmeasured)
@@ -1899,6 +1998,7 @@ impl Engine {
         }
         let s = (!lane.used).trailing_zeros() as usize;
         self.age = self.age.wrapping_add(1);
+        self.budget.serial = self.budget.serial.wrapping_add(1);
         let b = bit(s);
         lane.used |= b;
         lane.held |= b;
@@ -1919,8 +2019,11 @@ impl Engine {
         ) {
             (*k, *i, *a, *f, *bd) = (key, id, self.age, 1.0, 1.0);
         }
-        if let (Some(l), Some(vl), Some(on)) = (lane.left.get_mut(s), lane.vel.get_mut(s), lane.on.get_mut(s)) {
-            (*l, *vl, *on) = (1.0, velocity, self.clock.wrapping_add(self.at as u64));
+        if let (Some(l), Some(vl)) = (lane.left.get_mut(s), lane.vel.get_mut(s)) {
+            (*l, *vl) = (1.0, velocity);
+        }
+        if let Some(b) = found.and_then(|i| self.budget.born.get_mut(i)) {
+            bear(b, lane, self.budget.serial, self.clock.wrapping_add(self.at as u64));
         }
         for h in lane.fb.iter_mut() {
             if let Some(x) = h.get_mut(s) {
@@ -2241,14 +2344,25 @@ impl Engine {
         has(u32::from(l.held), s) && ((incoming != Some(l.sound) && reserve) || mono)
     }
 
+    /// The record of the voice in slot `s` of lane `li` ([`Born`]).
+    fn born(&self, li: usize, s: usize) -> Born {
+        let low = self.lanes.get(li).and_then(|l| l.age.get(s)).copied().unwrap_or(0);
+        let records = self.budget.born.get(li).map_or(&[][..], |b| &b[..]);
+        records
+            .iter()
+            .find(|b| b.serial as u32 == low)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Voice `s` of lane `li` as the order sees it now (at the frame of the event being applied).
     fn rank(&self, li: usize, s: usize) -> Rank {
         let Some(l) = self.lanes.get(li) else {
             return Rank::default();
         };
         let at = |a: &[f32; W]| f64::from(a.get(s).copied().unwrap_or(0.0));
-        let on = l.on.get(s).copied().unwrap_or(0);
-        let age_ms = self.clock.wrapping_add(self.at as u64).wrapping_sub(on) as f64 * 1000.0 / self.rate;
+        let b = self.born(li, s);
+        let age_ms = self.clock.wrapping_add(self.at as u64).wrapping_sub(b.on) as f64 * 1000.0 / self.rate;
         Rank {
             lane: li as u8,
             slot: s as u8,
@@ -2257,7 +2371,7 @@ impl Engine {
                 has(u32::from(l.sustained), s),
                 at(&l.bound) * at(&l.fade) * at(&l.og),
                 age_ms,
-                l.age.get(s).copied().unwrap_or(0),
+                b.serial,
             )
         }
     }
@@ -2312,24 +2426,24 @@ impl Engine {
     /// priority, then [`Rank`]'s order (as listed). Its lane and slot.
     fn listed(&self, held: &[usize; SOUNDS], only: Option<u8>) -> Option<(usize, usize)> {
         let mut best: Option<(Rank, u8, (usize, usize))> = None;
-        for (sound, (list, &n)) in (0..SOUNDS as u8).zip(self.listed.iter().zip(&self.listed_n)) {
+        for (sound, (list, &n)) in (0..SOUNDS as u8).zip(self.budget.listed.iter().zip(&self.budget.listed_n)) {
             if only.is_some_and(|o| o != sound) {
                 continue;
             }
             let priority = self.limits.get(usize::from(sound)).map_or(0, |l| l.priority);
-            for r in list.iter().take(usize::from(n)) {
+            for r in list.iter().take(usize::from(n)).map(Listed::rank) {
                 let li = usize::from(r.lane);
                 // (a lane keeps its voices in its first slots: the voice may have moved in it since)
                 let same = self.lanes.get(li).filter(|l| l.sound == sound).and_then(|l| {
                     (0..W)
-                        .find(|&s| has(u32::from(l.used & !l.ending), s) && l.age.get(s) == Some(&r.serial))
+                        .find(|&s| has(u32::from(l.used & !l.ending), s) && self.born(li, s).serial == r.serial)
                         .filter(|&s| !self.kept(l, s, held, None))
                 });
                 let Some(s) = same else {
                     continue; // ended, replaced or kept since
                 };
                 if best.is_none_or(|(b, bp, _)| r.first(false, priority, &b, false, bp)) {
-                    best = Some((*r, priority, (li, s)));
+                    best = Some((r, priority, (li, s)));
                 }
                 break; // a sound's first still sounding
             }
@@ -2346,7 +2460,8 @@ impl Engine {
     pub fn importance(&mut self, mut f: impl FnMut(u8, u16, &[Rank])) {
         let held = self.held();
         let mut voices = [0u16; SOUNDS];
-        self.listed_n = [0; SOUNDS];
+        let mut lists = [[RANK0; LEAST]; SOUNDS];
+        let mut ns = [0u8; SOUNDS];
         for li in bits(self.live) {
             for s in 0..W {
                 let Some(l) = self.lanes.get(li).filter(|l| has(u32::from(l.used & !l.ending), s)) else {
@@ -2360,13 +2475,15 @@ impl Engine {
                     continue;
                 }
                 let r = self.rank(li, s);
-                if let (Some(list), Some(n)) = (self.listed.get_mut(sound), self.listed_n.get_mut(sound)) {
+                if let (Some(list), Some(n)) = (lists.get_mut(sound), ns.get_mut(sound)) {
                     insert(list, n, r);
                 }
             }
         }
-        for (sound, ((list, n), &v)) in
-            (0..SOUNDS as u8).zip(self.listed.iter_mut().zip(&mut self.listed_n).zip(&voices))
+        self.budget.listed_n = [0; SOUNDS];
+        let kept = self.budget.listed.iter_mut().zip(&mut self.budget.listed_n);
+        for (sound, ((list, n), ((kept, kept_n), &v))) in
+            (0..SOUNDS as u8).zip(lists.iter_mut().zip(&mut ns).zip(kept.zip(&voices)))
         {
             if v == 0 {
                 continue;
@@ -2393,7 +2510,12 @@ impl Engine {
                 k = k.saturating_add(1);
             }
             *n = k as u8;
-            f(sound, v, list.get(..k).unwrap_or(&[]));
+            let least = list.get(..k).unwrap_or(&[]);
+            for (x, r) in kept.iter_mut().zip(least) {
+                *x = Listed::of(r);
+            }
+            *kept_n = *n;
+            f(sound, v, least);
         }
     }
 
