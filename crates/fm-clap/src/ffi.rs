@@ -430,7 +430,9 @@ unsafe extern "C" fn get_extension(_: *const clap_plugin, id: *const c_char) -> 
         x if x == ids::OSCAIRN_EXT_SOUND_SNAPSHOTS => (&SNAPSHOTS as *const oscairn_plugin_sound_snapshots).cast(),
         x if x == ids::OSCAIRN_EXT_VOICE_BUDGET => (&BUDGET as *const oscairn_plugin_voice_budget).cast(),
         x if x == ids::OSCAIRN_EXT_MEMORY => (&MEMORY as *const oscairn_plugin_memory).cast(),
-        x if x == ids::OSCAIRN_EXT_UI || x == ids::OSCAIRN_EXT_UI_DRAFT_4 => (&UI as *const oscairn_plugin_ui).cast(),
+        x if x == ids::OSCAIRN_EXT_UI || x == ids::OSCAIRN_EXT_UI_DRAFT_5 || x == ids::OSCAIRN_EXT_UI_DRAFT_4 => {
+            (&UI as *const oscairn_plugin_ui).cast()
+        }
         _ => core::ptr::null(),
     };
     table
@@ -886,6 +888,7 @@ static BUDGET: oscairn_plugin_voice_budget = oscairn_plugin_voice_budget {
     set_limits: Some(budget_set_limits),
     active_voices: Some(budget_active_voices),
     notes: Some(budget_notes),
+    importance: None,
 };
 
 unsafe extern "C" fn memory_estimate(_: *const clap_plugin, _: f64, _: u32, out: *mut oscairn_memory) -> bool {
@@ -927,6 +930,10 @@ static UI: oscairn_plugin_ui = oscairn_plugin_ui {
     param_hint: Some(ui_hint),
     algorithm: None,
     seconds: None,
+    tab_count: None,
+    tab: None,
+    param_tab: None,
+    value_icon: None,
 };
 
 // ---- factory and entry --------------------------------------------------------------------------

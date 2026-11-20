@@ -26,7 +26,7 @@ the shell has one set of CLAP types and no casts. No framework: the shell is the
 | `oscairn.sound-snapshots/draft-4` | `prepare` (all or none), `ring_out` and `choke_retiring`, `save_sound` and `sound_values` |
 | `oscairn.voice-budget/draft-1` | limits applied, voices given up in the extension's order, cost and notes reported; `honors_volume` false |
 | `oscairn.memory/draft` | the instance's bytes (one allocation; the tables are shared read-only data) |
-| `oscairn.ui/draft-5` (and draft-4) | `param_hint` for every parameter; the output bus has the output-bus role, the others none yet |
+| `oscairn.ui/draft-6` (and drafts 5 and 4) | `param_hint` for every parameter; the output bus has the output-bus role, the others none yet |
 
 ## Parameters
 
