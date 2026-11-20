@@ -428,7 +428,9 @@ unsafe extern "C" fn get_extension(_: *const clap_plugin, id: *const c_char) -> 
         x if x == CLAP_EXT_STATE => (&STATE as *const clap_plugin_state).cast(),
         x if x == ids::OSCAIRN_EXT_SOUND_CONTEXTS => (&CONTEXTS.0 as *const oscairn_plugin_sound_contexts).cast(),
         x if x == ids::OSCAIRN_EXT_SOUND_SNAPSHOTS => (&SNAPSHOTS as *const oscairn_plugin_sound_snapshots).cast(),
-        x if x == ids::OSCAIRN_EXT_VOICE_BUDGET => (&BUDGET as *const oscairn_plugin_voice_budget).cast(),
+        x if x == ids::OSCAIRN_EXT_VOICE_BUDGET_DRAFT_2 || x == ids::OSCAIRN_EXT_VOICE_BUDGET => {
+            (&BUDGET as *const oscairn_plugin_voice_budget).cast()
+        }
         x if x == ids::OSCAIRN_EXT_MEMORY => (&MEMORY as *const oscairn_plugin_memory).cast(),
         x if x == ids::OSCAIRN_EXT_UI || x == ids::OSCAIRN_EXT_UI_DRAFT_5 || x == ids::OSCAIRN_EXT_UI_DRAFT_4 => {
             (&UI as *const oscairn_plugin_ui).cast()
@@ -883,12 +885,27 @@ unsafe extern "C" fn budget_notes(p: *const clap_plugin, out: *mut oscairn_voice
     s.with_audio(|a| s.notes(a, out)).unwrap_or(0)
 }
 
+unsafe extern "C" fn budget_importance(
+    p: *const clap_plugin,
+    out: *mut oscairn_voice_budget_importance,
+    capacity: u32,
+) -> u32 {
+    let s = unsafe { this(p) };
+    let out: &mut [oscairn_voice_budget_importance] = if out.is_null() {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(out, capacity as usize) }
+    };
+    s.with_audio(|a| s.importance(a, out)).unwrap_or(0)
+}
+
+// one table for both ids: draft 2's is draft 1's with importance after its last member
 static BUDGET: oscairn_plugin_voice_budget = oscairn_plugin_voice_budget {
     honors_volume: Some(budget_honors_volume),
     set_limits: Some(budget_set_limits),
     active_voices: Some(budget_active_voices),
     notes: Some(budget_notes),
-    importance: None,
+    importance: Some(budget_importance),
 };
 
 unsafe extern "C" fn memory_estimate(_: *const clap_plugin, _: f64, _: u32, out: *mut oscairn_memory) -> bool {

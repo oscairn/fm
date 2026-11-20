@@ -4,7 +4,7 @@
 # (tools/check-no-panic.sh). Prints how many functions the callbacks reach.
 { e[$1] = e[$1] " " $2; fn[$1] = 1; fn[$2] = 1 }
 END {
-    roots = "fm_clap3ffi(7process|5reset|17budget_set_limits|20budget_active_voices|12budget_notes|17snapshot_ring_out|10set_active|12params_flush)17h"
+    roots = "fm_clap3ffi(7process|5reset|17budget_set_limits|20budget_active_voices|12budget_notes|17budget_importance|17snapshot_ring_out|10set_active|12params_flush)17h"
     for (f in fn) if (f ~ roots) { q[++n] = f; seen[f] = 1 }
     if (n == 0) { print "FAIL: no audio-thread callback found"; exit 1 }
     for (i = 1; i <= n; i++) {

@@ -15,7 +15,10 @@ use fm_core::simd::Native;
 use fm_core::sound::Sound;
 use oscairn_clap_sys::clap_sys::events::*;
 use oscairn_clap_sys::clap_sys::process::*;
-use oscairn_clap_sys::{oscairn_voice_budget_context, oscairn_voice_budget_note, OSCAIRN_VOICE_BUDGET_SELECTED};
+use oscairn_clap_sys::{
+    oscairn_voice_budget_context, oscairn_voice_budget_importance, oscairn_voice_budget_least,
+    oscairn_voice_budget_note, OSCAIRN_VOICE_BUDGET_SELECTED, OSCAIRN_VOICE_BUDGET_STRUCK,
+};
 
 /// Stereo output ports: 0 main, n the bus of sounds whose output bus is n.
 pub const PORTS: usize = 9;
@@ -1041,6 +1044,36 @@ impl Plugin {
                 };
                 k = k.saturating_add(1);
             }
+        });
+        k as u32
+    }
+
+    /// Each sound sounding, under its context's ID, with its least important voices (draft 2's
+    /// importance): a voice is the unit given up and counted, each of weight 1 (a note plays one
+    /// voice).
+    pub fn importance(&self, a: &mut Audio, out: &mut [oscairn_voice_budget_importance]) -> u32 {
+        let mut k = 0usize;
+        a.engine.importance(|sound, voices, least| {
+            let (Some(o), Some(slot)) = (out.get_mut(k), self.slots.get(usize::from(sound))) else {
+                return;
+            };
+            *o = oscairn_voice_budget_importance {
+                context: slot.id.load(Relaxed),
+                voices,
+                count: least.len().min(o.least.len()) as u16,
+                weight: f32::from(voices),
+                ..Default::default()
+            };
+            for (d, r) in o.least.iter_mut().zip(least) {
+                *d = oscairn_voice_budget_least {
+                    tier: r.tier,
+                    flags: if r.struck { OSCAIRN_VOICE_BUDGET_STRUCK as u8 } else { 0 },
+                    age_ms: r.age_ms as u16, // (saturating: at most 65,535)
+                    level_db: r.db,
+                    weight: 1.0,
+                };
+            }
+            k = k.saturating_add(1);
         });
         k as u32
     }

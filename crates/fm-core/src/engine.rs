@@ -743,7 +743,9 @@ struct Lane {
     /// The note's velocity as played (for a mono note taken over and returned to).
     vel: [f32; W],
     id: [u32; W],
-    age: [u32; W],
+    /// Each note's serial (a note-on's, unique to the note) and the frame it started at.
+    age: [u64; W],
+    on: [u64; W],
     /// The carriers' gain bound at the last step: the end rule's measure, and loudness for shedding.
     bound: [f32; W],
     pt: Pitch,
@@ -816,6 +818,7 @@ const LANE0: Lane = Lane {
     vel: [0.0; W],
     id: [0; W],
     age: [0; W],
+    on: [0; W],
     bound: [0.0; W],
     pt: Pitch {
         base: [[0; W]; OPS],
@@ -1031,13 +1034,9 @@ impl Lane {
             one(x, from, to);
         }
         one(&mut self.key, from, to);
-        for x in [
-            &mut self.id,
-            &mut self.age,
-            &mut self.lfo_ph,
-            &mut self.lfo_t,
-            &mut self.lfo_rnd,
-        ] {
+        one(&mut self.age, from, to);
+        one(&mut self.on, from, to);
+        for x in [&mut self.id, &mut self.lfo_ph, &mut self.lfo_t, &mut self.lfo_rnd] {
             one(x, from, to);
         }
         let pt = &mut self.pt;
@@ -1202,8 +1201,128 @@ impl Lane {
     }
 }
 
-/// A voice's place in the shedding order: held, another sound's, priority, loudness, age.
-type Rank = (u8, u8, u8, f32, u32);
+/// The voices a sound's importance report lists at most (oscairn.voice-budget draft 2).
+pub const LEAST: usize = 16;
+/// The voice budget's scale (RFC 0046, the same in every plugin): a voice struck this recently is
+/// not judged by its level and goes last in its tier; below this level a voice counts as released;
+/// a voice counts this much quieter a second of its age, up to this many seconds.
+const STRUCK_MS: f64 = 50.0;
+const INAUDIBLE_DB: f32 = -60.0;
+const AGED_DB_A_SECOND: f64 = 1.0;
+const AGED_SECONDS_MOST: f64 = 10.0;
+
+/// A voice's place in the voice budget's order, as the platform SDK's helper works it out
+/// (voice-budget-plugin.hpp): its tier (0 released or below -60 dBFS unless struck under 50 ms
+/// ago, 1 held only by a pedal, 2 key held), whether it was struck under 50 ms ago, its level at
+/// the output (dBFS: the carriers' envelope levels with velocity and output levels, the fade, the
+/// note's volume and the expression; -120 to +24) and its age; then what it is ranked by within
+/// its tier (its level less a dB a second of age, at most ten, then its note-on serial) and where
+/// it is (lane, slot).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rank {
+    pub tier: u8,
+    pub struck: bool,
+    pub db: f32,
+    pub age_ms: f64,
+    held: bool,
+    audibility: f64,
+    serial: u64,
+    lane: u8,
+    slot: u8,
+}
+
+impl Rank {
+    /// A voice's rank from its key (`held`: down; `pedaled`: up, a pedal holding it), its gain at
+    /// the output (linear), its age and its note-on serial.
+    pub fn new(held: bool, pedaled: bool, gain: f64, age_ms: f64, serial: u64) -> Rank {
+        let db = level_db(gain);
+        let struck = age_ms < STRUCK_MS;
+        let tier = if !struck && db < INAUDIBLE_DB {
+            0
+        } else if held {
+            2
+        } else {
+            u8::from(pedaled)
+        };
+        let aged = (age_ms / 1000.0 * AGED_DB_A_SECOND).min(AGED_SECONDS_MOST * AGED_DB_A_SECOND);
+        Rank {
+            tier,
+            struck,
+            db,
+            age_ms,
+            held,
+            audibility: f64::from(db) - if age_ms > 0.0 { aged } else { 0.0 },
+            serial,
+            lane: 0,
+            slot: 0,
+        }
+    }
+
+    /// Whether it goes before `b` across sounds, `other` (another sound's than the new note's) and
+    /// `priority` being each one's: by tier, then the new note's own sound, then the lower
+    /// priority, then [`Rank::before`].
+    fn first(&self, other: bool, priority: u8, b: &Rank, b_other: bool, b_priority: u8) -> bool {
+        if self.tier != b.tier {
+            self.tier < b.tier
+        } else if other != b_other {
+            !other
+        } else if priority != b_priority {
+            priority < b_priority
+        } else {
+            self.before(b)
+        }
+    }
+
+    /// Whether it goes before `b` within one sound: the lower tier, one not just struck, the less
+    /// audible, the older.
+    fn before(&self, b: &Rank) -> bool {
+        if self.tier != b.tier {
+            return self.tier < b.tier;
+        }
+        if self.struck != b.struck {
+            return b.struck;
+        }
+        if self.audibility != b.audibility {
+            self.audibility < b.audibility
+        } else {
+            self.serial < b.serial
+        }
+    }
+}
+
+/// 20 log10 of `gain`, -120 to +24 (-120 for silence).
+fn level_db(gain: f64) -> f32 {
+    if gain > 1e-6 {
+        (laws::log2(gain) / DPD).clamp(-120.0, 24.0) as f32
+    } else {
+        -120.0
+    }
+}
+
+/// Puts `r` in its place in the first `n` of `list` (least important first), the last falling off
+/// when all `LEAST` are taken and it goes before the last; else drops it.
+fn insert(list: &mut [Rank; LEAST], n: &mut u8, r: Rank) {
+    let full = usize::from(*n) >= LEAST;
+    if full && !list.last().is_some_and(|last| r.before(last)) {
+        return;
+    }
+    let mut at = if full { LEAST - 1 } else { usize::from(*n) };
+    while let Some(prev) = at.checked_sub(1).and_then(|i| list.get(i)).copied() {
+        if !r.before(&prev) {
+            break;
+        }
+        if let Some(x) = list.get_mut(at) {
+            *x = prev;
+        }
+        at = at.wrapping_sub(1);
+    }
+    if let Some(x) = list.get_mut(at) {
+        *x = r;
+    }
+    if !full {
+        *n = n.saturating_add(1);
+    }
+}
 
 /// The engine: every object fixed size, owned by the caller.
 pub struct Engine {
@@ -1221,7 +1340,8 @@ pub struct Engine {
     pending: u8,
     /// Sounds with parameter values set by [`Engine::stage`] and not yet prepared, a bit each.
     staged: u8,
-    age: u32,
+    /// The latest note-on's serial.
+    age: u64,
     /// Each sound's random source (xorshift32), started again when the sound is installed.
     rng: [u32; SOUNDS],
     /// Each sound's pitch bend, -8192..+8191.
@@ -1262,6 +1382,10 @@ pub struct Engine {
     /// (from the block's start); the first `delayed_n` are in use.
     delayed: [(u8, Held, u32); DELAYED],
     delayed_n: usize,
+    /// Each sound's voices [`Engine::importance`] listed, least important first (the first
+    /// `listed_n`), given up first at the next block's start past a limit.
+    listed: [[Rank; LEAST]; SOUNDS],
+    listed_n: [u8; SOUNDS],
 }
 
 impl Engine {
@@ -1301,6 +1425,8 @@ impl Engine {
             pan_on: false,
             delayed: [(0, Held::default(), 0); DELAYED],
             delayed_n: 0,
+            listed: [[Rank::default(); LEAST]; SOUNDS],
+            listed_n: [0; SOUNDS],
         }
     }
 
@@ -1425,7 +1551,7 @@ impl Engine {
         (self.ctl, self.sost) = ([CTL_REST; SOUNDS], 0);
         (0..SOUNDS).for_each(|s| self.refresh(s));
         (self.clock, self.at, self.slfo, self.keys_n) = (0, 0, [SLFO0; SOUNDS], [0; SOUNDS]);
-        (self.pan_on, self.delayed_n) = (false, 0);
+        (self.pan_on, self.delayed_n, self.listed_n) = (false, 0, [0; SOUNDS]);
     }
 
     /// Moves the engine's clock on by `frames` not rendered (blocks a host skipped while nothing
@@ -1712,14 +1838,16 @@ impl Engine {
         };
         let (rate, r) = (self.rate, next_random(self.rng.get_mut(sound)));
         self.age = self.age.wrapping_add(1);
+        let now = self.clock.wrapping_add(self.at as u64);
         let Some(lane) = self.lanes.get_mut(li) else { return };
-        if let (Some(k), Some(i), Some(a), Some(vl)) = (
+        if let (Some(k), Some(i), Some(a), Some(vl), Some(on)) = (
             lane.key.get_mut(s),
             lane.id.get_mut(s),
             lane.age.get_mut(s),
             lane.vel.get_mut(s),
+            lane.on.get_mut(s),
         ) {
-            (*k, *i, *a, *vl) = (h.key, h.id, self.age, h.velocity);
+            (*k, *i, *a, *vl, *on) = (h.key, h.id, self.age, h.velocity, now);
         }
         (lane.held, lane.sustained) = (lane.held | bit(s), lane.sustained & !bit(s));
         // shortcut: the voice keeps its pan (unmeasured)
@@ -1791,8 +1919,8 @@ impl Engine {
         ) {
             (*k, *i, *a, *f, *bd) = (key, id, self.age, 1.0, 1.0);
         }
-        if let (Some(l), Some(vl)) = (lane.left.get_mut(s), lane.vel.get_mut(s)) {
-            (*l, *vl) = (1.0, velocity);
+        if let (Some(l), Some(vl), Some(on)) = (lane.left.get_mut(s), lane.vel.get_mut(s), lane.on.get_mut(s)) {
+            (*l, *vl, *on) = (1.0, velocity, self.clock.wrapping_add(self.at as u64));
         }
         for h in lane.fb.iter_mut() {
             if let Some(x) = h.get_mut(s) {
@@ -2092,50 +2220,181 @@ impl Engine {
             || (p.op_pitch_box && m.op_pitch.iter().any(|&x| x != 0.0));
     }
 
-    /// Starts shedding one note by the platform's voice-budget order, for a new note of `incoming`
-    /// (or none), from sound `only` alone when given: never a held voice of a sound at or under
-    /// its reserve (unless for that sound's own note); released before held; the new note's own
-    /// sound before others; lower priority before higher; the quietest, then the oldest. Whether
-    /// one was found.
-    fn shed(&mut self, incoming: Option<u8>, only: Option<u8>) -> bool {
+    /// Each sound's held voices (not fading).
+    fn held(&self) -> [usize; SOUNDS] {
         let mut held = [0usize; SOUNDS];
         for l in &self.lanes {
             if let Some(h) = held.get_mut(usize::from(l.sound)) {
                 *h = h.saturating_add((l.held & !l.ending).count_ones() as usize);
             }
         }
-        // rank: (held, other sound, priority, loudness, age), smallest first
-        let mut best: Option<(usize, usize, Rank)> = None;
-        for (li, l) in self.lanes.iter().enumerate() {
-            let lim = self.limits.get(usize::from(l.sound)).copied().unwrap_or_default();
-            for s in 0..W {
-                if !has(u32::from(l.used & !l.ending), s) || only.is_some_and(|o| o != l.sound) {
-                    continue;
-                }
-                let is_held = has(u32::from(l.held), s);
-                let reserve = held.get(usize::from(l.sound)).copied().unwrap_or(0) <= usize::from(lim.reserve);
-                let mono = self.sounds.get(usize::from(l.sound)).is_some_and(|p| p.mono);
-                // never a held mono key
-                if is_held && ((incoming != Some(l.sound) && reserve) || mono) {
-                    continue;
-                }
-                let rank = (
-                    u8::from(is_held),
-                    u8::from(incoming.is_some_and(|i| i != l.sound)),
-                    lim.priority,
-                    l.bound.get(s).copied().unwrap_or(0.0),
-                    l.age.get(s).copied().unwrap_or(0),
-                );
-                if best.is_none_or(|(_, _, b)| rank.partial_cmp(&b) == Some(core::cmp::Ordering::Less)) {
-                    best = Some((li, s, rank));
-                }
-            }
+        held
+    }
+
+    /// Whether the order never gives up voice `s` of lane `l` for a new note of `incoming` (or
+    /// none): a held voice of a mono sound, or of a sound at or under its reserve (unless for that
+    /// sound's own note).
+    fn kept(&self, l: &Lane, s: usize, held: &[usize; SOUNDS], incoming: Option<u8>) -> bool {
+        let lim = self.limits.get(usize::from(l.sound)).copied().unwrap_or_default();
+        let reserve = held.get(usize::from(l.sound)).copied().unwrap_or(0) <= usize::from(lim.reserve);
+        let mono = self.sounds.get(usize::from(l.sound)).is_some_and(|p| p.mono);
+        has(u32::from(l.held), s) && ((incoming != Some(l.sound) && reserve) || mono)
+    }
+
+    /// Voice `s` of lane `li` as the order sees it now (at the frame of the event being applied).
+    fn rank(&self, li: usize, s: usize) -> Rank {
+        let Some(l) = self.lanes.get(li) else {
+            return Rank::default();
+        };
+        let at = |a: &[f32; W]| f64::from(a.get(s).copied().unwrap_or(0.0));
+        let on = l.on.get(s).copied().unwrap_or(0);
+        let age_ms = self.clock.wrapping_add(self.at as u64).wrapping_sub(on) as f64 * 1000.0 / self.rate;
+        Rank {
+            lane: li as u8,
+            slot: s as u8,
+            ..Rank::new(
+                has(u32::from(l.held), s),
+                has(u32::from(l.sustained), s),
+                at(&l.bound) * at(&l.fade) * at(&l.og),
+                age_ms,
+                l.age.get(s).copied().unwrap_or(0),
+            )
         }
-        let Some((li, s, _)) = best else { return false };
+    }
+
+    /// Starts shedding one voice by the platform's voice-budget order, for a new note of
+    /// `incoming` (or none), from sound `only` alone when given: never a voice [`Engine::kept`]
+    /// keeps; by tier (released or below -60 dBFS unless struck under 50 ms ago, then held only by
+    /// a pedal, then key held); the new note's own sound before others; lower priority before
+    /// higher; then [`Rank`]'s order. With none incoming (a block's start, past a limit) the voices
+    /// [`Engine::importance`] listed go first, in its order, each while it is still the same note.
+    /// Whether one was found.
+    fn shed(&mut self, incoming: Option<u8>, only: Option<u8>) -> bool {
+        let held = self.held();
+        let best = match incoming {
+            None => self.listed(&held, only),
+            Some(_) => None,
+        };
+        let best = best.or_else(|| self.victim(&held, incoming, only));
+        let Some((li, s)) = best else { return false };
         if let Some(l) = self.lanes.get_mut(li) {
             l.ending |= bit(s);
         }
         true
+    }
+
+    /// The voice [`Engine::shed`] gives up by the order alone: its lane and slot.
+    fn victim(&self, held: &[usize; SOUNDS], incoming: Option<u8>, only: Option<u8>) -> Option<(usize, usize)> {
+        // the best so far: its rank, whether it is another sound's than the new note's, its priority
+        let mut best: Option<(Rank, bool, u8)> = None;
+        for (li, l) in (0..LANES).zip(self.lanes.iter()) {
+            let priority = self.limits.get(usize::from(l.sound)).map_or(0, |l| l.priority);
+            let other = incoming.is_some_and(|i| i != l.sound);
+            for s in 0..W {
+                if !has(u32::from(l.used & !l.ending), s)
+                    || only.is_some_and(|o| o != l.sound)
+                    || self.kept(l, s, held, incoming)
+                {
+                    continue;
+                }
+                let r = self.rank(li, s);
+                if best.is_none_or(|(b, bo, bp)| r.first(other, priority, &b, bo, bp)) {
+                    best = Some((r, other, priority));
+                }
+            }
+        }
+        best.map(|(r, _, _)| (usize::from(r.lane), usize::from(r.slot)))
+    }
+
+    /// The first voice the last [`Engine::importance`] listed that still sounds in its lane as the
+    /// same note (its serial) and that [`Engine::kept`] does not keep now, from sound `only` alone
+    /// when given: a sound's in its listed order, across sounds the first of each by tier, then
+    /// priority, then [`Rank`]'s order (as listed). Its lane and slot.
+    fn listed(&self, held: &[usize; SOUNDS], only: Option<u8>) -> Option<(usize, usize)> {
+        let mut best: Option<(Rank, u8, (usize, usize))> = None;
+        for (sound, (list, &n)) in (0..SOUNDS as u8).zip(self.listed.iter().zip(&self.listed_n)) {
+            if only.is_some_and(|o| o != sound) {
+                continue;
+            }
+            let priority = self.limits.get(usize::from(sound)).map_or(0, |l| l.priority);
+            for r in list.iter().take(usize::from(n)) {
+                let li = usize::from(r.lane);
+                // (a lane keeps its voices in its first slots: the voice may have moved in it since)
+                let same = self.lanes.get(li).filter(|l| l.sound == sound).and_then(|l| {
+                    (0..W)
+                        .find(|&s| has(u32::from(l.used & !l.ending), s) && l.age.get(s) == Some(&r.serial))
+                        .filter(|&s| !self.kept(l, s, held, None))
+                });
+                let Some(s) = same else {
+                    continue; // ended, replaced or kept since
+                };
+                if best.is_none_or(|(b, bp, _)| r.first(false, priority, &b, false, bp)) {
+                    best = Some((*r, priority, (li, s)));
+                }
+                break; // a sound's first still sounding
+            }
+        }
+        best.map(|(_, _, at)| at)
+    }
+
+    /// The voice budget's importance report (draft 2): for each sound with a voice sounding (not
+    /// fading), in sound order, `f(sound, voices, least)`: its voices sounding and its `LEAST`
+    /// least important ones, least important first, by the order [`Engine::shed`] gives voices up
+    /// in with no note incoming (those [`Engine::kept`] keeps left out; past its reserve, only the
+    /// held voices beyond it). One pass over the voices, no sorting; the lists are kept, so that a
+    /// limit lowered before the next block gives up those voices first.
+    pub fn importance(&mut self, mut f: impl FnMut(u8, u16, &[Rank])) {
+        let held = self.held();
+        let mut voices = [0u16; SOUNDS];
+        self.listed_n = [0; SOUNDS];
+        for li in bits(self.live) {
+            for s in 0..W {
+                let Some(l) = self.lanes.get(li).filter(|l| has(u32::from(l.used & !l.ending), s)) else {
+                    continue;
+                };
+                let (sound, kept) = (usize::from(l.sound), self.kept(l, s, &held, None));
+                if let Some(v) = voices.get_mut(sound) {
+                    *v = v.saturating_add(1);
+                }
+                if kept {
+                    continue;
+                }
+                let r = self.rank(li, s);
+                if let (Some(list), Some(n)) = (self.listed.get_mut(sound), self.listed_n.get_mut(sound)) {
+                    insert(list, n, r);
+                }
+            }
+        }
+        for (sound, ((list, n), &v)) in
+            (0..SOUNDS as u8).zip(self.listed.iter_mut().zip(&mut self.listed_n).zip(&voices))
+        {
+            if v == 0 {
+                continue;
+            }
+            // past its reserve a sound lists only the held voices beyond it, the least important of them
+            let lim = self.limits.get(usize::from(sound)).copied().unwrap_or_default();
+            let spare = held
+                .get(usize::from(sound))
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(usize::from(lim.reserve));
+            let (mut k, mut held_listed) = (0usize, 0usize);
+            for i in 0..usize::from(*n) {
+                let Some(r) = list.get(i).copied() else { break };
+                if r.held {
+                    if held_listed >= spare {
+                        continue;
+                    }
+                    held_listed = held_listed.saturating_add(1);
+                }
+                if let Some(x) = list.get_mut(k) {
+                    *x = r;
+                }
+                k = k.saturating_add(1);
+            }
+            *n = k as u8;
+            f(sound, v, list.get(..k).unwrap_or(&[]));
+        }
     }
 
     /// Writes one block of every sounding voice to `out` (left, right); reports the notes that

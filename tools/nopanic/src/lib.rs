@@ -59,7 +59,7 @@ pub extern "C" fn fm_nopanic_play(pick: u32, centre: u32, voice: usize, hz: f32,
 }
 
 /// Plays the engine: a sound on routing and feedback chosen by `pick`, every operator at full
-/// level on a form chosen by `pick`, a filter and pan chosen by `pick`, six notes from `key`, a voice limit, the pedal, a release and a choke halfway; `blocks`
+/// level on a form chosen by `pick`, a filter and pan chosen by `pick`, six notes from `key`, a voice limit, the pedal, a release and a choke halfway, an importance report and a limit lowered after each block; `blocks`
 /// blocks into `out` (left, right). Returns the notes that ended.
 #[no_mangle]
 pub extern "C" fn fm_nopanic_engine(
@@ -259,6 +259,10 @@ pub extern "C" fn fm_nopanic_engine(
             },
         ];
         e.render_events::<Native>(out, &events, &mut end);
+        // the importance report, and a limit it lowers: its voices are given up first at the next block
+        let mut listed = 0usize;
+        e.importance(|_, _, least| listed = listed.wrapping_add(least.len()));
+        e.set_limits(listed % 7, &[Limits::default(); SOUNDS]);
     }
     ended
 }
