@@ -4908,6 +4908,213 @@ mod tests {
         assert_eq!(ends, vec![11]);
     }
 
+    /// The order, case by case, as the platform SDK's helper orders them (cases from its self-test,
+    /// examples/voice-budget/selftest.cpp in third_party/oscairn-clap, cited by line; the others
+    /// worked by hand from voice-budget-plugin.hpp's `tier()`, `before()` and `victim()`).
+    #[test]
+    fn the_order_is_the_sdk_helpers() {
+        let v = Rank::new;
+        // selftest.cpp 28-36: a released voice of a priority-5 part before a held key of a
+        // priority-0 part (tier before priority)
+        let (held, released) = (v(true, false, 0.5, 3000.0, 1), v(false, false, 0.5, 3000.0, 2));
+        assert!(released.first(false, 5, &held, false, 0) && !held.first(false, 0, &released, false, 5));
+        // selftest.cpp 40-47: B released at -30 dB, 2 s old, before A released at -40 dB struck 48 ms
+        // ago; 2.7 ms on, A is no longer struck and goes first
+        let (b, a) = (v(false, false, 0.0316, 2000.0, 1), v(false, false, 0.01, 48.0, 2));
+        assert!(a.struck && b.before(&a));
+        let (b, a) = (v(false, false, 0.0316, 2002.7, 1), v(false, false, 0.01, 50.7, 2));
+        assert!(!a.struck && a.before(&b));
+        // selftest.cpp 51 and 69-81: released voices quietest first; twenty, the sixteen least
+        // important listed in order
+        let mut list = [Rank::default(); LEAST];
+        let mut n = 0u8;
+        for i in [7u64, 19, 0, 3, 12, 15, 1, 18, 9, 4, 11, 2, 16, 6, 14, 5, 13, 8, 17, 10] {
+            insert(
+                &mut list,
+                &mut n,
+                v(false, false, 0.001 * (i + 1) as f64, 5000.0, i + 1),
+            );
+        }
+        assert_eq!(list.map(|r| r.serial), core::array::from_fn(|i| i as u64 + 1));
+        // a released quiet voice before a held loud one
+        assert!(v(false, false, 0.01, 3000.0, 2).before(&v(true, false, 1.0, 3000.0, 1)));
+        // released, then held only by a pedal, then key held
+        let (r, p, k) = (
+            v(false, false, 0.5, 3000.0, 1),
+            v(false, true, 0.5, 3000.0, 2),
+            v(true, false, 0.5, 3000.0, 3),
+        );
+        assert_eq!((r.tier, p.tier, k.tier), (0, 1, 2));
+        assert!(r.before(&p) && p.before(&k));
+        // below -60 dBFS a held key counts as released, unless struck under 50 ms ago
+        let (quiet, struck) = (v(true, false, 0.0005, 3000.0, 1), v(true, false, 0.0005, 10.0, 2));
+        assert_eq!((quiet.tier, struck.tier, struck.struck), (0, 2, true));
+        assert!(
+            quiet.before(&v(false, false, 0.0316, 3000.0, 3)),
+            "then by level: -66 before -30"
+        );
+        // a voice just struck goes after the others of its tier, however quiet
+        assert!(v(true, false, 1.0, 3000.0, 1).before(&v(true, false, 0.1, 20.0, 2)));
+        // within a tier: the new note's own sound first, then the lower priority, then audibility,
+        // a dB a second of age (at most ten), then the older
+        let (loud, soft) = (v(true, false, 1.0, 3000.0, 1), v(true, false, 0.5, 3000.0, 2));
+        assert!(loud.first(false, 5, &soft, true, 0) && loud.first(false, 0, &soft, false, 5));
+        assert!(soft.first(false, 0, &loud, false, 0));
+        assert!(
+            v(true, false, 1.0, 9000.0, 1).before(&v(true, false, 0.5, 1000.0, 2)),
+            "0 - 9 dB before -6 - 1 dB"
+        );
+        assert!(
+            v(true, false, 1.0, 20_000.0, 1).before(&v(true, false, 1.0, 60_000.0, 2)),
+            "ten dB at most: the same, so the older note"
+        );
+        // the level: 20 log10 of the gain, -120 to +24
+        assert!((v(true, false, 0.5, 0.0, 1).db - -6.0206).abs() < 1e-3);
+        assert_eq!(
+            (v(true, false, 0.0, 0.0, 1).db, v(true, false, 100.0, 0.0, 1).db),
+            (-120.0, 24.0)
+        );
+    }
+
+    /// Sound 0 with notes `ids` held (a block apart, each `key` 40 + its id), then aged to 60 ms past
+    /// the last.
+    fn held_notes(ids: core::ops::Range<u32>) -> Engine {
+        let mut e = engine(&carrier(1, ""));
+        for id in ids {
+            e.note_on(0, id, 40 + id as u8, 100.0, &mut |_| {});
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+        }
+        for _ in 0..23 {
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+        }
+        e
+    }
+
+    /// Each sound's list: (sound, voices, the listed notes' ids, their ranks).
+    fn lists(e: &mut Engine) -> Vec<(u8, u16, Vec<u32>, Vec<Rank>)> {
+        let mut out = Vec::new();
+        e.importance(|s, v, least| out.push((s, v, Vec::new(), least.to_vec())));
+        for (_, _, ids, least) in out.iter_mut() {
+            *ids = least
+                .iter()
+                .map(|r| e.lanes[usize::from(r.lane)].id[usize::from(r.slot)])
+                .collect();
+        }
+        out
+    }
+
+    #[test]
+    fn importance_lists_each_sounds_least_important_in_the_order() {
+        let mut e = held_notes(0..20);
+        assert!(e.set_sound(1, &carrier(1, "op1.level=80")));
+        e.note_on(1, 20, 60, 100.0, &mut |_| {});
+        e.note_off(0, 7, &mut |_| {});
+        e.pedal(0, true);
+        e.note_off(0, 9, &mut |_| {});
+        e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+        let l = lists(&mut e);
+        assert_eq!(
+            l.iter().map(|x| (x.0, x.1, x.2.len())).collect::<Vec<_>>(),
+            vec![(0, 20, LEAST), (1, 1, 1)]
+        );
+        // the released note, the pedaled one, then the held keys oldest first (equally loud)
+        let mut want = vec![7, 9];
+        want.extend((0..20).filter(|i| ![7, 9].contains(i)).take(LEAST - 2));
+        assert_eq!(l[0].2, want);
+        let r = &l[0].3;
+        assert_eq!(r.iter().map(|r| r.tier).collect::<Vec<_>>()[..3], [0, 1, 2]);
+        assert!(r.windows(2).all(|w| !w[1].before(&w[0])), "least important first");
+        assert!(r
+            .iter()
+            .all(|r| !r.struck && r.db > -60.0 && r.db <= 24.0 && r.age_ms >= 50.0 && r.age_ms < 200.0));
+        assert!(r[2..].windows(2).all(|w| w[0].age_ms > w[1].age_ms));
+        // sound 1's one note: struck under 50 ms ago, quieter
+        let s1 = &l[1].3[0];
+        assert!(s1.struck && s1.tier == 2 && s1.age_ms < 50.0 && s1.db < r[2].db);
+        // a sound at its reserve lists none of its held keys
+        let mut lim = [Limits::default(); SOUNDS];
+        lim[0].reserve = 18;
+        e.set_limits(0, &lim);
+        assert_eq!(lists(&mut e)[0].2, vec![7, 9]);
+        lim[0].reserve = 16;
+        e.set_limits(0, &lim);
+        assert_eq!(
+            lists(&mut e)[0].2,
+            vec![7, 9, 0, 1],
+            "past it, the two held keys beyond it"
+        );
+    }
+
+    /// The ids of the notes ending (fading out) in sound 0.
+    fn ending(e: &Engine) -> Vec<u32> {
+        let mut v: Vec<u32> = e
+            .lanes
+            .iter()
+            .filter(|l| l.sound == 0)
+            .flat_map(|l| (0..W).filter(|&s| (l.ending & l.used) >> s & 1 != 0).map(|s| l.id[s]))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_lowered_limit_gives_up_the_voices_listed_first() {
+        // the order alone would now take another: the listed ones go, each checked by its serial
+        let first_n = |n: usize, between: &dyn Fn(&mut Engine, &[u32])| {
+            let mut e = held_notes(0..24);
+            let listed = lists(&mut e)[0].2.clone();
+            between(&mut e, &listed);
+            let keep = e.keeping(Some(0)).saturating_sub(n);
+            let mut lim = [Limits::default(); SOUNDS];
+            lim[0].limit = keep as u8;
+            e.set_limits(0, &lim);
+            e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            (ending(&e), listed, e)
+        };
+        let (ends, listed, _) = first_n(3, &|_, _| {});
+        let mut want = listed[..3].to_vec();
+        want.sort();
+        assert_eq!(ends, want, "exactly the first three listed");
+        // the oldest notes listed first, then released: the order alone takes the released ones
+        let (ends, listed, _) = first_n(2, &|e, _| {
+            e.note_off(0, 23, &mut |_| {});
+            e.note_off(0, 22, &mut |_| {});
+        });
+        assert_eq!(
+            (ends, &listed[..2]),
+            (vec![0, 1], &[0, 1][..]),
+            "listed first, not the released"
+        );
+        // a listed note that ended by itself in between is skipped, and its slot's new note kept
+        let (ends, listed, e) = first_n(2, &|e, listed| {
+            let has_id = |l: &Lane, id: u32| (0..W).any(|s| l.used >> s & 1 != 0 && l.id[s] == id);
+            let lane = e.lanes.iter().position(|l| has_id(l, listed[0])).unwrap();
+            e.choke_note(0, listed[0], &mut |_| {});
+            for _ in 0..3 {
+                e.render1::<Native>(&mut [0.0; BLOCK], &mut |_| {});
+            }
+            assert_eq!(e.lanes[lane].used.count_ones(), 3, "it ended");
+            e.note_on(0, 99, 100, 100.0, &mut |_| {});
+            assert!(
+                has_id(&e.lanes[lane], 99),
+                "a new note in its lane, in a slot a listed note had"
+            );
+        });
+        assert_eq!(ends, {
+            let mut w = listed[1..3].to_vec();
+            w.sort();
+            w
+        });
+        assert!(e
+            .lanes
+            .iter()
+            .any(|l| (0..W).any(|s| l.used >> s & 1 != 0 && l.id[s] == 99 && l.ending >> s & 1 == 0)));
+        // with nothing listed left, the order: the first listed after the list's end
+        let (ends, listed, _) = first_n(LEAST + 2, &|_, _| {});
+        assert_eq!(listed, (0..LEAST as u32).collect::<Vec<_>>());
+        assert_eq!(ends, (0..LEAST as u32 + 2).collect::<Vec<_>>());
+    }
+
     #[test]
     fn shed_notes_fade_out_in_3_ms() {
         let mut e = engine(&carrier(1, ""));

@@ -820,6 +820,84 @@ fn a_lowered_voice_limit_gives_voices_up_in_order() {
 }
 
 #[test]
+fn both_voice_budget_ids_answer_with_the_importance_report() {
+    let a = Inst::new();
+    let one: &oscairn_plugin_voice_budget = a.ext(ids::OSCAIRN_EXT_VOICE_BUDGET);
+    let two: &oscairn_plugin_voice_budget = a.ext(ids::OSCAIRN_EXT_VOICE_BUDGET_DRAFT_2);
+    assert!(core::ptr::eq(one, two) && two.importance.is_some());
+}
+
+#[test]
+fn a_limit_lowered_after_the_report_gives_up_the_voices_listed_first() {
+    let mut a = Inst::new();
+    let keys = [48i16, 52, 55, 60, 64, 67, 72, 76];
+    let vel = |k: i16| f64::from(k) / 127.0;
+    a.block(
+        BLOCK,
+        keys.iter()
+            .map(|&k| note(CLAP_EVENT_NOTE_ON, 0, 0, k, i32::from(k), vel(k)))
+            .collect(),
+    );
+    for _ in 0..20 {
+        a.block(BLOCK, vec![]);
+    }
+    a.block(BLOCK, vec![off(0, 0, 76, 76)]);
+    let b = a.budget();
+    let mut lists = [oscairn_voice_budget_importance::default(); 4];
+    assert_eq!(
+        audio(|| unsafe { b.importance.unwrap()(a.p, lists.as_mut_ptr(), 4) }),
+        1
+    );
+    let l = &lists[0];
+    let s = unsafe { this(a.p) };
+    let context = s.slots[s.selected(0)].id.load(Relaxed);
+    assert_eq!((l.context, l.voices, l.count, l.weight), (context, 8, 8, 8.0));
+    let least = &l.least[..8];
+    assert!(
+        least[0].tier == 0 && least[1..].iter().all(|x| x.tier == 2),
+        "the released note first"
+    );
+    assert!(least.iter().all(|x| x.flags == 0
+        && x.age_ms >= 50
+        && x.age_ms < 100
+        && x.level_db > -60.0
+        && x.level_db <= 0.0
+        && x.weight == 1.0));
+    // the listed voices' notes, by their level (notes reports each one's), the first played first
+    let mut notes = [oscairn_voice_budget_note::default(); 16];
+    let n = audio(|| unsafe { b.notes.unwrap()(a.p, notes.as_mut_ptr(), 16) }) as usize;
+    let mut left: Vec<_> = notes[..n].to_vec();
+    let listed: Vec<i32> = least
+        .iter()
+        .map(|x| {
+            let i = left
+                .iter()
+                .position(|n| (20.0 * f64::from(n.loudness).log10() - f64::from(x.level_db)).abs() < 1e-3)
+                .expect("a note at the listed level");
+            left.remove(i).note_id
+        })
+        .collect();
+    assert_eq!(listed[0], 76);
+    // the instance's limit lowered by three: exactly the first three listed end
+    let all = oscairn_voice_budget_context {
+        context: OSCAIRN_VOICE_BUDGET_SELECTED,
+        limit: 0,
+        reserve: 0,
+        priority: 0,
+        flags: 0,
+    };
+    audio(|| unsafe { b.set_limits.unwrap()(a.p, 5, &all, 1) });
+    for _ in 0..4 {
+        a.block(BLOCK, vec![]);
+    }
+    let mut ended: Vec<i32> = a.log.ends.iter().map(|e| e.1).collect();
+    ended.sort();
+    let mut want = listed[..3].to_vec();
+    want.sort();
+    assert_eq!(ended, want);
+}
+
+#[test]
 fn the_selected_sounds_limit_reaches_a_sound_selected_after_it() {
     let mut a = Inst::new();
     let b = a.budget();
