@@ -24,7 +24,7 @@ the shell has one set of CLAP types and no casts. No framework: the shell is the
 | `clap.state` | the whole instance (below) |
 | `oscairn.sound-contexts/draft-5` | 8 sounds; `prepare` from the sound text form and parameter values; `select`, `discard`, `get`; its `state` is the same text as `clap.state`; no `prepare_preset` |
 | `oscairn.sound-snapshots/draft-4` | `prepare` (all or none), `ring_out` and `choke_retiring`, `save_sound` and `sound_values` |
-| `oscairn.voice-budget/draft-1` | limits applied, voices given up in the extension's order, cost and notes reported; `honors_volume` false |
+| `oscairn.voice-budget/draft-2` (and draft-1, the same table) | limits applied, voices given up in the extension's order, cost and notes reported, each sound's least important voices listed (`importance`); `honors_volume` false |
 | `oscairn.memory/draft` | the instance's bytes (one allocation; the tables are shared read-only data) |
 | `oscairn.ui/draft-6` (and drafts 5 and 4) | `param_hint` for every parameter; the output bus has the output-bus role, the others none yet |
 
@@ -153,6 +153,24 @@ stated in microseconds at 1,000 instructions a microsecond: the device timed the
 a voice-block for plans of 14,000-20,000 instructions at 32 voices, 0.8-1.0 µs a thousand, and the
 slow end is taken so that the cost is not understated.
 `notes` reports each sounding note's address and loudness (its carriers' gain bound times its fade).
+
+`importance` (draft 2) lists, for each sound with a voice sounding, under its context's id, its
+voices sounding and its 16 least important, least important first. The unit is a voice: a note
+plays one (there is no unison), so a voice is what the limits and `active_voices` count, each of
+weight 1 (a context's weight its voice count). A voice's level is its carriers' gain bound (their
+envelope levels with the velocity and output levels in them) times its fade, its note's volume and
+the sound's expression, in dBFS (-120 to +24), with no pass over its samples; its tier is released
+(or below -60 dBFS unless struck under 50 ms ago), held only by a pedal (sustain or sostenuto), or
+key held; its age is from its note-on at the end of the block just rendered. The order is the
+SDK helper's (`voice-budget-plugin.hpp`), the core's for every voice it gives up: by tier, then the
+new note's own sound, then the lower priority, then a voice struck under 50 ms ago last, then the
+least audible (its level less a dB a second of age, at most ten), then the oldest (a note-on
+serial). A voice the order never gives up (a held voice of a mono sound, or of a sound at or under
+its reserve) is not listed; past its reserve a sound lists only its held voices beyond it. The
+lists are kept: past a limit at a block's start, the core gives up the voices the last list named
+first, each sound's in its listed order and across sounds the first of each by tier, then priority,
+each only while its lane still holds the same note (its serial: a lane moves its voices into its
+first slots), then by the order.
 
 ## Not covered
 

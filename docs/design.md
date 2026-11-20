@@ -314,8 +314,8 @@ installed by the audio thread by a copy, with no lock.
   cost table by wave kind and group, section 3) through `oscairn.voice-budget` before the first
   note.
 - Overload: when a budget or the pool would be exceeded, whole notes are shed in the same block, in
-  the platform's order (released before held, lower priority, quieter, older; never a held mono key
-  or a sound's reserve), each with a short fade (3 ms, as the sibling engine); a note is never cut
+  the platform's order (released or inaudible, then pedaled, before held; lower priority; less
+  audible; older; never a held mono key or a sound's reserve), each with a short fade (3 ms, as the sibling engine); a note is never cut
   without its fade and never renders past the budget. No glitch is ever traded for a note.
 - End rule: a released voice ends once its output gain bound is below −96 dBFS: the sum over its
   carriers of envelope × level terms, each term at its maximum over what can still move it (LFO
@@ -328,10 +328,14 @@ installed by the audio thread by a copy, with no lock.
   level and its segment's target (in the release the level moves only towards the target), summed;
   only released voices (key up and not held by the pedal) end by it; a held note never does. A
   shed voice fades linearly over 3 ms (to zero on the ninth 16-frame step at 48 kHz) and then ends.
-  The order is the platform's (`voice-budget.h`): never a held voice of a sound at or under its
-  reserve (unless for that sound's own note); released before held; the new note's own sound
-  before others; lower priority before higher; the quietest (the end rule's bound), then the
-  oldest; never a held mono key's voice (M3). A note that gets no voice (every
+  The order is the platform's (`voice-budget.h`, as its SDK helper works it out): never a held
+  voice of a sound at or under its reserve (unless for that sound's own note); by tier (released,
+  or below -60 dBFS unless struck under 50 ms ago; then held only by a pedal; then key held); the
+  new note's own sound before others; lower priority before higher; a voice struck under 50 ms ago
+  after the others; the least audible (its level, the end rule's bound times its fade, note volume
+  and expression, in dB, less a dB a second of age up to ten), then the oldest (a note-on serial);
+  never a held mono key's voice (M3). The same order lists each sound's 16 least important voices
+  for the voice budget's draft 2, and past a lowered limit those listed go first (`docs/plugin.md`). A note that gets no voice (every
   candidate protected, or no free slot while fades are under way) ends at once; every note-on is
   answered by exactly one end (the fuzz test). A sound is installed only while none of its voices
   sounds (`choke` fades them first).
