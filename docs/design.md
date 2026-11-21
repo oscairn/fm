@@ -710,7 +710,7 @@ rule, and the destinations' depths at the LFO's top (bottom for level).
   dB on each operator's gain). Each operator's box and ratio decide what reaches it; frequency
   and detune reach ratio-mode operators only. 70 pan, 72 cutoff and 73 resonance are parsed and
   reported as not covered (M5); 0-69 are the effects' parameters, reported. Tempo sync is
-  reported as not covered (no tempo input); random speed has no law (M7).
+  reported as not covered (its law not measured); random speed has no law (M7).
 - **Control rate**: the LFO's value at each step's end moves pitch through the increments' ramp
   and level through the gains' ramp, as the voice LFO (section 2.3). Against the per-sample law
   (T = 1/3000 s at 48 kHz): its fastest speed, 11.86 Hz, is 253 steps a cycle; a triangle's corner
@@ -779,8 +779,11 @@ depths, the pan law, scaling and random pan, and the key-on delay table.
   within -64..+63) through the pan law, the sound LFO's pan at each step's end, the gains ramped a
   frame. A centred voice through the pan path gives the mono bits (test).
 - **Key-on delay**: a note waits in a list of 32 (an instance's) and starts at its frame as an event
-  of its sound (released before then, it never sounds and ends at once); tempo sync is reported (no
-  tempo input). Test: the delayed note plays the bits of the same note started at that frame.
+  of its sound (released before then, it never sounds and ends at once); with tempo sync (0.6.2)
+  it waits its note length at the host's tempo at its note-on (the engine's `set_tempo`, which the
+  plugin calls with the transport's tempo each block; the tempo lies in the voice budget's cold
+  state, so the rendering's data do not move). Tests: the delayed note plays the bits of the same
+  note started at that frame; the note lengths at several tempos, to the frame.
 - **Hot state**: a lane's filter and pan state (`filter::Voices`, 364 bytes: five states, five
   coefficients, the envelope, what a note keeps, the position and gains), read only when its sound
   uses them; the lane is 2,232 bytes, the hot set with it 9,916 bytes (computed from the field

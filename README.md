@@ -46,8 +46,8 @@ What exists:
 What does not exist yet: the controller boxes' destinations other than the operator level and
 frequency, cutoff, resonance, the voice LFO's speed (normal range), pitch and amplitude depths and
 the pitch (reported by `fmbench coverage`), the level controller sensitivity, the key controller
-sets, the soft pedal and portamento switch (ignored), micro tuning, the output high-pass, tempo
-sync, packaging. See `docs/design.md`, section 7.
+sets, the soft pedal and portamento switch (ignored), micro tuning, the output high-pass, the sound
+LFO's tempo sync, packaging. See `docs/design.md`, section 7.
 
 ## Build and test
 

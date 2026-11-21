@@ -536,6 +536,31 @@ pub fn key_on_delay_ms(v: i32) -> f64 {
         .map_or(0.0, |&b| f64::from(b) * 64.0 / 44.1)
 }
 
+/// A note length 5-21 (1/16, 1/8 triplet, dotted 1/16, 1/8, 1/4 triplet, dotted 1/8, 1/4, 1/2
+/// triplet, dotted 1/4, 1/2, whole triplet, dotted 1/2, then 4 to 8 quarters): quarter notes.
+pub fn note_length_quarters(v: i32) -> f64 {
+    const Q: [f64; 17] = [
+        0.25,
+        1.0 / 3.0,
+        0.375,
+        0.5,
+        2.0 / 3.0,
+        0.75,
+        1.0,
+        4.0 / 3.0,
+        1.5,
+        2.0,
+        8.0 / 3.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+    ];
+    Q.get(v.clamp(5, 21).wrapping_sub(5) as usize).copied().unwrap_or(2.0)
+}
+
 /// A sound LFO destination's depth 0-127 on an operator with depth ratio 0-127: depth × ratio / 128
 /// rounded down, ratio 127 counting as 128 (measured at 7 ratios, within 0.4 cents).
 pub fn slfo_depth(depth: i32, ratio: i32) -> i32 {
@@ -1482,6 +1507,10 @@ mod tests {
         assert_eq!((lfo_hz(false, 0), lfo_hz(false, 99)), (0.08380198, 49.79553));
         assert_eq!((lfo_hz(true, 2), lfo_hz(true, 415)), (0.1675321, 1356.592));
         assert!(near(lfo_hz(true, 12), (0.8370164 * 3.0 + 1.257364 * 2.0) / 5.0));
+        assert_eq!(
+            [5, 6, 11, 13, 15, 21].map(note_length_quarters),
+            [0.25, 1.0 / 3.0, 1.0, 1.5, 8.0 / 3.0, 8.0]
+        );
         // delay: none at 0; the hold at 99 2.66 s; each fifth of a row of 16 values doubles
         assert_eq!(lfo_delay_s(0), 0.0);
         assert!(near(lfo_delay_s(99), 2_147_483_648.0 / (25_190_424.0 * 32.0)));

@@ -208,6 +208,8 @@ struct Inst {
     status: clap_process_status,
     log: Log,
     ports: u16,
+    /// The tempo the transport gives (none: no transport).
+    tempo: Option<f64>,
 }
 
 impl Inst {
@@ -242,6 +244,7 @@ impl Inst {
             status: 0,
             log: Log::default(),
             ports: 1,
+            tempo: None,
         }
     }
 
@@ -288,10 +291,32 @@ impl Inst {
             ctx: (&mut self.log as *mut Log).cast(),
             try_push: Some(out_push),
         };
+        let transport = self.tempo.map(|tempo| clap_event_transport {
+            header: clap_event_header {
+                size: core::mem::size_of::<clap_event_transport>() as u32,
+                time: 0,
+                space_id: CLAP_CORE_EVENT_SPACE_ID,
+                type_: CLAP_EVENT_TRANSPORT,
+                flags: 0,
+            },
+            flags: CLAP_TRANSPORT_HAS_TEMPO,
+            song_pos_beats: 0,
+            song_pos_seconds: 0,
+            tempo,
+            tempo_inc: 0.0,
+            loop_start_beats: 0,
+            loop_end_beats: 0,
+            loop_start_seconds: 0,
+            loop_end_seconds: 0,
+            bar_start: 0,
+            bar_number: 0,
+            tsig_num: 4,
+            tsig_denom: 4,
+        });
         let pr = clap_process {
             steady_time: steady,
             frames_count: frames as u32,
-            transport: core::ptr::null(),
+            transport: transport.as_ref().map_or(core::ptr::null(), |t| t),
             audio_inputs: core::ptr::null(),
             audio_outputs: audio_out.as_ptr().cast_mut(),
             audio_inputs_count: 0,
@@ -522,6 +547,26 @@ fn a_note_through_the_shell_is_the_cores_render() {
         a.out[1..].iter().all(|p| p[0].iter().all(|&x| x == 123.0)),
         "inactive ports untouched"
     );
+}
+
+/// A key-on delay with tempo sync counts its note length at the transport's tempo: a quarter at
+/// 240 starts the note 12,000 frames on; with no transport, at 120, it has not started by then.
+#[test]
+fn the_transports_tempo_times_a_synced_key_on_delay() {
+    let text = format!(
+        "fm-state 1\nselected{}\nsound 0 bus 0 Default\nfm-sound/1\nkey_on_delay_sync=1 key_on_delay_length=11\nend\n",
+        " 0".repeat(16)
+    );
+    for (tempo, want) in [(Some(240.0), Some(12_001)), (None, None)] {
+        let mut a = Inst::new();
+        a.tempo = tempo;
+        assert!(a.load(text.as_bytes()));
+        a.block(BLOCK, vec![on(0, 0, 60, 1)]);
+        for _ in 1..100 {
+            a.block(BLOCK, vec![]);
+        }
+        assert_eq!(a.out[0][0].iter().position(|&x| x != 0.0), want, "{tempo:?}");
+    }
 }
 
 #[test]

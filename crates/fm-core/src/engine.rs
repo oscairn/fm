@@ -281,7 +281,7 @@ pub struct Prepared {
     slfo_fbk: [f32; 8],
     /// The filter, its envelope and pan (docs/design.md, 3.7).
     filter: Laws,
-    /// Key-on delay, ms (0: none).
+    /// Key-on delay, ms (0: none; with tempo sync its note length is read at the note).
     delay_ms: f32,
     /// Each operator's level (with the depth macro) and the level it is prepared at (the top its
     /// controller boxes reach); whether the sound has a box the engine plays.
@@ -426,7 +426,6 @@ impl Prepared {
             boxed: false,
             op_pitch_box: false,
             op_sens: [0.0; OPS],
-            // shortcut: tempo sync plays the time (no tempo input; the coverage report names it)
             delay_ms: laws::key_on_delay_ms(i32::from(s.get(Common::KeyOnDelay as usize))) as f32,
         };
         let carrier_gain_db =
@@ -1423,9 +1422,12 @@ pub struct Engine {
 /// that it lies beside the rendering's data, not among it): the latest note-on's serial, whole (the
 /// engine's `age` is its low half); each lane's voices' records ([`Born`]); each sound's voices
 /// [`Engine::importance`] listed, least important first (the first `listed_n`), given up first at
-/// the next block's start past a limit.
+/// the next block's start past a limit. And the host's tempo (quarter notes a minute), which only
+/// a note-on reads (a key-on delay's note length), here so that it moves none of the rendering's
+/// data.
 struct Budget {
     serial: u64,
+    tempo: f64,
     born: [[Born; W]; LANES],
     listed: [[Listed; LEAST]; SOUNDS],
     listed_n: [u8; SOUNDS],
@@ -1434,7 +1436,7 @@ struct Budget {
     /// case's misses moved 10 % with the budget's state unpadded).
     _pad: [u8; BUDGET_PAD],
 }
-const BUDGET_PAD: usize = 2544;
+const BUDGET_PAD: usize = 2536;
 const _: () = assert!(core::mem::size_of::<Budget>() == 8192);
 
 /// A listed voice as [`Engine::shed`] reads it: its lane, its serial and its place in the order
@@ -1473,6 +1475,7 @@ impl Listed {
 
 const BUDGET0: Budget = Budget {
     serial: 0,
+    tempo: 120.0,
     born: [[Born { serial: 0, on: 0 }; W]; LANES],
     listed: [[Listed {
         serial: 0,
@@ -1647,7 +1650,17 @@ impl Engine {
         (self.ctl, self.sost) = ([CTL_REST; SOUNDS], 0);
         (0..SOUNDS).for_each(|s| self.refresh(s));
         (self.clock, self.at, self.slfo, self.keys_n) = (0, 0, [SLFO0; SOUNDS], [0; SOUNDS]);
-        (self.pan_on, self.delayed_n, self.budget) = (false, 0, BUDGET0);
+        let tempo = self.budget.tempo;
+        (self.pan_on, self.delayed_n, self.budget) = (false, 0, Budget { tempo, ..BUDGET0 });
+    }
+
+    /// Sets the host's tempo in quarter notes a minute (120 until a host gives one; a value that is
+    /// not a positive number is ignored): a note's key-on delay with tempo sync lasts its note length
+    /// at the tempo at its note-on.
+    pub fn set_tempo(&mut self, bpm: f64) {
+        if bpm > 0.0 && bpm.is_finite() {
+            self.budget.tempo = bpm;
+        }
     }
 
     /// Moves the engine's clock on by `frames` not rendered (blocks a host skipped while nothing
@@ -1793,12 +1806,19 @@ impl Engine {
     /// portamento is on and its key is down (legato: the envelopes go on), else the sounding
     /// note fades out as a retrigger and the new one starts; a key still down is returned to when
     /// the newer one is released (last-note priority). With key assign single, a key played again
-    /// retriggers its sounding note. With the sound's key-on delay the note waits that long, to the
-    /// frame (released before then, it never sounds).
+    /// retriggers its sounding note. With the sound's key-on delay the note waits that long (with
+    /// tempo sync, its note length at the tempo now), to the frame (released before then, it never
+    /// sounds).
     pub fn note_on(&mut self, sound: usize, id: u32, key: u8, velocity: f32, end: &mut impl FnMut(NoteEnd)) {
         let s8 = sound as u8;
         let delay = self.sounds.get(sound).map_or(0, |p| {
-            (f64::from(p.delay_ms) * self.rate / 1000.0 + 0.5).min(f64::from(u32::MAX / 2)) as u32
+            let g = |k: Common| i32::from(p.sound.get(k as usize));
+            let ms = if g(Common::KeyOnDelaySync) != 0 {
+                laws::note_length_quarters(g(Common::KeyOnDelayLength)) * 60_000.0 / self.budget.tempo
+            } else {
+                f64::from(p.delay_ms)
+            };
+            (ms * self.rate / 1000.0 + 0.5).min(f64::from(u32::MAX / 2)) as u32
         });
         if delay == 0 {
             return self.play(sound, id, key, velocity, end);
@@ -5772,6 +5792,71 @@ mod tests {
             e.render1::<Native>(&mut o, &mut |_| {});
             assert!(o.iter().all(|&v| v == 0.0));
         }
+    }
+
+    /// The first frame of `e`'s output that is not silent, within `blocks` blocks (a note's first
+    /// frame is 0: its carrier starts at phase 0).
+    fn onset(e: &mut Engine, blocks: usize) -> Option<usize> {
+        let mut x = Vec::new();
+        for _ in 0..blocks {
+            let mut o = [0.0; BLOCK];
+            e.render1::<Native>(&mut o, &mut |_| {});
+            x.extend_from_slice(&o);
+        }
+        x.iter().position(|&v| v != 0.0)
+    }
+
+    /// Key-on delay with tempo sync: the note length at the host's tempo at the note-on, to the
+    /// frame (120 quarter notes a minute until a tempo is set); the delay's time plays no part; a
+    /// tempo set while the note waits leaves it as it is; released before then, the note never
+    /// sounds; a reset keeps the tempo; a tempo that is not a positive number is ignored.
+    #[test]
+    fn key_on_delay_tempo_sync() {
+        let sync = |extra: &str| carrier(1, &format!("key_on_delay_sync=1 {extra}"));
+        let start = |e: &mut Engine| e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        // a quarter at 120: 0.5 s
+        let mut e = engine(&sync("key_on_delay_length=11"));
+        start(&mut e);
+        assert_eq!(onset(&mut e, 200), Some(24_001));
+        // an eighth at 60: 0.5 s; a sixteenth at 120 with delay 127's time: 0.125 s
+        let mut e = engine(&sync("key_on_delay_length=8"));
+        e.set_tempo(60.0);
+        start(&mut e);
+        assert_eq!(onset(&mut e, 200), Some(24_001));
+        let mut e = engine(&carrier(
+            1,
+            "key_on_delay=127 key_on_delay_sync=1 key_on_delay_length=5",
+        ));
+        start(&mut e);
+        assert_eq!(onset(&mut e, 200), Some(6_001));
+        // a quarter triplet at 90: 4/9 s; the tempo set to 200 while it waits changes nothing, the
+        // next note takes it (a quarter at 200: 0.3 s)
+        let mut e = engine(&sync("key_on_delay_length=9"));
+        e.set_tempo(90.0);
+        start(&mut e);
+        e.set_tempo(200.0);
+        assert_eq!(onset(&mut e, 200), Some(21_334));
+        let mut e = engine(&sync("key_on_delay_length=11"));
+        e.set_tempo(200.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            e.set_tempo(bad);
+        }
+        e.reset();
+        start(&mut e);
+        assert_eq!(onset(&mut e, 200), Some(14_401));
+        // released while it waits: it ends at once and never sounds
+        let mut e = engine(&sync("key_on_delay_length=11"));
+        let mut ends = Vec::new();
+        e.note_on(0, 7, 60, 100.0, &mut |n| ends.push(n.id));
+        e.render1::<Native>(&mut [0.0; BLOCK], &mut |n| ends.push(n.id));
+        e.note_off(0, 7, &mut |n| ends.push(n.id));
+        assert_eq!(ends, [7]);
+        assert_eq!(onset(&mut e, 200), None);
+        // sync off: the time (delay 1: 697 frames), whatever the note length
+        let mut e = engine(&carrier(1, "key_on_delay=1 key_on_delay_length=21"));
+        e.set_tempo(60.0);
+        start(&mut e);
+        assert_eq!(onset(&mut e, 8), Some(698));
     }
 
     /// The same bits on every target and back end (checked on every CI target), sines and forms.

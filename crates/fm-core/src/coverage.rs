@@ -9,8 +9,8 @@ use crate::sound::Sound;
 /// Played, or why not (the milestone that brings it).
 pub const PLAYED: &str = "played";
 
-/// Tempo sync: the core has no tempo input.
-const NO_TEMPO: &str = "not covered (no tempo input)";
+/// The sound LFO's tempo sync: its law is not measured.
+const NO_TEMPO: &str = "not covered (the sound LFO's tempo sync: not measured)";
 
 /// A stored filter type value that is none of the model's types (9, 18, 20).
 const NO_TYPE: &str = "not covered (no filter type: played as thru)";
@@ -118,9 +118,6 @@ pub fn status(p: &Param) -> &'static str {
         // M3: both pitch envelopes, key follow, velocity, random pitch, detune, bend,
         // portamento, mono and key assign
         PLAYED
-    } else if starts(&["key_on_delay_"]) {
-        // tempo sync and its note length
-        NO_TEMPO
     } else if starts(&[
         "key_on_delay",
         "filter_",
@@ -133,7 +130,8 @@ pub fn status(p: &Param) -> &'static str {
         "scaling_pan",
         "lfo_filter_depth",
     ]) {
-        // M5: key-on delay, the filter, its envelope and pan
+        // M5: key-on delay (its time, or with tempo sync its note length), the filter, its
+        // envelope and pan
         PLAYED
     } else {
         // the LFOs, macros, level scaling, part envelope offsets
@@ -221,7 +219,6 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                (4, 1, NO_TEMPO),
                 (100, 18, NO_TYPE),
                 (217, 1, NO_TEMPO),
                 (224, 2, effect),

@@ -672,6 +672,11 @@ impl Plugin {
         let out = crate::ffi::out(pr);
         let frames = pr.frames_count as usize;
         a.frames = pr.frames_count;
+        // shortcut: the tempo at the block's start (a transport event within the block is not read);
+        // read it at its frame if a host moves the tempo inside blocks
+        if let Some(t) = crate::ffi::tempo(pr) {
+            a.engine.set_tempo(t);
+        }
         // blocks the host skipped while the plugin slept: the engine's clock moves on over them
         if pr.steady_time >= 0 && a.next >= 0 && pr.steady_time > a.next {
             a.engine.skip(pr.steady_time.wrapping_sub(a.next) as u64);

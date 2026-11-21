@@ -381,6 +381,8 @@ pub enum Common {
     AlternatePan = 1,
     ScalingPan = 2,
     KeyOnDelay = 3,
+    KeyOnDelaySync = 4,
+    KeyOnDelayLength = 5,
     PitchVelocity = 6,
     RandomPitch = 7,
     PitchKeyFollow = 8,
@@ -540,6 +542,8 @@ mod tests {
             assert_eq!(index_of(p.id).map(|i| PARAMS[i].id), Some(p.id));
         }
         assert_eq!(PARAMS[Common::Algorithm as usize].name, "algorithm");
+        assert_eq!(PARAMS[Common::KeyOnDelaySync as usize].name, "key_on_delay_sync");
+        assert_eq!(PARAMS[Common::KeyOnDelayLength as usize].name, "key_on_delay_length");
         assert_eq!(PARAMS[Part::NoteShift as usize].name, "note_shift");
         assert_eq!(PARAMS[Part::VelocityOffset as usize].name, "velocity_offset");
         assert_eq!(PARAMS[Part::MonoPoly as usize].name, "mono_poly");

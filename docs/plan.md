@@ -18,9 +18,9 @@ sound format: [sound-format.md](sound-format.md); differences from the reference
 | Operators | eight operators, the seven operator forms (sine, all harmonics, odd harmonics, resonant, with spread and formant), the 88 routings, feedback, level and envelope laws, level scaling | the level controller sensitivity |
 | Pitch | ratio and fixed frequencies, the operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono and key assign | micro tuning |
 | Filter | the filter types with the filter envelope | the output high-pass |
-| LFOs | the voice LFO; the sound LFO with all waves, destinations and the user wave | the sound LFO's tempo sync (no tempo input) and random speed |
+| LFOs | the voice LFO; the sound LFO with all waves, destinations and the user wave | the sound LFO's tempo sync (not measured) and random speed |
 | Modulation | the seven macros; the channel controllers and note volume; controller boxes on the operator level and frequency, cutoff, resonance, the voice LFO's speed and depths, and the pitch | the other box destinations; Key Controller Sets |
-| Voices and output | random, alternate and scaling pan; key-on delay time; stereo output; part envelope offsets | key-on delay note length (tempo-synced: no tempo input) |
+| Voices and output | random, alternate and scaling pan; key-on delay time and note length (tempo sync at the host's tempo); stereo output; part envelope offsets | |
 
 ## 3. Coverage
 
@@ -39,7 +39,7 @@ In the personal library, the FM parts' mod-wheel controller boxes: 16 carried in
 
 | Gap | Performances (stock) | Parts (stock) | Changes the sound | Status |
 |---|---|---|---|---|
-| `key_on_delay_length`: not played | 552 | 1259 | yes | open |
+| `key_on_delay_length`: not played | 552 | 1259 | yes | done (0.6.2): played with tempo sync; with tempo sync off (all but 3 of these parts) it changes nothing, and is no longer reported |
 | `boxN_dst`: not played | 407 | 781 | yes | open |
 | `op5.level_ctrl_sens`: not played | 41 | 64 | yes | open |
 | `op7.level_ctrl_sens`: not played | 40 | 62 | yes | open |
@@ -86,7 +86,7 @@ In the personal library, the FM parts' mod-wheel controller boxes: 16 carried in
 | `op5.key_ctrl_set3`: not played | 2 | 6 | yes | open |
 | `op3.key_ctrl_set3`: not played | 1 | 4 | yes | open |
 | `op8.key_ctrl_set4`: not played | 1 | 4 | yes | open |
-| `key_on_delay_sync`: not played | 1 | 3 | yes | open |
+| `key_on_delay_sync`: not played | 1 | 3 | yes | done (0.6.2): the note length at the host's tempo (the sample engine's law) |
 | `slfo_dest3`: not played | 1 | 3 | yes | open |
 | `tuning_scale`: not played | 1 | 2 | yes | open |
 
@@ -99,8 +99,8 @@ Not applicable: the engine is written in Rust.
 This engine's package is ninth of seventeen in the cross-engine order (605 stock Performances touched). In build
 order:
 
-1. A tempo input for the key-on delay's note length (`key_on_delay_length`, 552 Performances), which also brings the
-   sound LFO's tempo sync and tempo speed.
+1. Done in 0.6.2: the key-on delay's note length at the host's tempo (`key_on_delay_length`, 552 Performances). The
+   sound LFO's tempo sync and tempo speed wait for their law.
 2. The controller box destinations not played yet (`boxN_dst`, 407).
 3. The operator level controller sensitivities (`opN.level_ctrl_sens`, 15 to 41 per operator).
 4. The key controller sets (`opN.key_ctrl_setN`) and the sound LFO's other destinations.

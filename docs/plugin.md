@@ -89,6 +89,10 @@ the whole sound), the CLAP volume expression (the addressed notes' output, linea
 step). CC 65 (portamento) and CC 67 (the soft pedal, which the reference does not receive) are
 ignored; the tuning expression is not played.
 
+Tempo: the host's transport tempo, read at each block's start when the transport has one (120
+quarter notes a minute until then), times a key-on delay with tempo sync (`key_on_delay_sync`): the
+note waits its note length at the tempo of its note-on.
+
 ## Sound contexts and sharing
 
 Slot 0 is "Default", selected by every channel at first, never discarded. `prepare` builds a sound
@@ -176,7 +180,8 @@ first slots), then by the order.
 
 The tuning expression and per-note bend; CC 65 (portamento switch); parameter modulation
 (`PARAM_MOD`) and modulatable box destinations; the controller boxes' destinations without a law
-(`docs/coverage.md`); tempo sync; micro tuning; the output
+(`docs/coverage.md`); the sound LFO's tempo sync; a tempo change within a block (the transport's
+tempo is read at the block's start); micro tuning; the output
 high-pass; preset discovery and `prepare_preset`; the plugin's window; UI roles beyond the output bus,
 envelope views and the FM algorithm view; per-channel bend of notes left on a sound no longer
 selected (bend and pedal go to the channel's selected sound); packaging, signing.

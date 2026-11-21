@@ -106,6 +106,12 @@ pub fn events_in(pr: &clap_process) -> Option<&clap_input_events> {
     unsafe { pr.in_events.as_ref() }
 }
 
+/// The host's tempo for the block (quarter notes a minute), if its transport gives one.
+pub fn tempo(pr: &clap_process) -> Option<f64> {
+    let t = unsafe { pr.transport.as_ref() }?;
+    (t.flags & CLAP_TRANSPORT_HAS_TEMPO != 0).then_some(t.tempo)
+}
+
 pub fn count(e: &clap_input_events) -> usize {
     e.size.map_or(0, |f| unsafe { f(e) }) as usize
 }
