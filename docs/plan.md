@@ -40,7 +40,7 @@ In the personal library, the FM parts' mod-wheel controller boxes: 16 carried in
 | Gap | Performances (stock) | Parts (stock) | Changes the sound | Status |
 |---|---|---|---|---|
 | `key_on_delay_length`: not played | 552 | 1259 | yes | done (0.6.2): played with tempo sync; with tempo sync off (all but 3 of these parts) it changes nothing, and is no longer reported |
-| `boxN_dst`: not played | 407 | 781 | yes | open |
+| `boxN_dst`: not played | 407 | 781 | yes | open: no destination left has a law measured for this engine; the most used are 95, 108, 97, 107, 92, 115, 96 and 111 (the amplitude envelope's attack, the operators' skirt, the release, the operators' form, the voice LFO's filter depth, the operators' release, decay and envelope level) |
 | `op5.level_ctrl_sens`: not played | 41 | 64 | yes | open |
 | `op7.level_ctrl_sens`: not played | 40 | 62 | yes | open |
 | `op3.level_ctrl_sens`: not played | 37 | 59 | yes | open |
