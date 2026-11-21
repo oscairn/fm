@@ -500,6 +500,7 @@ pub enum Op {
     LfoPitchOffset = 31,
     LfoAmpOffset = 32,
     PitchCtrlSens = 33,
+    LevelCtrlSens = 34,
     SlfoRatio = 35, // destinations 1-3
 }
 

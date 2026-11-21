@@ -6,7 +6,7 @@
 //! cutoff's spans); a box on any other destination, from a source the host cannot send, or on a
 //! curve not measured is reported by the coverage report (a curve not measured plays as linear).
 
-use crate::params::{ctrl_set_index, Common, Part, BOX_BASE, BOX_FIELDS, OPS};
+use crate::params::{ctrl_set_index, op_index, Common, Op, Part, BOX_BASE, BOX_FIELDS, OPS};
 use crate::sound::Sound;
 
 pub const BOXES: usize = 32;
@@ -100,8 +100,9 @@ fn at(a: &[f32; 17], i: usize) -> f32 {
 /// (89, its normal range), pitch depth (90), amplitude depth (91) or filter depth (92), the sound's
 /// pitch (54), an operator's frequency (105, the operators whose switch for the box is on, by their
 /// pitch controller sensitivity), the part's amplitude envelope attack (95), decay 1 and 2 (96)
-/// and release (97) offsets, an operator's attack time (112, the operators whose switch for the box
-/// is on).
+/// and release (97) offsets, the feedback (104); for the operators whose switch for the box is on:
+/// the form (107), skirt (108) and resonance (109), the level by the level controller sensitivity
+/// (111), the attack, decay 1, decay 2 and release times (112-115).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dest {
     Level,
@@ -116,7 +117,15 @@ pub enum Dest {
     AmpAttack,
     AmpDecay,
     AmpRelease,
+    Feedback,
+    OpForm,
+    OpSpread,
+    OpFormant,
+    OpLevelSens,
     OpAttack,
+    OpDecay1,
+    OpDecay2,
+    OpRelease,
 }
 
 impl Dest {
@@ -133,7 +142,15 @@ impl Dest {
             95 => Some(Dest::AmpAttack),
             96 => Some(Dest::AmpDecay),
             97 => Some(Dest::AmpRelease),
+            104 => Some(Dest::Feedback),
+            107 => Some(Dest::OpForm),
+            108 => Some(Dest::OpSpread),
+            109 => Some(Dest::OpFormant),
+            111 => Some(Dest::OpLevelSens),
             112 => Some(Dest::OpAttack),
+            113 => Some(Dest::OpDecay1),
+            114 => Some(Dest::OpDecay2),
+            115 => Some(Dest::OpRelease),
             54 => Some(Dest::Pitch),
             _ => None,
         }
@@ -144,9 +161,12 @@ impl Dest {
     /// part's resonance, the same raw scale; not measured on this part type); the voice LFO's
     /// speed and depths 100 of their 0-99 values, the pitch 8192 cents, an operator's frequency
     /// 3600 cents at sensitivity +7 (measured on this part type; the pitches up to a quarter of
-    /// a full box); the voice LFO's filter depth 100 (measured on this part type at 12 and 25 steps;
-    /// 96 not excluded); the part's envelope offsets 64 (measured: 8, 16, 32 and 63 steps); an
-    /// operator's attack time 96 (measured at 12 and 24 steps, within 5 % of the time's law).
+    /// a full box); the voice LFO's filter depth 100 (measured on this part type: 12, 25, 31 and 37
+    /// steps); the part's envelope offsets 64 (measured: 8, 16, 32 and 63 steps); the feedback 7
+    /// (measured: every step from 0 and from 7); an operator's form 6 and skirt 7 (measured: 1, 2, 3, 4
+    /// and the ends), resonance 96 (12 and 24), envelope times 96 (12 and 24 on the attack and both
+    /// decays, 12 on the release), level 96 times its level controller sensitivity / 7 (20 and 48
+    /// steps at +3 and +7, none at 0).
     pub fn span(self) -> i32 {
         match self {
             Dest::Level => 96,
@@ -156,7 +176,10 @@ impl Dest {
             Dest::Pitch => 8192,
             Dest::OpPitch => 3600,
             Dest::AmpAttack | Dest::AmpDecay | Dest::AmpRelease => 64,
-            Dest::OpAttack => 96,
+            Dest::Feedback | Dest::OpSpread => 7,
+            Dest::OpForm => 6,
+            Dest::OpFormant | Dest::OpLevelSens => 96,
+            Dest::OpAttack | Dest::OpDecay1 | Dest::OpDecay2 | Dest::OpRelease => 96,
         }
     }
 }
@@ -203,24 +226,44 @@ impl Box {
 
     /// Its steps with its source at `c` (0-1024): the output (curve(c) + o - 1024) x ratio / 8
     /// within +-8192 (o 1024 unipolar, 512 bipolar), times span / 8192, toward zero (measured).
+    #[inline(always)] // (as `read`)
     pub fn steps(&self, c: f32) -> i32 {
         let o = if self.bipolar { 512.0 } else { 1024.0 };
         let out = ((curve_at(self.curve, c) + o - 1024.0) * self.ratio / 8.0).clamp(-8192.0, 8192.0);
         (out * self.dest.span() as f32 / 8192.0) as i32
     }
 
-    /// The most it raises its destination (0 if it only lowers it): at a curve's ends.
-    fn up(&self) -> i32 {
-        let (lo, hi) = (
-            Box { curve: None, ..*self }.steps(0.0),
-            Box { curve: None, ..*self }.steps(1024.0),
-        );
-        lo.max(hi).max(0)
+    /// Operator `op`'s share of its `k` steps: all of them, but on the level by the level controller
+    /// sensitivity (111): k x sens / 7 toward zero (measured: at +3 and +7, none at 0).
+    #[inline(always)]
+    fn share(&self, s: &Sound, op: usize, k: i32) -> i32 {
+        if self.dest != Dest::OpLevelSens {
+            return k;
+        }
+        let sens = i32::from(s.get(op_index(op, Op::LevelCtrlSens, 0))).clamp(-7, 7);
+        k.saturating_mul(sens) / 7
     }
 
     /// Whether it reaches operator `op` (that operator's switch for it).
     pub fn reaches(&self, s: &Sound, op: usize) -> bool {
-        matches!(self.dest, Dest::Level | Dest::OpPitch | Dest::OpAttack) && s.get(ctrl_set_index(op, self.n)) != 0
+        self.per_op() && s.get(ctrl_set_index(op, self.n)) != 0
+    }
+
+    /// Whether it moves operators (those whose switch for it is on).
+    fn per_op(&self) -> bool {
+        matches!(
+            self.dest,
+            Dest::Level
+                | Dest::OpPitch
+                | Dest::OpForm
+                | Dest::OpSpread
+                | Dest::OpFormant
+                | Dest::OpLevelSens
+                | Dest::OpAttack
+                | Dest::OpDecay1
+                | Dest::OpDecay2
+                | Dest::OpRelease
+        )
     }
 }
 
@@ -256,9 +299,12 @@ pub struct Steps {
     /// Cents: the sound's, and each operator's at sensitivity +7.
     pub pitch: i32,
     pub op_pitch: [i32; OPS],
-    /// The part's amplitude envelope attack, decay and release offsets; each operator's attack time.
+    /// The part's amplitude envelope attack, decay and release offsets; the feedback; each operator's
+    /// form, skirt and resonance, and its attack, decay 1, decay 2 and release times.
     pub amp: [i32; 3],
-    pub op_attack: [i32; OPS],
+    pub feedback: i32,
+    pub op_form: [[i32; 3]; OPS],
+    pub op_time: [[i32; 4]; OPS],
 }
 
 pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
@@ -278,15 +324,44 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
             Dest::AmpAttack => add(&mut t.amp[0]),
             Dest::AmpDecay => add(&mut t.amp[1]),
             Dest::AmpRelease => add(&mut t.amp[2]),
-            Dest::Level | Dest::OpPitch | Dest::OpAttack => {
-                let ops = match b.dest {
-                    Dest::Level => &mut t.level,
-                    Dest::OpPitch => &mut t.op_pitch,
-                    _ => &mut t.op_attack,
+            Dest::Feedback => add(&mut t.feedback),
+            Dest::Level | Dest::OpPitch => {
+                let ops = if b.dest == Dest::Level {
+                    &mut t.level
+                } else {
+                    &mut t.op_pitch
                 };
                 for (op, l) in ops.iter_mut().enumerate() {
                     if b.reaches(s, op) {
                         add(l);
+                    }
+                }
+            }
+            Dest::OpLevelSens => {
+                for (op, l) in t.level.iter_mut().enumerate() {
+                    if b.reaches(s, op) {
+                        *l = l.saturating_add(b.share(s, op, k));
+                    }
+                }
+            }
+            _ => {
+                let (i, j) = match b.dest {
+                    Dest::OpForm => (0, 0),
+                    Dest::OpSpread => (0, 1),
+                    Dest::OpFormant => (0, 2),
+                    Dest::OpAttack => (1, 0),
+                    Dest::OpDecay1 => (1, 1),
+                    Dest::OpDecay2 => (1, 2),
+                    _ => (1, 3),
+                };
+                for op in (0..OPS).filter(|&op| b.reaches(s, op)) {
+                    let x = if i == 0 {
+                        t.op_form.get_mut(op).and_then(|f| f.get_mut(j))
+                    } else {
+                        t.op_time.get_mut(op).and_then(|f| f.get_mut(j))
+                    };
+                    if let Some(x) = x {
+                        add(x);
                     }
                 }
             }
@@ -302,7 +377,15 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     t.lfo_amp = clamp(t.lfo_amp, Dest::LfoAmp);
     t.lfo_filter = clamp(t.lfo_filter, Dest::LfoFilter);
     t.amp = t.amp.map(|x| clamp(x, Dest::AmpAttack));
-    t.op_attack = t.op_attack.map(|x| clamp(x, Dest::OpAttack));
+    t.feedback = clamp(t.feedback, Dest::Feedback);
+    t.op_form = t.op_form.map(|[f, s, n]| {
+        [
+            clamp(f, Dest::OpForm),
+            clamp(s, Dest::OpSpread),
+            clamp(n, Dest::OpFormant),
+        ]
+    });
+    t.op_time = t.op_time.map(|x| x.map(|x| clamp(x, Dest::OpAttack)));
     t.pitch = clamp(t.pitch, Dest::Pitch);
     t
 }
@@ -321,10 +404,12 @@ pub fn moves(s: &Sound, d: Dest) -> bool {
 /// The most the boxes can raise each operator's level, in steps (within one span).
 pub fn reach(s: &Sound) -> [i32; OPS] {
     let mut up = [0i32; OPS];
-    for b in boxes(s).filter(|b| b.dest == Dest::Level) {
+    for b in boxes(s).filter(|b| matches!(b.dest, Dest::Level | Dest::OpLevelSens)) {
+        let ends = [0.0, 1024.0].map(|c| Box { curve: None, ..b }.steps(c));
         for (op, u) in up.iter_mut().enumerate() {
             if b.reaches(s, op) {
-                *u = (*u).saturating_add(b.up());
+                let most = ends.iter().map(|&k| b.share(s, op, k)).max().unwrap_or(0).max(0);
+                *u = (*u).saturating_add(most);
             }
         }
     }
@@ -485,12 +570,55 @@ mod tests {
         assert_eq!(one(97, -64, 127, "").amp, [0, 0, -64]);
         let t = one(112, 16, 127, "op2.ctrl_set1=0");
         assert_eq!(
-            (t.op_attack[0], t.op_attack[1], one(112, 16, 64, "").op_attack[0]),
+            (t.op_time[0][0], t.op_time[1][0], one(112, 16, 64, "").op_time[0][0]),
             (24, 0, 12)
         );
+        assert_eq!([16, 20, 24].map(|r| one(92, r, 127, "").lfo_filter), [25, 31, 37]);
+        assert_eq!(one(92, 16, 64, "").lfo_filter, 12);
+    }
+
+    /// The kernels' boxes, the operators' other envelope times and the level by the level controller
+    /// sensitivity, measured on the reference: the feedback (104) 7 steps a full box (every reading
+    /// from feedback 0 and 7 matched one stored value's spectrum exactly); the form (107) 6 (ratio 48
+    /// at the wheel's top 4, not 5), the skirt (108) 7, the resonance (109) 96 (12 and 24); the decay
+    /// 1, decay 2 (113, 114) and release (115) times 96; 111 moves the level by 96 steps a full box at
+    /// sensitivity +7, sens / 7 of that toward zero (20 at +3), nothing at 0.
+    #[test]
+    fn kernel_time_and_level_sensitivity_boxes_measured() {
+        let fb = |r: i16, v: u8| one(104, r, v, "").feedback;
         assert_eq!(
-            [one(92, 16, 64, "").lfo_filter, one(92, 16, 127, "").lfo_filter],
-            [12, 25]
+            [fb(8, 127), fb(16, 127), fb(32, 127), fb(64, 127), fb(127, 64)],
+            [0, 1, 3, 7, 7]
+        );
+        assert_eq!(
+            [fb(-32, 64), fb(-32, 127), fb(-127, 64), fb(-127, 127)],
+            [-1, -3, -6, -7]
+        );
+        let f = |d: i16, r: i16, v: u8, i: usize| one(d, r, v, "").op_form[0][i];
+        assert_eq!(
+            [
+                f(107, 48, 127, 0),
+                f(107, 48, 64, 0),
+                f(107, 16, 127, 0),
+                f(107, 64, 127, 0)
+            ],
+            [4, 2, 1, 6]
+        );
+        assert_eq!([f(108, 16, 127, 1), f(108, 32, 127, 1), f(108, 64, 127, 1)], [1, 3, 7]);
+        assert_eq!([f(109, 16, 64, 2), f(109, 16, 127, 2)], [12, 24]);
+        for (d, i) in [(113, 1), (114, 2), (115, 3)] {
+            assert_eq!(
+                [one(d, 16, 64, "").op_time[0][i], one(d, 16, 127, "").op_time[0][i]],
+                [12, 24]
+            );
+        }
+        let l = |sens: i16| one(111, -32, 127, &format!("op1.level_ctrl_sens={sens}")).level[0];
+        assert_eq!([l(0), l(3), l(7)], [0, -20, -48]);
+        let s = sound("box1_dst=111 box1_ratio=-32 op1.level_ctrl_sens=-7 op2.level_ctrl_sens=7");
+        assert_eq!(
+            reach(&s)[..2],
+            [48, 0],
+            "a raise reaches the top the operator is prepared at"
         );
     }
 

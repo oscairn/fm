@@ -98,11 +98,9 @@ pub fn status(p: &Param) -> &'static str {
         // M7: the controller boxes, their sources and the operators' switches for them (a box the
         // engine does not play: `crate::boxes::not_played`)
         PLAYED
-    } else if n == "pitch_ctrl_sens" {
-        // M7: the operator frequency boxes' share
+    } else if n == "pitch_ctrl_sens" || n == "level_ctrl_sens" {
+        // M7: the operator frequency boxes' share, the operator level offset boxes' share
         PLAYED
-    } else if n == "level_ctrl_sens" {
-        "M7 (unmeasured)"
     } else if starts(&["key_ctrl_set", "tuning_"]) {
         "M7 (controllers, tuning)"
     } else if starts(&[

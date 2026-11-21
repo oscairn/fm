@@ -285,11 +285,13 @@ pub struct Prepared {
     delay_ms: f32,
     /// Each operator's level (with the depth macro) and the level it is prepared at (the top its
     /// controller boxes reach); whether the sound has a box the engine plays, one on an envelope's
-    /// time ([`Engine::retime`]), one on the voice LFO's filter depth.
+    /// time ([`Engine::retime`]), one on the voice LFO's filter depth, one on what the kernels play
+    /// (the feedback, an operator's form, skirt or resonance: [`kern`]).
     levels: [(u8, u8); OPS],
     boxed: bool,
     env_box: bool,
     filter_box: bool,
+    kern_box: bool,
     /// Whether a box moves an operator's frequency, and each operator's pitch controller
     /// sensitivity / 7 (ratio-mode live operators).
     op_pitch_box: bool,
@@ -297,12 +299,62 @@ pub struct Prepared {
 }
 
 /// The box destinations on an envelope's time.
-const ENV_DESTS: [boxes::Dest; 4] = [
+const ENV_DESTS: [boxes::Dest; 7] = [
     boxes::Dest::AmpAttack,
     boxes::Dest::AmpDecay,
     boxes::Dest::AmpRelease,
     boxes::Dest::OpAttack,
+    boxes::Dest::OpDecay1,
+    boxes::Dest::OpDecay2,
+    boxes::Dest::OpRelease,
 ];
+
+/// The box destinations on what the kernels play.
+const KERN_DESTS: [boxes::Dest; 4] = [
+    boxes::Dest::Feedback,
+    boxes::Dest::OpForm,
+    boxes::Dest::OpSpread,
+    boxes::Dest::OpFormant,
+];
+
+/// The sources the boxes of `p` read: the sound's own (knobs, ribbon, switches), the bend `b` and
+/// the channel controllers `c`.
+fn sources(p: &Prepared, c: &[u8; CTLS], b: i16) -> [f32; SOURCES] {
+    let mut src = [0.0; SOURCES];
+    boxes::own(&p.sound, &mut src);
+    src[0] = boxes::bend(b);
+    for (&k, &v) in [1usize, 2, 3, 4, 7].iter().zip(c.iter()) {
+        if let Some(x) = src.get_mut(k) {
+            *x = boxes::controller(v);
+        }
+    }
+    src
+}
+
+/// What the kernels of `p` play moved by its boxes `t`: the feedback (whole steps within 0-7) and
+/// each operator's form (0-6), skirt (0-7) and resonance (0-99), read all the time (measured on
+/// the form and the skirt: a move during a note changes them at once). Nothing without such boxes.
+fn kern(p: &mut Prepared, t: &boxes::Steps) {
+    if !p.kern_box {
+        return;
+    }
+    let fb = i32::from(p.sound.get(Common::Feedback as usize))
+        .clamp(0, 7)
+        .saturating_add(t.feedback)
+        .clamp(0, 7);
+    p.feedback = fb as u8;
+    p.fbk = p.slfo_fbk.get(fb as usize).copied().unwrap_or(p.fbk);
+    let waves = core::array::from_fn(|op| {
+        let (f, s, n) = p.forms.get(op).copied().unwrap_or((0, 0, 0));
+        let [df, ds, dn] = t.op_form.get(op).copied().unwrap_or([0; 3]);
+        Wave::new(
+            i32::from(f).saturating_add(df).clamp(0, 6),
+            i32::from(s).saturating_add(ds).clamp(0, 7),
+            i32::from(n).saturating_add(dn).clamp(0, 99),
+        )
+    });
+    p.plan = p.plan.with_waves(waves);
+}
 
 /// What the sound LFO moves: pitch (frequency or detune), level, what the kernels play (form or
 /// feedback), the voice LFO's speed, the filter or pan.
@@ -437,6 +489,7 @@ impl Prepared {
             boxed: false,
             env_box: false,
             filter_box: false,
+            kern_box: false,
             op_pitch_box: false,
             op_sens: [0.0; OPS],
             delay_ms: laws::key_on_delay_ms(i32::from(s.get(Common::KeyOnDelay as usize))) as f32,
@@ -564,7 +617,7 @@ impl Prepared {
         let waves = forms.map(|(f, s, n)| Wave::new(f, s, n));
         p.forms = forms.map(|(f, s, n)| (f as u8, s as u8, n as u8));
         // (the feedback destination needs the feedback path, at amount 0 where the sound has none)
-        let fb_dest = dests.iter().any(|&(x, depth)| x == 74 && depth > 0);
+        let fb_dest = dests.iter().any(|&(x, depth)| x == 74 && depth > 0) || boxes::moves(s, boxes::Dest::Feedback);
         p.plan = Plan::new(&r, audible, feedback > 0 || fb_dest, waves);
         // the voice LFO
         p.lfo_hz = laws::lfo_hz(c(Common::LfoSpeedRange) != 0, {
@@ -614,6 +667,7 @@ impl Prepared {
         p.filter_box = boxes::moves(s, boxes::Dest::LfoFilter) && p.filter.lfo_route();
         p.lfo_on = p.lfo_pitch_on || p.lfo_amp_on || p.filter.uses_lfo() || p.filter_box;
         p.env_box = boxes::boxes(s).any(|b| ENV_DESTS.contains(&b.dest));
+        p.kern_box = boxes::boxes(s).any(|b| KERN_DESTS.contains(&b.dest));
         p.lfo_speed = (c(Common::LfoSpeedRange) != 0, s.get(Common::LfoSpeed as usize));
         if p.lfo_speed.0 {
             p.lfo_speed.1 = s.get(Common::LfoExtendedSpeed as usize);
@@ -1637,8 +1691,14 @@ impl Engine {
     fn apply(&mut self, sound: usize) {
         self.staged &= !bit(sound);
         let busy = self.busy(sound);
+        let (c, b) = (self.ctl.get(sound).copied(), self.bend.get(sound).copied());
         if let Some(d) = self.sounds.get_mut(sound) {
-            let n = Prepared::new(&d.sound);
+            let mut n = Prepared::new(&d.sound);
+            // what the kernels play compared as the boxes now move it
+            if let (true, Some(c), Some(b)) = (n.kern_box, c, b) {
+                let t = boxes::steps(&n.sound, &sources(&n, &c, b));
+                kern(&mut n, &t);
+            }
             if !busy || (n.plan == d.plan && n.mono == d.mono && n.single == d.single) {
                 *d = n;
                 self.pending &= !bit(sound);
@@ -2305,16 +2365,8 @@ impl Engine {
         };
         let mut read = None;
         if p.boxed {
-            let mut src = [0.0; SOURCES];
-            boxes::own(&p.sound, &mut src);
-            src[0] = boxes::bend(b);
-            for (&k, &v) in [1usize, 2, 3, 4, 7].iter().zip(c.iter()) {
-                if let Some(x) = src.get_mut(k) {
-                    *x = boxes::controller(v);
-                }
-            }
-            let t = boxes::steps(&p.sound, &src);
-            read = (p.env_box || p.filter_box).then_some(t);
+            let t = boxes::steps(&p.sound, &sources(p, c, b));
+            read = (p.env_box || p.filter_box || p.kern_box).then_some(t);
             let carriers = u32::from(p.plan.carriers);
             let ops = (0..OPS).zip(p.levels.iter().zip(t.level.iter()).zip(m.lvl.iter_mut()));
             for (op, ((&(level, top), &st), l)) in ops {
@@ -2373,15 +2425,16 @@ impl Engine {
         let Some(d) = self.sounds.get_mut(sound) else {
             return;
         };
-        let g = |i: usize| i32::from(d.sound.get(i));
         if d.filter_box {
             let depth = boxes::lfo_value(d.sound.get(Common::LfoFilterDepth as usize), t.lfo_filter);
             d.filter.set_lfo_depth(depth);
         }
+        kern(d, t);
         if !d.env_box {
             return;
         }
-        let mut s = d.sound;
+        let (mut s, stored) = (d.sound, d.sound);
+        let g = |i: usize| i32::from(stored.get(i));
         let mut put = |i: usize, v: i32| {
             if let Some(p) = crate::params::PARAMS.get(i) {
                 let _ = s.set(p.id, v.max(i32::from(p.min)).min(i32::from(p.max)) as i16);
@@ -2391,9 +2444,11 @@ impl Engine {
         for (k, &st) in offsets.iter().zip(t.amp.iter()) {
             put(*k as usize, g(*k as usize).saturating_add(st));
         }
-        for (op, &st) in t.op_attack.iter().enumerate() {
-            let i = op_index(op, Op::EgTime, 0);
-            put(i, g(i).saturating_add(st));
+        for (op, st) in t.op_time.iter().enumerate() {
+            for (k, &st) in st.iter().enumerate() {
+                let i = op_index(op, Op::EgTime, k);
+                put(i, g(i).saturating_add(st));
+            }
         }
         let n = Prepared::new(&s);
         if n.ms == d.ms && n.rate_step == d.rate_step {
@@ -6038,6 +6093,39 @@ mod tests {
                 env.to_string(),
                 filt,
             ),
+            (
+                "",
+                "box1_dst=113 box1_ratio=16",
+                127,
+                "",
+                env.replace("decay1=40", "decay1=64"),
+                "",
+            ),
+            (
+                "",
+                "box1_dst=114 box1_ratio=16",
+                127,
+                "",
+                env.replace("decay2=40", "decay2=64"),
+                "",
+            ),
+            (
+                "",
+                "box1_dst=115 box1_ratio=16",
+                127,
+                "",
+                env.replace("release=40", "release=64"),
+                "",
+            ),
+            ("", "box1_dst=104 box1_ratio=32", 127, "feedback=3", env.to_string(), ""),
+            (
+                "",
+                "box1_dst=107 box1_ratio=16",
+                127,
+                "",
+                format!("{env} op1.form=1"),
+                "",
+            ),
         ];
         for (pre, boxes, wheel, moved, op, post) in cases {
             let boxed = wheel_play(&s(&format!("{pre} {post}"), boxes, env), wheel, &[], 150, 300);
@@ -6047,6 +6135,61 @@ mod tests {
             let none = wheel_play(&s(&format!("{pre} {post}"), "", env), 0, &[], 150, 300);
             assert!(same(&rest, &none), "{boxes} at rest");
         }
+    }
+
+    /// The skirt, resonance and form boxes and the level by the level controller sensitivity (111):
+    /// a full box plays as the moved value (the level through the level boxes' own path, within
+    /// 0.05 dB); at the wheel's 0 the sound without the box; the form read all the time (measured).
+    #[test]
+    fn form_and_level_sensitivity_boxes() {
+        let s = |boxes: &str, op: &str| sound(&format!("algorithm=1 {boxes}\n{op}\nop8.level=0"));
+        let same = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        let play = |p: &Prepared, wheel: u8| wheel_play(p, wheel, &[], 100, 150);
+        for (boxes, wheel, base, moved) in [
+            (
+                "box1_dst=108 box1_ratio=32",
+                127,
+                "op1.form=1",
+                "op1.form=1 op1.spread=3",
+            ),
+            (
+                "box1_dst=109 box1_ratio=16",
+                64,
+                "op1.form=5 op1.spread=3 op1.formant=4",
+                "op1.form=5 op1.spread=3 op1.formant=16",
+            ),
+            ("box1_dst=107 box1_ratio=48", 127, "", "op1.form=4"),
+        ] {
+            let (base, moved) = (format!("op1.level=99 {base}"), format!("op1.level=99 {moved}"));
+            let want = play(&s("", &moved), 0);
+            assert!(
+                peak_db(&want) > -60.0 && same(&play(&s(boxes, &base), wheel), &want),
+                "{boxes}"
+            );
+            assert!(
+                same(&play(&s(boxes, &base), 0), &play(&s("", &base), 0)),
+                "{boxes} at rest"
+            );
+        }
+        for (sens, level) in [(7, 51), (3, 79), (0, 99)] {
+            let boxed = play(
+                &s(
+                    "box1_dst=111 box1_ratio=-32",
+                    &format!("op1.level=99 op1.level_ctrl_sens={sens}"),
+                ),
+                127,
+            );
+            let want = play(&s("", &format!("op1.level={level}")), 0);
+            let (a, b) = (
+                peak_db(&boxed[50 * BLOCK..90 * BLOCK]),
+                peak_db(&want[50 * BLOCK..90 * BLOCK]),
+            );
+            assert!((a - b).abs() < 0.05, "+{sens}: {a:.2} against {b:.2} dB");
+        }
+        let p = s("box1_dst=107 box1_ratio=64", "op1.level=99");
+        let (still, moved) = (play(&p, 0), wheel_play(&p, 0, &[(40, 127)], 100, 150));
+        assert!(same(&still[..40 * BLOCK], &moved[..40 * BLOCK]));
+        assert!(!same(&still[41 * BLOCK..60 * BLOCK], &moved[41 * BLOCK..60 * BLOCK]));
     }
 
     /// The part's envelope offsets move a segment under way (measured): the wheel moved during the
