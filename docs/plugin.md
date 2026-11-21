@@ -1,7 +1,7 @@
 # The plugin
 
 `crates/fm-clap` builds the CLAP plugin `org.oscairn.fm`, "Oscairn FM", vendor Oscairn,
-version 0.6.3 (the crate's version, which the descriptor reads), AGPL-3.0-or-later. It is a
+version 0.6.4 (the crate's version, which the descriptor reads), AGPL-3.0-or-later. It is a
 `cdylib` (`libfm_clap.so`, `.dylib`, `fm_clap.dll`) with one entry, `clap_entry`; packaging it as a
 `.clap` bundle, signing and publishing are not done here.
 
