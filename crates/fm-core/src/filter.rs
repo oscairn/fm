@@ -491,7 +491,17 @@ impl Laws {
 
     /// Whether the envelope or the voice LFO moves the cutoff.
     pub fn uses_lfo(&self) -> bool {
-        self.on && self.kind != Kind::Thru && self.lfo_oct != 0.0
+        self.lfo_route() && self.lfo_oct != 0.0
+    }
+
+    /// Whether the voice LFO could move the cutoff (at a depth above 0).
+    pub fn lfo_route(&self) -> bool {
+        self.on && self.kind != Kind::Thru
+    }
+
+    /// The voice LFO's filter depth 0-99 (a controller box moves it).
+    pub fn set_lfo_depth(&mut self, depth: i32) {
+        self.lfo_oct = lfo_octaves(depth) as f32;
     }
 
     /// Whether the sound LFO moves the cutoff, the resonance or pan.

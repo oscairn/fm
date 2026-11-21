@@ -284,14 +284,25 @@ pub struct Prepared {
     /// Key-on delay, ms (0: none; with tempo sync its note length is read at the note).
     delay_ms: f32,
     /// Each operator's level (with the depth macro) and the level it is prepared at (the top its
-    /// controller boxes reach); whether the sound has a box the engine plays.
+    /// controller boxes reach); whether the sound has a box the engine plays, one on an envelope's
+    /// time ([`Engine::retime`]), one on the voice LFO's filter depth.
     levels: [(u8, u8); OPS],
     boxed: bool,
+    env_box: bool,
+    filter_box: bool,
     /// Whether a box moves an operator's frequency, and each operator's pitch controller
     /// sensitivity / 7 (ratio-mode live operators).
     op_pitch_box: bool,
     op_sens: [f32; OPS],
 }
+
+/// The box destinations on an envelope's time.
+const ENV_DESTS: [boxes::Dest; 4] = [
+    boxes::Dest::AmpAttack,
+    boxes::Dest::AmpDecay,
+    boxes::Dest::AmpRelease,
+    boxes::Dest::OpAttack,
+];
 
 /// What the sound LFO moves: pitch (frequency or detune), level, what the kernels play (form or
 /// feedback), the voice LFO's speed, the filter or pan.
@@ -424,6 +435,8 @@ impl Prepared {
             filter: Laws::new(s, &dests),
             levels: [(0, 0); OPS],
             boxed: false,
+            env_box: false,
+            filter_box: false,
             op_pitch_box: false,
             op_sens: [0.0; OPS],
             delay_ms: laws::key_on_delay_ms(i32::from(s.get(Common::KeyOnDelay as usize))) as f32,
@@ -597,7 +610,10 @@ impl Prepared {
         p.op_pitch_box = boxes::moves(s, boxes::Dest::OpPitch) && p.op_sens.iter().any(|&k| k != 0.0);
         p.lfo_pitch_on = p.lfo_pitch.iter().any(|&x| x != 0.0);
         p.lfo_amp_on = p.lfo_amp.iter().any(|&x| x != 0.0);
-        p.lfo_on = p.lfo_pitch_on || p.lfo_amp_on || p.filter.uses_lfo();
+        // (a box on the filter depth may raise it from 0: its value is set when the boxes are read)
+        p.filter_box = boxes::moves(s, boxes::Dest::LfoFilter) && p.filter.lfo_route();
+        p.lfo_on = p.lfo_pitch_on || p.lfo_amp_on || p.filter.uses_lfo() || p.filter_box;
+        p.env_box = boxes::boxes(s).any(|b| ENV_DESTS.contains(&b.dest));
         p.lfo_speed = (c(Common::LfoSpeedRange) != 0, s.get(Common::LfoSpeed as usize));
         if p.lfo_speed.0 {
             p.lfo_speed.1 = s.get(Common::LfoExtendedSpeed as usize);
@@ -2287,6 +2303,7 @@ impl Engine {
             lfo_speed: p.lfo_speed.1,
             ..MODS0
         };
+        let mut read = None;
         if p.boxed {
             let mut src = [0.0; SOURCES];
             boxes::own(&p.sound, &mut src);
@@ -2297,6 +2314,7 @@ impl Engine {
                 }
             }
             let t = boxes::steps(&p.sound, &src);
+            read = (p.env_box || p.filter_box).then_some(t);
             let carriers = u32::from(p.plan.carriers);
             let ops = (0..OPS).zip(p.levels.iter().zip(t.level.iter()).zip(m.lvl.iter_mut()));
             for (op, ((&(level, top), &st), l)) in ops {
@@ -2341,6 +2359,63 @@ impl Engine {
             || m.lfo_speed != p.lfo_speed.1
             || m.pitch != 0.0
             || (p.op_pitch_box && m.op_pitch.iter().any(|&x| x != 0.0));
+        if let Some(t) = read {
+            self.retime(sound, &t);
+        }
+    }
+
+    /// What the boxes `t` of `sound` move in its prepared laws: the voice LFO's filter depth, and
+    /// the envelopes' times (the part's attack, decay and release offsets and the operators' attack
+    /// times, within their ranges), the sound prepared again at the moved values and each running
+    /// segment of its voices going on at the new rate from where it is (measured: the part's
+    /// offsets move a segment under way). Nothing for a sound without such boxes.
+    fn retime(&mut self, sound: usize, t: &boxes::Steps) {
+        let Some(d) = self.sounds.get_mut(sound) else {
+            return;
+        };
+        let g = |i: usize| i32::from(d.sound.get(i));
+        if d.filter_box {
+            let depth = boxes::lfo_value(d.sound.get(Common::LfoFilterDepth as usize), t.lfo_filter);
+            d.filter.set_lfo_depth(depth);
+        }
+        if !d.env_box {
+            return;
+        }
+        let mut s = d.sound;
+        let mut put = |i: usize, v: i32| {
+            if let Some(p) = crate::params::PARAMS.get(i) {
+                let _ = s.set(p.id, v.max(i32::from(p.min)).min(i32::from(p.max)) as i16);
+            }
+        };
+        let offsets = [Part::AttackOffset, Part::DecayOffset, Part::ReleaseOffset];
+        for (k, &st) in offsets.iter().zip(t.amp.iter()) {
+            put(*k as usize, g(*k as usize).saturating_add(st));
+        }
+        for (op, &st) in t.op_attack.iter().enumerate() {
+            let i = op_index(op, Op::EgTime, 0);
+            put(i, g(i).saturating_add(st));
+        }
+        let n = Prepared::new(&s);
+        if n.ms == d.ms && n.rate_step == d.rate_step {
+            return;
+        }
+        (d.ms, d.rate_step) = (n.ms, n.rate_step);
+        let (p, rate) = (*d, self.rate);
+        for l in self
+            .lanes
+            .iter_mut()
+            .filter(|l| usize::from(l.sound) == sound && l.used != 0)
+        {
+            let used = u32::from(l.used);
+            for s in (0..W).filter(|&s| has(used, s)) {
+                for op in 0..OPS {
+                    let seg = get(&l.seg, op, s);
+                    if (ATTACK..=RELEASE).contains(&seg) {
+                        l.enter(&p, op, s, seg, rate);
+                    }
+                }
+            }
+        }
     }
 
     /// Each sound's held voices (not fading).
@@ -5880,6 +5955,128 @@ mod tests {
         e.set_tempo(60.0);
         start(&mut e);
         assert_eq!(onset(&mut e, 8), Some(698));
+    }
+
+    /// One note of `p` at key 60 with the wheel at `wheel` before it and moved to `(block, value)`
+    /// during it, released at block `off`: `blocks` blocks.
+    fn wheel_play(p: &Prepared, wheel: u8, moves: &[(usize, u8)], off: usize, blocks: usize) -> Vec<f32> {
+        let mut e = engine(p);
+        e.control(0, 1, wheel);
+        e.note_on(0, 1, 60, 100.0, &mut |_| {});
+        let mut x = Vec::new();
+        for b in 0..blocks {
+            for &(_, v) in moves.iter().filter(|m| m.0 == b) {
+                e.control(0, 1, v);
+            }
+            if b == off {
+                e.note_off(0, 1, &mut |_| {});
+            }
+            let mut o = [0.0; BLOCK];
+            e.render1::<Native>(&mut o, &mut |_| {});
+            x.extend_from_slice(&o);
+        }
+        x
+    }
+
+    /// The envelope boxes (95-97, 112) and the voice LFO's filter depth box (92): a full box plays
+    /// the bits of the parameter moved by its steps (the release offset held at 63); at the wheel's
+    /// 0 a box plays the bits of the sound without it.
+    #[test]
+    fn envelope_and_filter_depth_boxes() {
+        let env = "op1.level=99 op1.eg_level_decay1=90 op1.eg_level_decay2=80 op1.eg_time_attack=40 \
+                   op1.eg_time_decay1=40 op1.eg_time_decay2=40 op1.eg_time_release=40";
+        let lfo = "lfo_wave=3 lfo_speed=40";
+        let filt = "filter_type=7 cutoff=512 resonance=0";
+        let s = |part: &str, boxes: &str, op: &str| sound(&format!("algorithm=1 {part} {boxes}\n{op}\nop8.level=0"));
+        let same = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        let cases = [
+            (
+                "",
+                "box1_dst=95 box1_ratio=16",
+                127,
+                "amp_eg_attack_offset=16",
+                env.to_string(),
+                "",
+            ),
+            (
+                "",
+                "box1_dst=96 box1_ratio=64",
+                64,
+                "amp_eg_decay_offset=32",
+                env.to_string(),
+                "",
+            ),
+            (
+                "",
+                "box1_dst=97 box1_ratio=64",
+                127,
+                "amp_eg_release_offset=63",
+                env.to_string(),
+                "",
+            ),
+            (
+                "",
+                "box1_dst=97 box1_ratio=-64",
+                127,
+                "amp_eg_release_offset=-64",
+                env.to_string(),
+                "",
+            ),
+            (
+                "",
+                "box1_dst=112 box1_ratio=16",
+                127,
+                "",
+                env.replace("attack=40", "attack=64"),
+                "",
+            ),
+            (
+                lfo,
+                "box1_dst=92 box1_ratio=16",
+                127,
+                "lfo_filter_depth=25",
+                env.to_string(),
+                filt,
+            ),
+        ];
+        for (pre, boxes, wheel, moved, op, post) in cases {
+            let boxed = wheel_play(&s(&format!("{pre} {post}"), boxes, env), wheel, &[], 150, 300);
+            let want = wheel_play(&s(&format!("{pre} {moved} {post}"), "", &op), 0, &[], 150, 300);
+            assert!(peak_db(&want) > -60.0 && same(&boxed, &want), "{boxes} at {wheel}");
+            let rest = wheel_play(&s(&format!("{pre} {post}"), boxes, env), 0, &[], 150, 300);
+            let none = wheel_play(&s(&format!("{pre} {post}"), "", env), 0, &[], 150, 300);
+            assert!(same(&rest, &none), "{boxes} at rest");
+        }
+    }
+
+    /// The part's envelope offsets move a segment under way (measured): the wheel moved during the
+    /// attack (95) or after the note-off (97) leaves the output as it was up to the move, then the
+    /// segment goes on from its level at the new rate (slower: quieter in the attack, louder in the
+    /// release), without a jump.
+    #[test]
+    fn envelope_boxes_move_a_segment_under_way() {
+        let env = "op1.level=99 op1.eg_level_decay1=90 op1.eg_level_decay2=80 op1.eg_time_attack=40 \
+                   op1.eg_time_decay1=40 op1.eg_time_decay2=40 op1.eg_time_release=40";
+        let p = |boxes: &str| sound(&format!("algorithm=1 {boxes}\n{env}\nop8.level=0"));
+        let blk = |x: &[f32], b: usize| peak_db(&x[b * BLOCK..(b + 1) * BLOCK]);
+        // the attack (about 28 blocks at time 40): moved at block 8
+        let still = wheel_play(&p("box1_dst=95 box1_ratio=64"), 0, &[], 200, 260);
+        let moved = wheel_play(&p("box1_dst=95 box1_ratio=64"), 0, &[(8, 127)], 200, 260);
+        assert!(still[..8 * BLOCK]
+            .iter()
+            .zip(&moved)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!((blk(&moved, 8) - blk(&moved, 7)).abs() < 3.0, "no jump");
+        assert!(blk(&moved, 40) < blk(&still, 40) - 10.0, "the attack goes on slower");
+        // the release: moved 10 blocks after the note-off
+        let still = wheel_play(&p("box1_dst=97 box1_ratio=64"), 0, &[], 100, 200);
+        let moved = wheel_play(&p("box1_dst=97 box1_ratio=64"), 0, &[(110, 127)], 100, 200);
+        assert!(still[..110 * BLOCK]
+            .iter()
+            .zip(&moved)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!((blk(&moved, 110) - blk(&moved, 109)).abs() < 3.0, "no jump");
+        assert!(blk(&moved, 150) > blk(&still, 150) + 10.0, "the release goes on slower");
     }
 
     /// The same bits on every target and back end (checked on every CI target), sines and forms.

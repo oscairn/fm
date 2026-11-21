@@ -97,9 +97,11 @@ fn at(a: &[f32; 17], i: usize) -> f32 {
 
 /// What a box moves: an operator's level (the reference's destination 106, the operators whose
 /// switch for the box is on), the filter's cutoff (102) or resonance (103), the voice LFO's speed
-/// (89, its normal range), pitch depth (90) or amplitude depth (91), the sound's pitch (54), an
-/// operator's frequency (105, the operators whose switch for the box is on, by their pitch
-/// controller sensitivity).
+/// (89, its normal range), pitch depth (90), amplitude depth (91) or filter depth (92), the sound's
+/// pitch (54), an operator's frequency (105, the operators whose switch for the box is on, by their
+/// pitch controller sensitivity), the part's amplitude envelope attack (95), decay 1 and 2 (96)
+/// and release (97) offsets, an operator's attack time (112, the operators whose switch for the box
+/// is on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dest {
     Level,
@@ -108,8 +110,13 @@ pub enum Dest {
     LfoSpeed,
     LfoPitch,
     LfoAmp,
+    LfoFilter,
     Pitch,
     OpPitch,
+    AmpAttack,
+    AmpDecay,
+    AmpRelease,
+    OpAttack,
 }
 
 impl Dest {
@@ -122,6 +129,11 @@ impl Dest {
             89 => Some(Dest::LfoSpeed),
             90 => Some(Dest::LfoPitch),
             91 => Some(Dest::LfoAmp),
+            92 => Some(Dest::LfoFilter),
+            95 => Some(Dest::AmpAttack),
+            96 => Some(Dest::AmpDecay),
+            97 => Some(Dest::AmpRelease),
+            112 => Some(Dest::OpAttack),
             54 => Some(Dest::Pitch),
             _ => None,
         }
@@ -132,15 +144,19 @@ impl Dest {
     /// part's resonance, the same raw scale; not measured on this part type); the voice LFO's
     /// speed and depths 100 of their 0-99 values, the pitch 8192 cents, an operator's frequency
     /// 3600 cents at sensitivity +7 (measured on this part type; the pitches up to a quarter of
-    /// a full box).
+    /// a full box); the voice LFO's filter depth 100 (measured on this part type at 12 and 25 steps;
+    /// 96 not excluded); the part's envelope offsets 64 (measured: 8, 16, 32 and 63 steps); an
+    /// operator's attack time 96 (measured at 12 and 24 steps, within 5 % of the time's law).
     pub fn span(self) -> i32 {
         match self {
             Dest::Level => 96,
             Dest::Cutoff => 1024,
             Dest::Resonance => 128,
-            Dest::LfoSpeed | Dest::LfoPitch | Dest::LfoAmp => 100,
+            Dest::LfoSpeed | Dest::LfoPitch | Dest::LfoAmp | Dest::LfoFilter => 100,
             Dest::Pitch => 8192,
             Dest::OpPitch => 3600,
+            Dest::AmpAttack | Dest::AmpDecay | Dest::AmpRelease => 64,
+            Dest::OpAttack => 96,
         }
     }
 }
@@ -160,6 +176,7 @@ pub struct Box {
 impl Box {
     /// Box `n` of `s`, if the engine plays it (a destination it has, a source it receives, a
     /// ratio), and why not otherwise (`None`: switched off or no ratio).
+    #[inline(always)] // (read for every box at each controller event: kept inlined as before 0.6.3)
     fn read(s: &Sound, n: usize) -> Result<Box, Option<&'static str>> {
         let g = |k: usize| s.get(BOX_BASE.wrapping_add(BOX_FIELDS.wrapping_mul(n)).wrapping_add(k));
         let (src, dst, ratio) = (g(0), g(1), g(2));
@@ -203,7 +220,7 @@ impl Box {
 
     /// Whether it reaches operator `op` (that operator's switch for it).
     pub fn reaches(&self, s: &Sound, op: usize) -> bool {
-        matches!(self.dest, Dest::Level | Dest::OpPitch) && s.get(ctrl_set_index(op, self.n)) != 0
+        matches!(self.dest, Dest::Level | Dest::OpPitch | Dest::OpAttack) && s.get(ctrl_set_index(op, self.n)) != 0
     }
 }
 
@@ -235,14 +252,19 @@ pub struct Steps {
     pub lfo_speed: i32,
     pub lfo_pitch: i32,
     pub lfo_amp: i32,
+    pub lfo_filter: i32,
     /// Cents: the sound's, and each operator's at sensitivity +7.
     pub pitch: i32,
     pub op_pitch: [i32; OPS],
+    /// The part's amplitude envelope attack, decay and release offsets; each operator's attack time.
+    pub amp: [i32; 3],
+    pub op_attack: [i32; OPS],
 }
 
 pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     let mut t = Steps::default();
-    for b in boxes(s) {
+    // (a loop, not `boxes`, so that each box's read stays inlined here: this runs at every event)
+    for b in (0..BOXES).filter_map(|n| Box::read(s, n).ok()) {
         let k = b.steps(src.get(b.src).copied().unwrap_or(0.0));
         let add = |x: &mut i32| *x = x.saturating_add(k);
         match b.dest {
@@ -251,12 +273,16 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
             Dest::LfoSpeed => add(&mut t.lfo_speed),
             Dest::LfoPitch => add(&mut t.lfo_pitch),
             Dest::LfoAmp => add(&mut t.lfo_amp),
+            Dest::LfoFilter => add(&mut t.lfo_filter),
             Dest::Pitch => add(&mut t.pitch),
-            Dest::Level | Dest::OpPitch => {
-                let ops = if b.dest == Dest::Level {
-                    &mut t.level
-                } else {
-                    &mut t.op_pitch
+            Dest::AmpAttack => add(&mut t.amp[0]),
+            Dest::AmpDecay => add(&mut t.amp[1]),
+            Dest::AmpRelease => add(&mut t.amp[2]),
+            Dest::Level | Dest::OpPitch | Dest::OpAttack => {
+                let ops = match b.dest {
+                    Dest::Level => &mut t.level,
+                    Dest::OpPitch => &mut t.op_pitch,
+                    _ => &mut t.op_attack,
                 };
                 for (op, l) in ops.iter_mut().enumerate() {
                     if b.reaches(s, op) {
@@ -274,6 +300,9 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     t.lfo_speed = clamp(t.lfo_speed, Dest::LfoSpeed);
     t.lfo_pitch = clamp(t.lfo_pitch, Dest::LfoPitch);
     t.lfo_amp = clamp(t.lfo_amp, Dest::LfoAmp);
+    t.lfo_filter = clamp(t.lfo_filter, Dest::LfoFilter);
+    t.amp = t.amp.map(|x| clamp(x, Dest::AmpAttack));
+    t.op_attack = t.op_attack.map(|x| clamp(x, Dest::OpAttack));
     t.pitch = clamp(t.pitch, Dest::Pitch);
     t
 }
@@ -437,6 +466,32 @@ mod tests {
             let got = laws::carrier_level_db(99 + t.level[0]) - laws::carrier_level_db(99);
             assert!((got - db).abs() < within, "{v}: {got} against {db}");
         }
+    }
+
+    /// The envelope boxes and the voice LFO's filter depth, measured on the reference: the part's
+    /// attack (95), decay (96) and release (97) offsets 64 steps a full box (8, 16, 32 and 63 read
+    /// from the wheel at 64 and 127 with ratios 16 and 64); an operator's attack time (112) 96 (12
+    /// and 24, the operators whose switch is on); the filter depth (92) 100 (12 and 25).
+    #[test]
+    fn envelope_and_filter_depth_boxes_measured() {
+        assert_eq!(
+            [one(95, 16, 64, "").amp, one(95, 16, 127, "").amp],
+            [[8, 0, 0], [16, 0, 0]]
+        );
+        assert_eq!(
+            [one(96, 64, 64, "").amp, one(97, 64, 127, "").amp],
+            [[0, 32, 0], [0, 0, 64]]
+        );
+        assert_eq!(one(97, -64, 127, "").amp, [0, 0, -64]);
+        let t = one(112, 16, 127, "op2.ctrl_set1=0");
+        assert_eq!(
+            (t.op_attack[0], t.op_attack[1], one(112, 16, 64, "").op_attack[0]),
+            (24, 0, 12)
+        );
+        assert_eq!(
+            [one(92, 16, 64, "").lfo_filter, one(92, 16, 127, "").lfo_filter],
+            [12, 25]
+        );
     }
 
     #[test]
