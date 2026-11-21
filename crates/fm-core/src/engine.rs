@@ -1422,7 +1422,7 @@ pub struct Engine {
 /// that it lies beside the rendering's data, not among it): the latest note-on's serial, whole (the
 /// engine's `age` is its low half); each lane's voices' records ([`Born`]); each sound's voices
 /// [`Engine::importance`] listed, least important first (the first `listed_n`), given up first at
-/// the next block's start past a limit. And the host's tempo (quarter notes a minute), which only
+/// the next block's start past a limit and for a new note at a limit. And the host's tempo (quarter notes a minute), which only
 /// a note-on reads (a key-on delay's note length), here so that it moves none of the rendering's
 /// data.
 struct Budget {
@@ -2400,16 +2400,13 @@ impl Engine {
     /// `incoming` (or none), from sound `only` alone when given: never a voice [`Engine::kept`]
     /// keeps; by tier (released or below -60 dBFS unless struck under 50 ms ago, then held only by
     /// a pedal, then key held); the new note's own sound before others; lower priority before
-    /// higher; then [`Rank`]'s order. With none incoming (a block's start, past a limit) the voices
-    /// [`Engine::importance`] listed go first, in its order, each while it is still the same note.
-    /// Whether one was found.
+    /// higher; then [`Rank`]'s order. Before that order, both at a block's start past a limit and
+    /// for a new note, the voices the last [`Engine::importance`] listed go first, in its order,
+    /// each while it is still the same note (with no report ever made, none is listed). Whether one
+    /// was found.
     fn shed(&mut self, incoming: Option<u8>, only: Option<u8>) -> bool {
         let held = self.held();
-        let best = match incoming {
-            None => self.listed(&held, only),
-            Some(_) => None,
-        };
-        let best = best.or_else(|| self.victim(&held, incoming, only));
+        let best = self.listed(&held, only).or_else(|| self.victim(&held, incoming, only));
         let Some((li, s)) = best else { return false };
         if let Some(l) = self.lanes.get_mut(li) {
             l.ending |= bit(s);
@@ -2441,7 +2438,9 @@ impl Engine {
     }
 
     /// The first voice the last [`Engine::importance`] listed that still sounds in its lane as the
-    /// same note (its serial) and that [`Engine::kept`] does not keep now, from sound `only` alone
+    /// same note (its serial) and that [`Engine::kept`] does not keep now with no note incoming
+    /// (which keeps every voice it keeps for any incoming note, so a voice handed over here is
+    /// one [`Engine::victim`] could give up too; a listed voice kept now is skipped), from sound `only` alone
     /// when given: a sound's in its listed order, across sounds the first of each by tier, then
     /// priority, then [`Rank`]'s order (as listed). Its lane and slot.
     fn listed(&self, held: &[usize; SOUNDS], only: Option<u8>) -> Option<(usize, usize)> {
@@ -2476,7 +2475,7 @@ impl Engine {
     /// least important ones, least important first, by the order [`Engine::shed`] gives voices up
     /// in with no note incoming (those [`Engine::kept`] keeps left out; past its reserve, only the
     /// held voices beyond it). One pass over the voices, no sorting; the lists are kept, so that a
-    /// limit lowered before the next block gives up those voices first.
+    /// limit lowered before the next block, or a new note at a limit, gives up those voices first.
     pub fn importance(&mut self, mut f: impl FnMut(u8, u16, &[Rank])) {
         let held = self.held();
         let mut voices = [0u16; SOUNDS];
@@ -5255,6 +5254,30 @@ mod tests {
         let (ends, listed, _) = first_n(LEAST + 2, &|_, _| {});
         assert_eq!(listed, (0..LEAST as u32).collect::<Vec<_>>());
         assert_eq!(ends, (0..LEAST as u32 + 2).collect::<Vec<_>>());
+    }
+
+    /// At the limit, a new note gives up the first voice the last report listed (the order alone
+    /// would take a released note); with no report ever made, what the order alone gives up.
+    #[test]
+    fn a_new_note_at_the_limit_gives_up_the_voices_listed_first() {
+        let new_note = |report: bool| {
+            let mut e = held_notes(0..24);
+            let listed = if report { lists(&mut e)[0].2.clone() } else { vec![] };
+            e.note_off(0, 23, &mut |_| {});
+            e.note_off(0, 22, &mut |_| {});
+            let mut lim = [Limits::default(); SOUNDS];
+            lim[0].limit = e.keeping(Some(0)) as u8;
+            e.set_limits(0, &lim);
+            e.note_on(0, 50, 100, 100.0, &mut |_| {});
+            (ending(&e), listed)
+        };
+        let (ends, listed) = new_note(true);
+        assert_eq!((ends, listed[0]), (vec![0], 0), "the first listed, not a released note");
+        assert_eq!(
+            new_note(false).0,
+            vec![22],
+            "the order alone, as before reports were read here"
+        );
     }
 
     #[test]

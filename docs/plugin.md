@@ -171,8 +171,8 @@ new note's own sound, then the lower priority, then a voice struck under 50 ms a
 least audible (its level less a dB a second of age, at most ten), then the oldest (a note-on
 serial). A voice the order never gives up (a held voice of a mono sound, or of a sound at or under
 its reserve) is not listed; past its reserve a sound lists only its held voices beyond it. The
-lists are kept: past a limit at a block's start, the core gives up the voices the last list named
-first, each sound's in its listed order and across sounds the first of each by tier, then priority,
+lists are kept: past a limit at a block's start, and when it makes room for a new note at a limit,
+the core gives up the voices the last list named first (none before a first report), each sound's in its listed order and across sounds the first of each by tier, then priority,
 each only while its lane still holds the same note (its serial: a lane moves its voices into its
 first slots), then by the order.
 

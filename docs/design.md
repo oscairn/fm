@@ -335,7 +335,7 @@ installed by the audio thread by a copy, with no lock.
   after the others; the least audible (its level, the end rule's bound times its fade, note volume
   and expression, in dB, less a dB a second of age up to ten), then the oldest (a note-on serial);
   never a held mono key's voice (M3). The same order lists each sound's 16 least important voices
-  for the voice budget's draft 2, and past a lowered limit those listed go first (`docs/plugin.md`). A note that gets no voice (every
+  for the voice budget's draft 2, and past a lowered limit or for a new note at a limit those listed go first (`docs/plugin.md`). A note that gets no voice (every
   candidate protected, or no free slot while fades are under way) ends at once; every note-on is
   answered by exactly one end (the fuzz test). A sound is installed only while none of its voices
   sounds (`choke` fades them first).
