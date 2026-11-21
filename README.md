@@ -3,7 +3,7 @@
 An eight-operator FM synthesis engine for the Oscairn platform, in Rust: a platform-free DSP core
 and a CLAP shell. Licence: AGPL-3.0-or-later.
 
-**Version 0.6.2 (plugin id `org.oscairn.fm`, shown as "Oscairn FM").
+**Version 0.6.3 (plugin id `org.oscairn.fm`, shown as "Oscairn FM").
 The engine plays the seven operator forms (sine, all harmonics, odd harmonics, resonant, with
 spread and formant) on every routing with the measured level, envelope, feedback, pitch, LFO and
 filter laws, in stereo, and a CLAP plugin exists that builds and loads on macOS, Linux and
