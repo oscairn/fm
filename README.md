@@ -43,10 +43,9 @@ What exists:
 - `crates/fm-clap`: the CLAP plugin `org.oscairn.fm` (`docs/plugin.md`); `tools/load-plugin.py`
   loads a built one as a host would.
 
-What does not exist yet: the controller boxes' destinations other than the operator level and
-frequency, cutoff, resonance, the voice LFO's speed (normal range), pitch and amplitude depths and
-the pitch (reported by `fmbench coverage`), the level controller sensitivity, the key controller
-sets, the soft pedal and portamento switch (ignored), micro tuning, the output high-pass, the sound
+What does not exist yet: the controller box destinations without a measured law (the filter
+envelope's times, an operator's pitch envelope attack and a few others, reported by `fmbench
+coverage`; `docs/coverage.md`, `boxN_dst`), the key controller sets, the soft pedal and portamento switch (ignored), micro tuning, the output high-pass, the sound
 LFO's tempo sync, packaging. See `docs/design.md`, section 7.
 
 ## Build and test

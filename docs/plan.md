@@ -40,7 +40,7 @@ In the personal library, the FM parts' mod-wheel controller boxes: 16 carried in
 | Gap | Performances (stock) | Parts (stock) | Changes the sound | Status |
 |---|---|---|---|---|
 | `key_on_delay_length`: not played | 552 | 1259 | yes | done (0.6.2): played with tempo sync; with tempo sync off (all but 3 of these parts) it changes nothing, and is no longer reported |
-| `boxN_dst`: not played | 407 | 781 | yes | partly done (0.6.3): 92, 95, 96, 97, 104, 107, 108, 109, 111, 112, 113, 114, 115 played (measured); counted again with the engine's report on the stock set's 1450 FM parts read through the converter, the parts with an unplayed destination went from 651 to 205 (Performances 350 to 127); left, by parts: 110 detune (53, references between 4 and 8 steps missing), 53 mono/poly (49), 88 pan (29), 98 filter envelope depth (26), 52 portamento time (19), the sound LFO's speed and depths 56-59 (36), 117 and 116 operator pitch envelope times (17), the others under 10 |
+| `boxN_dst`: not played | 407 | 781 | yes | partly done (0.6.3, 0.6.4): 52, 53, 56-59, 88, 92, 95-98, 104, 107-115, 117 played (measured); counted again with the engine's report on the stock set's 1450 FM parts read through the converter, the parts with an unplayed destination went from 651 to 33 (Performances 350 to 29); left: 100 and 101 the filter envelope's times (15), 116 the operators' pitch envelope attack (5), 93, 94 and 99 (7), and 377-379 (not the engine's: 13) |
 | `op5.level_ctrl_sens`: not played | 41 | 64 | yes | done (0.6.3): the operator level offset boxes' share (measured) |
 | `op7.level_ctrl_sens`: not played | 40 | 62 | yes | done (0.6.3): the operator level offset boxes' share (measured) |
 | `op3.level_ctrl_sens`: not played | 37 | 59 | yes | done (0.6.3): the operator level offset boxes' share (measured) |
@@ -101,7 +101,7 @@ order:
 
 1. Done in 0.6.2: the key-on delay's note length at the host's tempo (`key_on_delay_length`, 552 Performances). The
    sound LFO's tempo sync and tempo speed wait for their law.
-2. The controller box destinations not played yet (`boxN_dst`, 407; 92, 95-97, 104, 107-109 and 111-115 done in 0.6.3; detune
-   (110) needs references between 4 and 8 steps).
+2. The controller box destinations not played yet (`boxN_dst`, 407; 92, 95-97, 104, 107-109 and 111-115 done in 0.6.3; 52,
+   53, 56-59, 88, 98, 110 and 117 in 0.6.4).
 3. The operator level controller sensitivities (`opN.level_ctrl_sens`, 15 to 41 per operator).
 4. The key controller sets (`opN.key_ctrl_setN`) and the sound LFO's other destinations.

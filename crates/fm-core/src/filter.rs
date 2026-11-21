@@ -389,6 +389,7 @@ pub struct Laws {
     scaling: i8,
     random: u8,
     slfo_pan: f32,
+    box_pan: i8,
 }
 
 /// What a note keeps of the filter: the cutoff's ratio (key follow, velocity, scaling), the
@@ -473,9 +474,14 @@ impl Laws {
             scaling: g(Common::ScalingPan as usize).clamp(-64, 63) as i8,
             random: g(Common::RandomPan as usize).clamp(0, 127) as u8,
             slfo_pan: pan_d as f32,
+            box_pan: 0,
         };
         l.hz = l.cutoffs(0.0);
-        l.pan_on = l.alternate != 0 || l.scaling != 0 || l.random != 0 || l.slfo_pan != 0.0;
+        l.pan_on = l.alternate != 0
+            || l.scaling != 0
+            || l.random != 0
+            || l.slfo_pan != 0.0
+            || crate::boxes::moves(s, crate::boxes::Dest::Pan);
         l
     }
 
@@ -497,6 +503,24 @@ impl Laws {
     /// Whether the voice LFO could move the cutoff (at a depth above 0).
     pub fn lfo_route(&self) -> bool {
         self.on && self.kind != Kind::Thru
+    }
+
+    /// The voice LFO's filter depth as octaves (to carry over to laws prepared again), and set.
+    pub fn lfo_oct(&self) -> f32 {
+        self.lfo_oct
+    }
+    pub fn set_lfo_oct(&mut self, oct: f32) {
+        self.lfo_oct = oct;
+    }
+
+    /// The pan positions boxes add.
+    pub fn box_pan(&self) -> i32 {
+        i32::from(self.box_pan)
+    }
+
+    /// Pan positions a controller box adds to every voice's (88), all the time.
+    pub fn set_box_pan(&mut self, positions: i32) {
+        self.box_pan = positions.clamp(-128, 127) as i8;
     }
 
     /// The voice LFO's filter depth 0-99 (a controller box moves it).
@@ -1094,7 +1118,9 @@ impl Voices {
         let n = left.len().min(right.len()).clamp(1, STEP);
         let (mut tl, mut tr) = (self.gl, self.gr);
         for s in 0..L {
-            let (l, r) = pan_gains(laws::round(f64::from(at(&self.pos, s) + sv * f.slfo_pan)));
+            let (l, r) = pan_gains(laws::round(f64::from(
+                at(&self.pos, s) + sv * f.slfo_pan + f32::from(f.box_pan),
+            )));
             put(&mut tl, s, l);
             put(&mut tr, s, r);
         }

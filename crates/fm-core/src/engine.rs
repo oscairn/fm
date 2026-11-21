@@ -284,9 +284,11 @@ pub struct Prepared {
     /// Key-on delay, ms (0: none; with tempo sync its note length is read at the note).
     delay_ms: f32,
     /// Each operator's level (with the depth macro) and the level it is prepared at (the top its
-    /// controller boxes reach); whether the sound has a box the engine plays, one on an envelope's
-    /// time ([`Engine::retime`]), one on the voice LFO's filter depth, one on what the kernels play
-    /// (the feedback, an operator's form, skirt or resonance: [`kern`]).
+    /// controller boxes reach); whether the sound has a box the engine plays, one on a value the
+    /// sound is prepared again for ([`Engine::retime`]: an envelope's time, the filter envelope's
+    /// depth, the sound LFO's speed and depths), one on the voice LFO's filter depth, one on a value
+    /// read as it is ([`kern`]: the feedback, an operator's form, skirt, resonance and detune,
+    /// mono/poly, the portamento time, pan).
     levels: [(u8, u8); OPS],
     boxed: bool,
     env_box: bool,
@@ -298,8 +300,8 @@ pub struct Prepared {
     op_sens: [f32; OPS],
 }
 
-/// The box destinations on an envelope's time.
-const ENV_DESTS: [boxes::Dest; 7] = [
+/// The box destinations the sound is prepared again for.
+const ENV_DESTS: [boxes::Dest; 13] = [
     boxes::Dest::AmpAttack,
     boxes::Dest::AmpDecay,
     boxes::Dest::AmpRelease,
@@ -307,14 +309,24 @@ const ENV_DESTS: [boxes::Dest; 7] = [
     boxes::Dest::OpDecay1,
     boxes::Dest::OpDecay2,
     boxes::Dest::OpRelease,
+    boxes::Dest::OpPegDecay,
+    boxes::Dest::FegDepth,
+    boxes::Dest::SlfoSpeed,
+    boxes::Dest::SlfoDepth1,
+    boxes::Dest::SlfoDepth2,
+    boxes::Dest::SlfoDepth3,
 ];
 
-/// The box destinations on what the kernels play.
-const KERN_DESTS: [boxes::Dest; 4] = [
+/// The box destinations read as they are.
+const KERN_DESTS: [boxes::Dest; 8] = [
     boxes::Dest::Feedback,
     boxes::Dest::OpForm,
     boxes::Dest::OpSpread,
     boxes::Dest::OpFormant,
+    boxes::Dest::OpDetune,
+    boxes::Dest::MonoPoly,
+    boxes::Dest::PortaTime,
+    boxes::Dest::Pan,
 ];
 
 /// The sources the boxes of `p` read: the sound's own (knobs, ribbon, switches), the bend `b` and
@@ -331,13 +343,32 @@ fn sources(p: &Prepared, c: &[u8; CTLS], b: i16) -> [f32; SOURCES] {
     src
 }
 
-/// What the kernels of `p` play moved by its boxes `t`: the feedback (whole steps within 0-7) and
-/// each operator's form (0-6), skirt (0-7) and resonance (0-99), read all the time (measured on
-/// the form and the skirt: a move during a note changes them at once). Nothing without such boxes.
+/// The values of `p` its boxes `t` move as they are: what the kernels play, the feedback (whole
+/// steps within 0-7) and each operator's form (0-6), skirt (0-7) and resonance (0-99), all the time
+/// (measured); each operator's detune (within -15..+15; [`Engine::retime`] moves sounding voices:
+/// measured); mono/poly (read at a note-on: measured); the portamento time (within 0-127; a glide
+/// under way follows it: measured); pan positions (all the time: measured). Nothing without such
+/// boxes.
 fn kern(p: &mut Prepared, t: &boxes::Steps) {
     if !p.kern_box {
         return;
     }
+    let g = |i: usize| i32::from(p.sound.get(i));
+    p.mono = g(Part::MonoPoly as usize)
+        .clamp(0, 1)
+        .saturating_add(t.mono_poly)
+        .clamp(0, 1)
+        == 0;
+    p.porta_time = g(Part::PortamentoTime as usize)
+        .saturating_add(t.porta_time)
+        .clamp(0, 127) as u8;
+    for op in 0..OPS {
+        let v = g(op_index(op, Op::Detune, 0)).saturating_add(t.op_detune.get(op).copied().unwrap_or(0));
+        if let Some(d) = p.detune.get_mut(op) {
+            *d = v.clamp(-15, 15) as i8;
+        }
+    }
+    p.filter.set_box_pan(t.pan);
     let fb = i32::from(p.sound.get(Common::Feedback as usize))
         .clamp(0, 7)
         .saturating_add(t.feedback)
@@ -2196,13 +2227,10 @@ impl Engine {
         let Some(p) = self.sounds.get(sound).copied() else {
             return;
         };
-        if p.mono {
-            let (Some(keys), Some(n)) = (self.keys.get_mut(sound), self.keys_n.get_mut(sound)) else {
-                return;
-            };
+        // a key another took over: its note ends (also after a box turned the sound poly)
+        if let (Some(keys), Some(n)) = (self.keys.get_mut(sound), self.keys_n.get_mut(sound)) {
             let kept = keys.get(..usize::from(*n)).unwrap_or(&[]);
             if let Some(i) = kept.iter().position(|h| h.id == id) {
-                // a key another took over: its note ends
                 let h = kept.get(i).copied().unwrap_or_default();
                 remove(keys, i);
                 *n = n.saturating_sub(1);
@@ -2212,6 +2240,11 @@ impl Engine {
                     id,
                 });
             }
+        }
+        if p.mono {
+            let (Some(keys), Some(n)) = (self.keys.get(sound), self.keys_n.get(sound)) else {
+                return;
+            };
             let top = usize::from(*n).checked_sub(1).and_then(|i| keys.get(i)).copied();
             let voice = self.sounding(s8).filter(|&(li, s)| {
                 self.lanes
@@ -2416,11 +2449,13 @@ impl Engine {
         }
     }
 
-    /// What the boxes `t` of `sound` move in its prepared laws: the voice LFO's filter depth, and
-    /// the envelopes' times (the part's attack, decay and release offsets and the operators' attack
-    /// times, within their ranges), the sound prepared again at the moved values and each running
-    /// segment of its voices going on at the new rate from where it is (measured: the part's
-    /// offsets move a segment under way). Nothing for a sound without such boxes.
+    /// What the boxes `t` of `sound` move in its prepared laws: the voice LFO's filter depth; the
+    /// values read as they are ([`kern`]), sounding voices' detune and glides following (measured);
+    /// and, the sound prepared again at the moved values (within their ranges), the envelopes'
+    /// times, the operators' pitch envelope decay time, the filter envelope's depth (read at a
+    /// note-on: measured) and the sound LFO's speed and depths, each running envelope segment going
+    /// on at the new rate from where it is (measured on the part's offsets, an operator's attack
+    /// time and its pitch envelope's decay). Nothing for a sound without such boxes.
     fn retime(&mut self, sound: usize, t: &boxes::Steps) {
         let Some(d) = self.sounds.get_mut(sound) else {
             return;
@@ -2429,33 +2464,65 @@ impl Engine {
             let depth = boxes::lfo_value(d.sound.get(Common::LfoFilterDepth as usize), t.lfo_filter);
             d.filter.set_lfo_depth(depth);
         }
+        let (detune, porta) = (d.detune, d.porta_time);
         kern(d, t);
-        if !d.env_box {
+        let (p, rate) = (*d, self.rate);
+        if p.detune != detune || p.porta_time != porta {
+            self.follow(sound, &p, &detune);
+        }
+        if !p.env_box {
             return;
         }
-        let (mut s, stored) = (d.sound, d.sound);
+        let (mut s, stored) = (p.sound, p.sound);
         let g = |i: usize| i32::from(stored.get(i));
-        let mut put = |i: usize, v: i32| {
-            if let Some(p) = crate::params::PARAMS.get(i) {
-                let _ = s.set(p.id, v.max(i32::from(p.min)).min(i32::from(p.max)) as i16);
+        let mut put = |i: usize, st: i32| {
+            if let Some(q) = crate::params::PARAMS.get(i) {
+                let v = g(i).saturating_add(st);
+                let _ = s.set(q.id, v.max(i32::from(q.min)).min(i32::from(q.max)) as i16);
             }
         };
         let offsets = [Part::AttackOffset, Part::DecayOffset, Part::ReleaseOffset];
         for (k, &st) in offsets.iter().zip(t.amp.iter()) {
-            put(*k as usize, g(*k as usize).saturating_add(st));
+            put(*k as usize, st);
         }
-        for (op, st) in t.op_time.iter().enumerate() {
-            for (k, &st) in st.iter().enumerate() {
-                let i = op_index(op, Op::EgTime, k);
-                put(i, g(i).saturating_add(st));
+        for op in 0..OPS {
+            // (ranges, not `enumerate`, whose counter would be an overflow check)
+            for k in 0..4 {
+                let st = t.op_time.get(op).and_then(|x| x.get(k)).copied().unwrap_or(0);
+                put(op_index(op, Op::EgTime, k), st);
             }
+            put(
+                op_index(op, Op::PegTime, 1),
+                t.op_peg_decay.get(op).copied().unwrap_or(0),
+            );
+        }
+        put(crate::params::Filter::EgDepth as usize, t.feg_depth);
+        put(Part::SlfoSpeed as usize, t.slfo_speed);
+        for k in 0..3 {
+            let st = t.slfo_depth.get(k).copied().unwrap_or(0);
+            put(
+                (Part::SlfoDest as usize).wrapping_add(k.wrapping_mul(2).wrapping_add(1)),
+                st,
+            );
         }
         let n = Prepared::new(&s);
+        let Some(d) = self.sounds.get_mut(sound) else {
+            return;
+        };
+        // the filter's own laws and the sound LFO's, as prepared at the moved values (the filter's
+        // boxed values set again on them)
+        let (oct, pan) = (d.filter.lfo_oct(), d.filter.box_pan());
+        d.filter = n.filter;
+        d.filter.set_lfo_oct(oct);
+        d.filter.set_box_pan(pan);
+        (d.slfo, d.slfo_hz, d.slfo_pitch, d.slfo_detune) = (n.slfo, n.slfo_hz, n.slfo_pitch, n.slfo_detune);
+        (d.slfo_form, d.slfo_amp, d.slfo_fb, d.slfo_speed) = (n.slfo_form, n.slfo_amp, n.slfo_fb, n.slfo_speed);
+        d.opeg = n.opeg;
         if n.ms == d.ms && n.rate_step == d.rate_step {
             return;
         }
         (d.ms, d.rate_step) = (n.ms, n.rate_step);
-        let (p, rate) = (*d, self.rate);
+        let p = *d;
         for l in self
             .lanes
             .iter_mut()
@@ -2467,6 +2534,53 @@ impl Engine {
                     let seg = get(&l.seg, op, s);
                     if (ATTACK..=RELEASE).contains(&seg) {
                         l.enter(&p, op, s, seg, rate);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The voices of `sound` follow a detune its boxes moved from `was` (each operator's frequency
+    /// by the detune's steps at the voice's key) and a portamento time they moved (a glide under
+    /// way at the new time's rate for what is left of it).
+    fn follow(&mut self, sound: usize, p: &Prepared, was: &[i8; OPS]) {
+        for l in self
+            .lanes
+            .iter_mut()
+            .filter(|l| usize::from(l.sound) == sound && l.used != 0)
+        {
+            let used = u32::from(l.used);
+            for s in (0..W).filter(|&s| has(used, s)) {
+                let key = i32::from(l.key.get(s).copied().unwrap_or(0)).wrapping_add(i32::from(p.note_shift));
+                for op in 0..OPS {
+                    let (a, b) = (
+                        was.get(op).copied().unwrap_or(0),
+                        p.detune.get(op).copied().unwrap_or(0),
+                    );
+                    if a == b {
+                        continue;
+                    }
+                    let d = laws::detune_steps(i32::from(b), key).wrapping_sub(laws::detune_steps(i32::from(a), key));
+                    let k = laws::exp2(f64::from(d) / 2048.0);
+                    let scale = |x: u32| (f64::from(x) * k).min(f64::from(u32::MAX)) as u32;
+                    let (base, inc) = (scale(get(&l.pt.base, op, s)), scale(get(&l.inc, op, s)));
+                    put(&mut l.pt.base, op, s, base);
+                    put(&mut l.inc, op, s, inc);
+                }
+                let g = l.pt.glide.get(s).copied().unwrap_or(0.0);
+                if g != 0.0 {
+                    let rate = laws::portamento_rate(
+                        i32::from(p.porta_time),
+                        i32::from(p.porta_mode),
+                        f64::from(g.abs()) * 12.0,
+                    );
+                    let step = (rate / 12.0 * laws::GLIDE_TICK_MS / 1000.0) as f32;
+                    if let (Some(gl), Some(st)) = (l.pt.glide.get_mut(s), l.pt.glide_step.get_mut(s)) {
+                        if rate > 0.0 {
+                            *st = step;
+                        } else {
+                            *gl = 0.0;
+                        }
                     }
                 }
             }
@@ -6190,6 +6304,174 @@ mod tests {
         let (still, moved) = (play(&p, 0), wheel_play(&p, 0, &[(40, 127)], 100, 150));
         assert!(same(&still[..40 * BLOCK], &moved[..40 * BLOCK]));
         assert!(!same(&still[41 * BLOCK..60 * BLOCK], &moved[41 * BLOCK..60 * BLOCK]));
+    }
+
+    /// Notes `(block, id, key)` of `p` held to the end, the wheel at `wheel` and moved to
+    /// `(block, value)`: `blocks` stereo blocks, left then right.
+    fn wheel_notes(
+        p: &Prepared,
+        wheel: u8,
+        notes: &[(usize, u32, u8)],
+        moves: &[(usize, u8)],
+        blocks: usize,
+    ) -> Vec<f32> {
+        let mut e = engine(p);
+        e.control(0, 1, wheel);
+        let (mut l, mut r) = (Vec::new(), Vec::new());
+        for b in 0..blocks {
+            for &(_, v) in moves.iter().filter(|m| m.0 == b) {
+                e.control(0, 1, v);
+            }
+            for &(_, id, key) in notes.iter().filter(|n| n.0 == b) {
+                e.note_on(0, id, key, 100.0, &mut |_| {});
+            }
+            let mut o = [[0.0; BLOCK]; 2];
+            e.render::<Native>(&mut o, &mut |_| {});
+            l.extend_from_slice(&o[0]);
+            r.extend_from_slice(&o[1]);
+        }
+        l.extend(r);
+        l
+    }
+
+    /// Round three's boxes in the engine: a full box plays the bits of the parameter it moves
+    /// (detune, the filter envelope's depth, the sound LFO's speed and depth, an operator's pitch
+    /// envelope decay, pan as alternate pan's first note, the portamento time, mono/poly); at the
+    /// wheel's 0 the sound without the box; detune and the portamento time follow a move during the
+    /// note (measured), the filter envelope's depth and mono/poly do not touch a sounding note.
+    #[test]
+    fn round_three_boxes_in_the_engine() {
+        let s = |part: &str, op: &str| sound(&format!("algorithm=1 {part}\nop1.level=99 {op}\nop8.level=0"));
+        let same = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        let one = [(0usize, 1u32, 60u8)];
+        let feg = "filter_type=0 cutoff=200 filter_eg_level_hold=64 filter_eg_level_attack=64 \
+                   filter_eg_level_decay1=64 filter_eg_level_decay2=64 filter_eg_level_release=64";
+        let lfo = "slfo_wave=1 slfo_dest1=75";
+        let peg = "op1.pitch_eg_level_attack=50";
+        let cases = [
+            (
+                "box1_dst=110 box1_ratio=32".to_string(),
+                String::new(),
+                "",
+                "op1.detune=7".to_string(),
+                127,
+            ),
+            (
+                format!("{feg} filter_eg_depth=0 box1_dst=98 box1_ratio=16"),
+                "op1.form=1".into(),
+                "",
+                format!("{feg} filter_eg_depth=16"),
+                127,
+            ),
+            (
+                format!("{lfo} slfo_depth1=40 box1_dst=56 box1_ratio=16"),
+                String::new(),
+                "",
+                format!("{lfo} slfo_speed=48 slfo_depth1=40"),
+                127,
+            ),
+            (
+                format!("{lfo} box1_dst=57 box1_ratio=16"),
+                String::new(),
+                "",
+                format!("{lfo} slfo_depth1=32"),
+                127,
+            ),
+            (
+                "box1_dst=117 box1_ratio=16".into(),
+                format!("{peg} op1.pitch_eg_time_decay=40"),
+                "",
+                format!("{peg} op1.pitch_eg_time_decay=64"),
+                127,
+            ),
+            (
+                "box1_dst=88 box1_ratio=16".into(),
+                String::new(),
+                "",
+                "alternate_pan=32".into(),
+                127,
+            ),
+        ];
+        for (boxed, op, _, want, wheel) in &cases {
+            // (the moved value on the op line when it is an operator's)
+            let (wp, wo) = if want.starts_with("op1.") || want.starts_with(peg) {
+                ("", want.as_str())
+            } else {
+                (want.as_str(), op.as_str())
+            };
+            let got = wheel_notes(&s(boxed, op), *wheel, &one, &[], 120);
+            let w = wheel_notes(&s(wp, wo), 0, &one, &[], 120);
+            assert!(peak_db(&w) > -60.0 && same(&got, &w), "{boxed}");
+            let base: String = boxed
+                .split(' ')
+                .filter(|x| !x.starts_with("box1"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                same(
+                    &wheel_notes(&s(boxed, op), 0, &one, &[], 120),
+                    &wheel_notes(&s(&base, op), 0, &one, &[], 120)
+                ),
+                "{boxed} at rest"
+            );
+        }
+        // detune follows a move during the note; the filter envelope's depth does not
+        let (d, f) = (
+            s("box1_dst=110 box1_ratio=64", ""),
+            s(
+                &format!("{feg} filter_eg_depth=0 box1_dst=98 box1_ratio=64"),
+                "op1.form=1",
+            ),
+        );
+        let (a, b) = (
+            wheel_notes(&d, 0, &one, &[], 80),
+            wheel_notes(&d, 0, &one, &[(40, 127)], 80),
+        );
+        assert!(
+            same(&a[..40 * BLOCK], &b[..40 * BLOCK]) && !same(&a[41 * BLOCK..80 * BLOCK], &b[41 * BLOCK..80 * BLOCK])
+        );
+        assert!(same(
+            &wheel_notes(&f, 0, &one, &[], 80),
+            &wheel_notes(&f, 0, &one, &[(40, 127)], 80)
+        ));
+        // mono/poly: -64 at the top plays as mono; moved while two notes sound it leaves them
+        let two = [(0usize, 1u32, 60u8), (30, 2, 67)];
+        let poly = s("portamento=0 box1_dst=53 box1_ratio=-64", "");
+        assert!(same(
+            &wheel_notes(&poly, 127, &two, &[], 80),
+            &wheel_notes(&s("mono_poly=0 portamento=0", ""), 0, &two, &[], 80)
+        ));
+        assert!(same(
+            &wheel_notes(&poly, 0, &two, &[(50, 127)], 80),
+            &wheel_notes(&poly, 0, &two, &[], 80)
+        ));
+        // the portamento time: mono, full-time glides from key 60 to 72; a full ratio-16 box from
+        // time 20 plays as time 52, and a glide under way follows a move
+        let g = |extra: &str| {
+            s(
+                &format!("mono_poly=0 portamento=1 portamento_time=20 portamento_mode=1 {extra}"),
+                "",
+            )
+        };
+        let glide = [(0usize, 1u32, 60u8), (30, 2, 72)];
+        let w = wheel_notes(
+            &s("mono_poly=0 portamento=1 portamento_time=52 portamento_mode=1", ""),
+            0,
+            &glide,
+            &[],
+            80,
+        );
+        assert!(same(
+            &wheel_notes(&g("box1_dst=52 box1_ratio=16"), 127, &glide, &[], 80),
+            &w
+        ));
+        let (a, b) = (
+            wheel_notes(&g("box1_dst=52 box1_ratio=64"), 0, &glide, &[], 80),
+            wheel_notes(&g("box1_dst=52 box1_ratio=64"), 0, &glide, &[(32, 127)], 80),
+        );
+        assert!(
+            same(&a[..32 * BLOCK], &b[..32 * BLOCK]) && !same(&a[33 * BLOCK..80 * BLOCK], &b[33 * BLOCK..80 * BLOCK])
+        );
     }
 
     /// The part's envelope offsets move a segment under way (measured): the wheel moved during the

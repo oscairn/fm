@@ -126,6 +126,16 @@ pub enum Dest {
     OpDecay1,
     OpDecay2,
     OpRelease,
+    OpDetune,
+    OpPegDecay,
+    MonoPoly,
+    Pan,
+    FegDepth,
+    PortaTime,
+    SlfoSpeed,
+    SlfoDepth1,
+    SlfoDepth2,
+    SlfoDepth3,
 }
 
 impl Dest {
@@ -151,6 +161,16 @@ impl Dest {
             113 => Some(Dest::OpDecay1),
             114 => Some(Dest::OpDecay2),
             115 => Some(Dest::OpRelease),
+            110 => Some(Dest::OpDetune),
+            117 => Some(Dest::OpPegDecay),
+            53 => Some(Dest::MonoPoly),
+            88 => Some(Dest::Pan),
+            98 => Some(Dest::FegDepth),
+            52 => Some(Dest::PortaTime),
+            56 => Some(Dest::SlfoSpeed),
+            57 => Some(Dest::SlfoDepth1),
+            58 => Some(Dest::SlfoDepth2),
+            59 => Some(Dest::SlfoDepth3),
             54 => Some(Dest::Pitch),
             _ => None,
         }
@@ -178,8 +198,13 @@ impl Dest {
             Dest::AmpAttack | Dest::AmpDecay | Dest::AmpRelease => 64,
             Dest::Feedback | Dest::OpSpread => 7,
             Dest::OpForm => 6,
-            Dest::OpFormant | Dest::OpLevelSens => 96,
-            Dest::OpAttack | Dest::OpDecay1 | Dest::OpDecay2 | Dest::OpRelease => 96,
+            Dest::OpLevelSens => 96,
+            Dest::OpFormant => 99,
+            Dest::OpAttack | Dest::OpDecay1 | Dest::OpDecay2 | Dest::OpRelease | Dest::OpPegDecay => 96,
+            Dest::OpDetune => 15,
+            Dest::MonoPoly => 1,
+            Dest::Pan | Dest::PortaTime | Dest::SlfoDepth1 | Dest::SlfoDepth2 | Dest::SlfoDepth3 => 128,
+            Dest::FegDepth | Dest::SlfoSpeed => 64,
         }
     }
 }
@@ -230,6 +255,10 @@ impl Box {
     pub fn steps(&self, c: f32) -> i32 {
         let o = if self.bipolar { 512.0 } else { 1024.0 };
         let out = ((curve_at(self.curve, c) + o - 1024.0) * self.ratio / 8.0).clamp(-8192.0, 8192.0);
+        if self.dest == Dest::MonoPoly {
+            // a switch: it turns past half an output either way (measured: 4096 does not, 4160 does)
+            return i32::from(out > 4096.0).wrapping_sub(i32::from(out < -4096.0));
+        }
         (out * self.dest.span() as f32 / 8192.0) as i32
     }
 
@@ -240,7 +269,8 @@ impl Box {
         if self.dest != Dest::OpLevelSens {
             return k;
         }
-        let sens = i32::from(s.get(op_index(op, Op::LevelCtrlSens, 0))).clamp(-7, 7);
+        // below 0 nothing (measured: a lowering box at -7 and -3 left the level as it was)
+        let sens = i32::from(s.get(op_index(op, Op::LevelCtrlSens, 0))).clamp(0, 7);
         k.saturating_mul(sens) / 7
     }
 
@@ -263,6 +293,8 @@ impl Box {
                 | Dest::OpDecay1
                 | Dest::OpDecay2
                 | Dest::OpRelease
+                | Dest::OpDetune
+                | Dest::OpPegDecay
         )
     }
 }
@@ -305,6 +337,17 @@ pub struct Steps {
     pub feedback: i32,
     pub op_form: [[i32; 3]; OPS],
     pub op_time: [[i32; 4]; OPS],
+    /// Each operator's detune and pitch envelope decay time; mono/poly (a switch: -1, 0, +1), pan
+    /// positions, the filter envelope's depth, the portamento time, the sound LFO's speed and its
+    /// three depths.
+    pub op_detune: [i32; OPS],
+    pub op_peg_decay: [i32; OPS],
+    pub mono_poly: i32,
+    pub pan: i32,
+    pub feg_depth: i32,
+    pub porta_time: i32,
+    pub slfo_speed: i32,
+    pub slfo_depth: [i32; 3],
 }
 
 pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
@@ -325,6 +368,26 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
             Dest::AmpDecay => add(&mut t.amp[1]),
             Dest::AmpRelease => add(&mut t.amp[2]),
             Dest::Feedback => add(&mut t.feedback),
+            Dest::MonoPoly => add(&mut t.mono_poly),
+            Dest::Pan => add(&mut t.pan),
+            Dest::FegDepth => add(&mut t.feg_depth),
+            Dest::PortaTime => add(&mut t.porta_time),
+            Dest::SlfoSpeed => add(&mut t.slfo_speed),
+            Dest::SlfoDepth1 => add(&mut t.slfo_depth[0]),
+            Dest::SlfoDepth2 => add(&mut t.slfo_depth[1]),
+            Dest::SlfoDepth3 => add(&mut t.slfo_depth[2]),
+            Dest::OpDetune | Dest::OpPegDecay => {
+                let ops = if b.dest == Dest::OpDetune {
+                    &mut t.op_detune
+                } else {
+                    &mut t.op_peg_decay
+                };
+                for (op, x) in ops.iter_mut().enumerate() {
+                    if b.reaches(s, op) {
+                        add(x);
+                    }
+                }
+            }
             Dest::Level | Dest::OpPitch => {
                 let ops = if b.dest == Dest::Level {
                     &mut t.level
@@ -378,6 +441,14 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     t.lfo_filter = clamp(t.lfo_filter, Dest::LfoFilter);
     t.amp = t.amp.map(|x| clamp(x, Dest::AmpAttack));
     t.feedback = clamp(t.feedback, Dest::Feedback);
+    t.op_detune = t.op_detune.map(|x| clamp(x, Dest::OpDetune));
+    t.op_peg_decay = t.op_peg_decay.map(|x| clamp(x, Dest::OpPegDecay));
+    t.mono_poly = clamp(t.mono_poly, Dest::MonoPoly);
+    t.pan = clamp(t.pan, Dest::Pan);
+    t.feg_depth = clamp(t.feg_depth, Dest::FegDepth);
+    t.porta_time = clamp(t.porta_time, Dest::PortaTime);
+    t.slfo_speed = clamp(t.slfo_speed, Dest::SlfoSpeed);
+    t.slfo_depth = t.slfo_depth.map(|x| clamp(x, Dest::SlfoDepth1));
     t.op_form = t.op_form.map(|[f, s, n]| {
         [
             clamp(f, Dest::OpForm),
@@ -613,13 +684,59 @@ mod tests {
             );
         }
         let l = |sens: i16| one(111, -32, 127, &format!("op1.level_ctrl_sens={sens}")).level[0];
-        assert_eq!([l(0), l(3), l(7)], [0, -20, -48]);
-        let s = sound("box1_dst=111 box1_ratio=-32 op1.level_ctrl_sens=-7 op2.level_ctrl_sens=7");
+        assert_eq!([l(-7), l(-3), l(0), l(3), l(7)], [0, 0, 0, -20, -48]);
+        let s = sound("box1_dst=111 box1_ratio=32 op1.level_ctrl_sens=7 op2.level_ctrl_sens=-7");
         assert_eq!(
             reach(&s)[..2],
             [48, 0],
             "a raise reaches the top the operator is prepared at"
         );
+    }
+
+    /// Round three's destinations, measured on the reference: detune (110) 15 steps a full box
+    /// (every reading the frequency of one stored value, exactly); mono/poly (53) turning past half
+    /// an output either way (the wheel's 64 does not at ratio -64, 65 does; -16 at the top does
+    /// not); pan (88) 128 positions, the filter envelope's depth (98) 64, the portamento time (52)
+    /// 128, the sound LFO's speed (56) 64 and depths (57-59) 128, an operator's pitch envelope decay
+    /// time (117) 96; the resonance 99 (49 at half a box); the release time 48 at half a box.
+    #[test]
+    fn round_three_boxes_measured() {
+        let t = |d: i16, r: i16, v: u8| one(d, r, v, "");
+        let det = [
+            (16, 127),
+            (32, 127),
+            (48, 127),
+            (16, 64),
+            (32, 64),
+            (64, 64),
+            (-16, 127),
+            (-32, 127),
+        ];
+        assert_eq!(det.map(|(r, v)| t(110, r, v).op_detune[0]), [3, 7, 11, 1, 3, 7, -3, -7]);
+        let mono = [(-64, 64), (-64, 65), (-16, 127), (64, 127), (64, 64)];
+        assert_eq!(mono.map(|(r, v)| t(53, r, v).mono_poly), [0, -1, 0, 1, 0]);
+        let pan = [(16, 64), (16, 127), (32, 127), (-32, 127)];
+        assert_eq!(pan.map(|(r, v)| t(88, r, v).pan), [16, 32, 64, -64]);
+        assert_eq!(pan.map(|(r, v)| t(98, r, v).feg_depth), [8, 16, 32, -32]);
+        assert_eq!(
+            [t(52, 16, 64), t(52, 16, 127), t(52, 64, 64)].map(|x| x.porta_time),
+            [16, 32, 64]
+        );
+        assert_eq!(
+            [t(56, 16, 64), t(56, 16, 127), t(56, 24, 127)].map(|x| x.slfo_speed),
+            [8, 16, 24]
+        );
+        assert_eq!(
+            [t(57, 16, 64), t(57, 16, 127), t(57, 64, 64)].map(|x| x.slfo_depth[0]),
+            [16, 32, 64]
+        );
+        assert_eq!([t(58, 16, 127).slfo_depth[1], t(59, 16, 127).slfo_depth[2]], [32, 32]);
+        assert_eq!([t(117, 16, 64), t(117, 16, 127)].map(|x| x.op_peg_decay[0]), [12, 24]);
+        assert_eq!(
+            [t(109, 16, 64), t(109, 16, 127), t(109, 64, 64)].map(|x| x.op_form[0][2]),
+            [12, 24, 49]
+        );
+        assert_eq!(t(115, 32, 127).op_time[0][3], 48);
     }
 
     #[test]
