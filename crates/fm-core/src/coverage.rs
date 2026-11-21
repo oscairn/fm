@@ -140,9 +140,13 @@ pub fn status(p: &Param) -> &'static str {
 }
 
 /// Calls `f` with each parameter of `s` at a non-default value that the engine does not play,
-/// its value and why, and each sound LFO destination with depth that it does not play.
+/// its value and why, and each sound LFO destination with depth that it does not play. The sound
+/// LFO's note length is not reported with its tempo sync off: then it changes nothing.
 pub fn not_covered(s: &Sound, mut f: impl FnMut(&'static Param, i16, &'static str)) {
     for (p, v) in s.changed() {
+        if p.name == "slfo_tempo_speed" && s.get(Part::SlfoTempoSync as usize) == 0 {
+            continue;
+        }
         let why = status(p);
         if why != PLAYED {
             f(p, v, why);
@@ -232,5 +236,21 @@ mod tests {
         let mut n = 0;
         not_covered(&Sound::default(), |_, _, _| n += 1);
         assert_eq!(n, 0);
+        // the sound LFO's note length only with its tempo sync on; the key-on delay's note length
+        // played either way
+        for (text, want) in [
+            ("key_on_delay_length=8 slfo_tempo_speed=20", vec![]),
+            (
+                "key_on_delay_sync=1 key_on_delay_length=8 slfo_tempo_sync=1 slfo_tempo_speed=20",
+                vec![(217, 1), (218, 20)],
+            ),
+        ] {
+            let mut got = Vec::new();
+            not_covered(
+                &Sound::from_text(&format!("fm-sound/1\n{text}\n")).unwrap(),
+                |p, v, _| got.push((p.id, v)),
+            );
+            assert_eq!(got, want, "{text}");
+        }
     }
 }

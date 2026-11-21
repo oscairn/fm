@@ -430,6 +430,7 @@ pub enum Part {
     SlfoPhase = COMMON.len() as isize + FILTER.len() as isize + 14,
     SlfoWave = COMMON.len() as isize + FILTER.len() as isize + 15,
     SlfoSpeed = COMMON.len() as isize + FILTER.len() as isize + 16,
+    SlfoTempoSync = COMMON.len() as isize + FILTER.len() as isize + 17,
     SlfoTime = COMMON.len() as isize + FILTER.len() as isize + 19, // delay, fade in, hold, fade out
     SlfoKeyOnReset = COMMON.len() as isize + FILTER.len() as isize + 23,
     SlfoDest = COMMON.len() as isize + FILTER.len() as isize + 24, // destination d at 2 d, its depth after it
@@ -565,6 +566,7 @@ mod tests {
             (Part::SlfoPhase, "slfo_phase"),
             (Part::SlfoWave, "slfo_wave"),
             (Part::SlfoSpeed, "slfo_speed"),
+            (Part::SlfoTempoSync, "slfo_tempo_sync"),
             (Part::SlfoTime, "slfo_delay"),
             (Part::SlfoKeyOnReset, "slfo_key_on_reset"),
             (Part::SlfoDest, "slfo_dest1"),

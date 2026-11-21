@@ -53,7 +53,7 @@ In the personal library, the FM parts' mod-wheel controller boxes: 16 carried in
 | `op1.key_ctrl_set1`: not played | 11 | 26 | yes | open |
 | `op3.key_ctrl_set1`: not played | 11 | 26 | yes | open |
 | `op7.key_ctrl_set1`: not played | 11 | 23 | yes | open |
-| `slfo_tempo_speed`: not played | 11 | 18 | yes | open |
+| `slfo_tempo_speed`: not played | 11 | 18 | yes | open; since 0.6.2 reported only with `slfo_tempo_sync` on (off, it changes nothing) |
 | `op2.key_ctrl_set2`: not played | 10 | 29 | yes | open |
 | `op5.key_ctrl_set2`: not played | 10 | 27 | yes | open |
 | `op8.key_ctrl_set2`: not played | 10 | 27 | yes | open |
