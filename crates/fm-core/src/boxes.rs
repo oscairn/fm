@@ -2,8 +2,8 @@
 //! The controller boxes (the model's controller sets, docs/design.md 3.9): a source through a
 //! curve, polarity and ratio moving a destination by steps of its raw value. The laws are the box
 //! system's, measured on the reference through the sibling engines' parts (the source maps, the
-//! output and its limit, the curves) and through this part type (the operator level's and the
-//! cutoff's spans); a box on any other destination, from a source the host cannot send, or on a
+//! output and its limit) and through this part type (the destinations' spans, the curves: the same
+//! shapes as the sibling engines' measurements, within their precision); a box on any other destination, from a source the host cannot send, or on a
 //! curve not measured is reported by the coverage report (a curve not measured plays as linear).
 
 use crate::params::{ctrl_set_index, op_index, Common, Op, Part, BOX_BASE, BOX_FIELDS, OPS};
@@ -44,55 +44,39 @@ pub fn own(s: &Sound, src: &mut [f32; SOURCES]) {
     }
 }
 
-/// The measured curves: bank, type, parameters 1 and 2 (2 only for type 2), and their value
-/// (0-1024) at 17 knots of the source. Bank 0, type 0, parameter 5 is linear (measured), not here.
-struct Curve {
-    key: (i16, i16, i16, i16),
-    x: [f32; 17],
-    y: [f32; 17],
-}
-
-/// The knots: the mod wheel's 17 measured values, and the analog part's.
-const W17: [f32; 17] = [
-    0., 64., 128., 192., 256., 320., 384., 448., 512., 577., 642., 707., 772.1, 837.1, 902.1, 967.1, 1024.,
-];
-const A17: [f32; 17] = [
-    0., 64., 129., 193., 258., 322., 387., 451., 516., 580., 644., 709., 773., 838., 902., 966., 1023.,
-];
-
-#[rustfmt::skip]
-const CURVES: [Curve; 8] = [
-    Curve { key: (0, 0, 0, 0), x: W17, y: [0., 754., 879., 931., 952., 973., 984., 993., 1004., 1004., 1004., 1015., 1015., 1015., 1024., 1024., 1024.] },
-    Curve { key: (0, 0, 2, 0), x: W17, y: [0., 255., 432., 545., 640., 713., 765., 816., 858., 889., 910., 942., 962., 984., 993., 1015., 1024.] },
-    Curve { key: (0, 0, 8, 0), x: W17, y: [0., 16., 26., 47., 68., 88., 109., 140., 172., 213., 255., 317., 390., 484., 609., 796., 1024.] },
-    Curve { key: (0, 0, 6, 0), x: A17, y: [0., 33., 71., 118., 156., 204., 261., 308., 365., 431., 497., 573., 649., 734., 829., 924., 1024.] },
-    Curve { key: (0, 0, 9, 0), x: A17, y: [0., 0., 14., 24., 33., 43., 52., 71., 81., 109., 137., 175., 223., 298., 412., 630., 1024.] },
-    Curve { key: (0, 0, 10, 0), x: A17, y: [0., 0., 0., 0., 0., 14., 14., 14., 24., 33., 43., 52., 71., 99., 156., 298., 1024.] },
-    Curve { key: (0, 2, 10, 4), x: A17, y: [0., 0., 0., 0., 0., 0., 0., 0., 33., 156., 280., 412., 526., 659., 791., 914., 1024.] },
-    Curve { key: (0, 2, 0, 4), x: A17, y: [0., 128., 251., 374., 507., 621., 753., 877., 1009., 1024., 1024., 1024., 1024., 1024., 1024., 1024., 1024.] },
-];
-
-/// A box's curve: linear (`Some(None)`), a measured one, or `None` for one not measured.
+/// A box's curve: linear (`Some(None)`, bank 0, type 0, parameter 5: measured), a measured one (its
+/// place in `crate::curves_data::CURVES`), or `None` for one not measured. Parameter 2 counts for
+/// type 2 only.
 fn curve(bank: i16, kind: i16, p1: i16, p2: i16) -> Option<Option<usize>> {
     if (bank, kind, p1) == (0, 0, 5) {
         return Some(None);
     }
     let p2 = if kind == 2 { p2 } else { 0 };
-    CURVES.iter().position(|c| c.key == (bank, kind, p1, p2)).map(Some)
+    if bank != 0 {
+        return None;
+    }
+    crate::curves_data::CURVES
+        .iter()
+        .position(|c| (c.0, c.1, c.2) == (kind, p1, p2))
+        .map(Some)
 }
 
-/// Curve `i` at `c` (0-1024), linear between its knots.
+/// Curve `i` at `c` (0-1024): straight between its values at the wheel's 128 values (at `controller`'s
+/// points).
 fn curve_at(i: Option<usize>, c: f32) -> f32 {
-    let Some(t) = i.and_then(|i| CURVES.get(i)) else {
+    let Some(y) = i.and_then(|i| crate::curves_data::CURVES.get(i)).map(|c| &c.3) else {
         return c;
     };
-    let k = t.x.iter().skip(1).position(|&x| c <= x).unwrap_or(15);
-    let (x0, x1, y0, y1) = (at(&t.x, k), at(&t.x, k + 1), at(&t.y, k), at(&t.y, k + 1));
-    y0 + (y1 - y0) * ((c - x0) / (x1 - x0)).clamp(0.0, 1.0)
-}
-
-fn at(a: &[f32; 17], i: usize) -> f32 {
-    a.get(i).copied().unwrap_or(0.0)
+    // the wheel value at or below c (the controller map's inverse)
+    let t = if c <= 512.0 {
+        c / 8.0
+    } else {
+        64.0 + (c - 512.0) * 63.0 / 512.0
+    };
+    let v = (t.max(0.0) as usize).min(126);
+    let (x0, x1) = (controller(v as u8), controller((v as u8).wrapping_add(1)));
+    let at = |k: usize| f32::from(y.get(k).copied().unwrap_or(0));
+    at(v) + (at(v + 1) - at(v)) * ((c - x0) / (x1 - x0)).clamp(0.0, 1.0)
 }
 
 /// What a box moves: an operator's level (the reference's destination 106, the operators whose
@@ -741,15 +725,79 @@ mod tests {
 
     #[test]
     fn curves_and_what_is_not_played() {
-        // the measured curve (0, 0, 8): 172 at the wheel's 64
-        let s = sound("box1_dst=102 box1_ratio=8 box1_p1=8 box2_dst=55 box2_ratio=8 box3_dst=102 box3_ratio=8 box3_src=20 box4_dst=102 box4_ratio=8 box4_p1=1");
+        // the measured curve (0, 0, 8): 171 at the wheel's 64
+        let s = sound("box1_dst=102 box1_ratio=8 box1_p1=8 box2_dst=55 box2_ratio=8 box3_dst=102 box3_ratio=8 box3_src=20 box4_dst=102 box4_ratio=8 box4_curve=2 box4_p1=3 box4_p2=1");
         let b = boxes(&s).next().unwrap();
-        assert_eq!(b.steps(512.0), (172.0f32 * 8.0 / 8.0 * 1024.0 / 8192.0) as i32);
+        assert_eq!(b.steps(512.0), (171.0f32 * 8.0 / 8.0 * 1024.0 / 8192.0) as i32);
         assert_eq!(curve_at(b.curve, 1024.0), 1024.0);
         assert_eq!(not_played(&s, 0), None);
         assert!(not_played(&s, 1).unwrap().contains("destination"));
         assert!(not_played(&s, 2).unwrap().contains("source"));
-        assert!(not_played(&s, 3).unwrap().contains("curve"));
+        assert!(
+            not_played(&s, 3).unwrap().contains("curve"),
+            "type 2 (3, 1) is not measured"
+        );
         assert_eq!(not_played(&s, 4), None);
+    }
+
+    /// The curves measured on this part type (a box on the sound's pitch at ratio +8, so the cents
+    /// read the curve's value), at some of their 128 points: the standard family's members, a
+    /// two-point curve, a falling one, a peak, a staircase; between the wheel's values straight;
+    /// the knobs' values (0-1024) read the same table. The curves the sibling engines measured agree
+    /// with theirs within their stated 5 of 1024.
+    #[test]
+    fn curves_measured() {
+        let at = |kind: i16, p1: i16, p2: i16, v: u8| curve_at(curve(0, kind, p1, p2).flatten(), controller(v));
+        assert_eq!([0, 32, 64, 96].map(|v| at(0, 8, 0, v)), [0.0, 64.0, 171.0, 390.0]);
+        assert_eq!([8, 64, 120].map(|v| at(0, 1, 0, v)), [433.0, 939.0, 1019.0]);
+        assert_eq!([56, 64, 72, 127].map(|v| at(2, 6, 1, v)), [0.0, 128.0, 384.0, 1024.0]);
+        assert_eq!([8, 32, 127].map(|v| at(3, 1, 0, v)), [-367.0, -1024.0, -1024.0]);
+        assert_eq!([0, 64, 120].map(|v| at(10, 0, 0, v)), [0.0, 1024.0, 103.0]);
+        assert_eq!([16, 31, 32].map(|v| at(18, 4, 0, v)), [341.0, 341.0, 541.0]);
+        assert_eq!(at(17, 0, 0, 100), 0.0);
+        // halfway between the wheel's 64 and 65 (c 512 and 520)
+        let i = curve(0, 0, 8, 0).flatten();
+        assert_eq!(curve_at(i, 516.0), (curve_at(i, 512.0) + curve_at(i, 520.0)) / 2.0);
+        // the sibling engines' tables, at the wheel's 0, 8, ..., 120 (their 127 is 1024 too)
+        let theirs: [(i16, i16, i16, [f32; 16]); 3] = [
+            (
+                0,
+                2,
+                0,
+                [
+                    0., 255., 432., 545., 640., 713., 765., 816., 858., 889., 910., 942., 962., 984., 993., 1015.,
+                ],
+            ),
+            (
+                0,
+                9,
+                0,
+                [
+                    0., 0., 14., 24., 33., 43., 52., 71., 81., 109., 137., 175., 223., 298., 412., 630.,
+                ],
+            ),
+            (
+                2,
+                10,
+                4,
+                [
+                    0., 0., 0., 0., 0., 0., 0., 0., 33., 156., 280., 412., 526., 659., 791., 914.,
+                ],
+            ),
+        ];
+        for (kind, p1, p2, y) in theirs {
+            for (k, &want) in y.iter().enumerate() {
+                let got = at(kind, p1, p2, 8 * k as u8);
+                assert!(
+                    (got - want).abs() <= 7.0,
+                    "({kind}, {p1}, {p2}) at {}: {got} against {want}",
+                    8 * k
+                );
+            }
+        }
+        // not measured: type 16 (erratic readings), any member of type 2 not probed, other banks
+        assert_eq!(curve(0, 16, 9, 0), None);
+        assert_eq!(curve(0, 2, 3, 1), None);
+        assert_eq!(curve(1, 0, 8, 0), None);
     }
 }

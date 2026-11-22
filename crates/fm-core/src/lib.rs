@@ -10,6 +10,7 @@
 
 pub mod boxes;
 pub mod coverage;
+mod curves_data;
 pub mod engine;
 pub mod filter;
 pub mod forms;
