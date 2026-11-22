@@ -250,7 +250,8 @@ impl Box {
     }
 
     /// Operator `op`'s share of its `k` steps: all of them, but on the level by the level controller
-    /// sensitivity (111): k x sens / 7 toward zero (measured: at +3 and +7, none at 0).
+    /// sensitivity (111): a lowering k x sens / 7 toward zero (measured: at +3 and +7, none at 0),
+    /// a raising none (measured: +24 steps at +7 and +3 left the level as it was).
     #[inline(always)]
     fn share(&self, s: &Sound, op: usize, k: i32) -> i32 {
         if self.dest != Dest::OpLevelSens {
@@ -258,7 +259,7 @@ impl Box {
         }
         // below 0 nothing (measured: a lowering box at -7 and -3 left the level as it was)
         let sens = i32::from(s.get(op_index(op, Op::LevelCtrlSens, 0))).clamp(0, 7);
-        k.saturating_mul(sens) / 7
+        k.min(0).saturating_mul(sens) / 7
     }
 
     /// Whether it reaches operator `op` (that operator's switch for it).
@@ -658,8 +659,9 @@ mod tests {
     /// sensitivity, measured on the reference: the feedback (104) 7 steps a full box (every reading
     /// from feedback 0 and 7 matched one stored value's spectrum exactly); the form (107) 6 (ratio 48
     /// at the wheel's top 4, not 5), the skirt (108) 7, the resonance (109) 96 (12 and 24); the decay
-    /// 1, decay 2 (113, 114) and release (115) times 96; 111 moves the level by 96 steps a full box at
-    /// sensitivity +7, sens / 7 of that toward zero (20 at +3), nothing at 0.
+    /// 1, decay 2 (113, 114) and release (115) times 96; 111 lowers the level by 96 steps a full box
+    /// at sensitivity +7, sens / 7 of that toward zero (20 at +3), nothing at 0 or below; it never
+    /// raises it (a +16 box at the wheel's top and at 64, at +7 and +3: the level stayed at 40).
     #[test]
     fn kernel_time_and_level_sensitivity_boxes_measured() {
         let fb = |r: i16, v: u8| one(104, r, v, "").feedback;
@@ -691,12 +693,10 @@ mod tests {
         }
         let l = |sens: i16| one(111, -32, 127, &format!("op1.level_ctrl_sens={sens}")).level[0];
         assert_eq!([l(-7), l(-3), l(0), l(3), l(7)], [0, 0, 0, -20, -48]);
+        let up = |sens: i16, v: u8| one(111, 16, v, &format!("op1.level_ctrl_sens={sens}")).level[0];
+        assert_eq!([up(7, 127), up(3, 127), up(7, 64)], [0, 0, 0]);
         let s = sound("box1_dst=111 box1_ratio=32 op1.level_ctrl_sens=7 op2.level_ctrl_sens=-7");
-        assert_eq!(
-            reach(&s)[..2],
-            [48, 0],
-            "a raise reaches the top the operator is prepared at"
-        );
+        assert_eq!(reach(&s)[..2], [0, 0], "no raise");
     }
 
     /// Round three's destinations, measured on the reference: detune (110) 15 steps a full box
