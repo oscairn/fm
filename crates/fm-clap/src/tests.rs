@@ -428,7 +428,7 @@ fn descriptor_and_every_required_callback() {
         assert_eq!(CStr::from_ptr(d.id), c"org.oscairn.fm");
         assert_eq!(CStr::from_ptr(d.name), c"Oscairn FM");
         assert_eq!(CStr::from_ptr(d.vendor), c"Oscairn");
-        assert_eq!(CStr::from_ptr(d.version), c"0.6.4");
+        assert_eq!(CStr::from_ptr(d.version), c"0.6.5");
         assert!((*f).create_plugin.unwrap()(f, core::ptr::null(), c"org.oscairn.other".as_ptr()).is_null());
     }
     let a = Inst::new();
