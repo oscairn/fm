@@ -113,6 +113,12 @@ pub enum Dest {
     OpRelease,
     OpDetune,
     OpPegDecay,
+    OpPegAttack,
+    PegAttack,
+    PegRelease,
+    FegAttack,
+    FegDecay,
+    FegRelease,
     MonoPoly,
     Pan,
     FegDepth,
@@ -148,6 +154,12 @@ impl Dest {
             115 => Some(Dest::OpRelease),
             110 => Some(Dest::OpDetune),
             117 => Some(Dest::OpPegDecay),
+            116 => Some(Dest::OpPegAttack),
+            93 => Some(Dest::PegAttack),
+            94 => Some(Dest::PegRelease),
+            99 => Some(Dest::FegAttack),
+            100 => Some(Dest::FegDecay),
+            101 => Some(Dest::FegRelease),
             53 => Some(Dest::MonoPoly),
             88 => Some(Dest::Pan),
             98 => Some(Dest::FegDepth),
@@ -188,6 +200,9 @@ impl Dest {
             Dest::OpLevelSens => 96,
             Dest::OpFormant => 99,
             Dest::OpAttack | Dest::OpDecay1 | Dest::OpDecay2 | Dest::OpRelease | Dest::OpPegDecay => 96,
+            Dest::OpPegAttack => 99,
+            Dest::PegAttack | Dest::PegRelease => 100,
+            Dest::FegAttack | Dest::FegDecay | Dest::FegRelease => 128,
             Dest::OpDetune => 15,
             Dest::MonoPoly => 1,
             Dest::Pan | Dest::PortaTime | Dest::SlfoDepth1 | Dest::SlfoDepth2 | Dest::SlfoDepth3 => 128,
@@ -283,6 +298,7 @@ impl Box {
                 | Dest::OpRelease
                 | Dest::OpDetune
                 | Dest::OpPegDecay
+                | Dest::OpPegAttack
         )
     }
 }
@@ -330,6 +346,11 @@ pub struct Steps {
     /// three depths.
     pub op_detune: [i32; OPS],
     pub op_peg_decay: [i32; OPS],
+    /// Each operator's pitch envelope attack time; the common pitch envelope's attack and release
+    /// times; the filter envelope's attack, decay (both) and release times.
+    pub op_peg_attack: [i32; OPS],
+    pub peg_time: [i32; 2],
+    pub feg_time: [i32; 3],
     pub mono_poly: i32,
     pub pan: i32,
     pub feg_depth: i32,
@@ -364,11 +385,16 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
             Dest::SlfoDepth1 => add(&mut t.slfo_depth[0]),
             Dest::SlfoDepth2 => add(&mut t.slfo_depth[1]),
             Dest::SlfoDepth3 => add(&mut t.slfo_depth[2]),
-            Dest::OpDetune | Dest::OpPegDecay => {
-                let ops = if b.dest == Dest::OpDetune {
-                    &mut t.op_detune
-                } else {
-                    &mut t.op_peg_decay
+            Dest::PegAttack => add(&mut t.peg_time[0]),
+            Dest::PegRelease => add(&mut t.peg_time[1]),
+            Dest::FegAttack => add(&mut t.feg_time[0]),
+            Dest::FegDecay => add(&mut t.feg_time[1]),
+            Dest::FegRelease => add(&mut t.feg_time[2]),
+            Dest::OpDetune | Dest::OpPegDecay | Dest::OpPegAttack => {
+                let ops = match b.dest {
+                    Dest::OpDetune => &mut t.op_detune,
+                    Dest::OpPegDecay => &mut t.op_peg_decay,
+                    _ => &mut t.op_peg_attack,
                 };
                 for (op, x) in ops.iter_mut().enumerate() {
                     if b.reaches(s, op) {
@@ -438,6 +464,9 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     t.feedback = clamp(t.feedback, Dest::Feedback);
     t.op_detune = t.op_detune.map(|x| clamp(x, Dest::OpDetune));
     t.op_peg_decay = t.op_peg_decay.map(|x| clamp(x, Dest::OpPegDecay));
+    t.op_peg_attack = t.op_peg_attack.map(|x| clamp(x, Dest::OpPegAttack));
+    t.peg_time = t.peg_time.map(|x| clamp(x, Dest::PegAttack));
+    t.feg_time = t.feg_time.map(|x| clamp(x, Dest::FegAttack));
     t.mono_poly = clamp(t.mono_poly, Dest::MonoPoly);
     t.pan = clamp(t.pan, Dest::Pan);
     t.feg_depth = clamp(t.feg_depth, Dest::FegDepth);
@@ -760,6 +789,33 @@ mod tests {
             "type 2 (1, 1) is not measured"
         );
         assert_eq!(not_played(&s, 4), None);
+    }
+
+    /// The envelope time boxes measured in round five, each box matched to the stored value whose
+    /// take it reproduces: the filter envelope's attack, decay (both decays) and release times
+    /// (99-101) 128 steps a full box within 0-127 (16 and 32 steps from 56, -32 to 24); the common
+    /// pitch envelope's attack and release times (93, 94) 100 within 0-99 (12, 25 and 50 from 40);
+    /// an operator's pitch envelope attack time (116) 99 (12, 24 and 49: 98 not excluded).
+    #[test]
+    fn envelope_time_boxes_measured() {
+        let w = |d: i16, r: i16, v: u8| one(d, r, v, "op1.ctrl_set1=1");
+        for (d, i) in [(99, 0), (100, 1), (101, 2)] {
+            let st = [w(d, 16, 64), w(d, 16, 127), w(d, -16, 127)].map(|t| t.feg_time[i]);
+            assert_eq!(st, [16, 32, -32], "{d}");
+        }
+        for (d, i) in [(93, 0), (94, 1)] {
+            let st = [w(d, 16, 64), w(d, 16, 127), w(d, 32, 127)].map(|t| t.peg_time[i]);
+            assert_eq!(st, [12, 25, 50], "{d}");
+        }
+        let st = [w(116, 16, 64), w(116, 16, 127), w(116, 32, 127)].map(|t| t.op_peg_attack[0]);
+        assert_eq!(st, [12, 24, 49]);
+        for d in [93, 94, 99, 100, 101, 116] {
+            assert_eq!(
+                not_played(&sound(&format!("box1_dst={d} box1_ratio=8")), 0),
+                None,
+                "{d}"
+            );
+        }
     }
 
     /// The curves measured on this part type (a box on the sound's pitch at ratio +8, so the cents

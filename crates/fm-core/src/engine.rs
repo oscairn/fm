@@ -301,7 +301,7 @@ pub struct Prepared {
 }
 
 /// The box destinations the sound is prepared again for.
-const ENV_DESTS: [boxes::Dest; 13] = [
+const ENV_DESTS: [boxes::Dest; 19] = [
     boxes::Dest::AmpAttack,
     boxes::Dest::AmpDecay,
     boxes::Dest::AmpRelease,
@@ -310,6 +310,12 @@ const ENV_DESTS: [boxes::Dest; 13] = [
     boxes::Dest::OpDecay2,
     boxes::Dest::OpRelease,
     boxes::Dest::OpPegDecay,
+    boxes::Dest::OpPegAttack,
+    boxes::Dest::PegAttack,
+    boxes::Dest::PegRelease,
+    boxes::Dest::FegAttack,
+    boxes::Dest::FegDecay,
+    boxes::Dest::FegRelease,
     boxes::Dest::FegDepth,
     boxes::Dest::SlfoSpeed,
     boxes::Dest::SlfoDepth1,
@@ -2512,6 +2518,17 @@ impl Engine {
                 op_index(op, Op::PegTime, 1),
                 t.op_peg_decay.get(op).copied().unwrap_or(0),
             );
+            put(
+                op_index(op, Op::PegTime, 0),
+                t.op_peg_attack.get(op).copied().unwrap_or(0),
+            );
+        }
+        let ([attack, release], [fa, fd, fr]) = (t.peg_time, t.feg_time);
+        put(Common::PegTime as usize, attack);
+        put((Common::PegTime as usize).wrapping_add(3), release);
+        let feg = crate::params::Filter::EgTime as usize;
+        for (k, st) in [(1, fa), (2, fd), (3, fd), (4, fr)] {
+            put(feg.wrapping_add(k), st);
         }
         put(crate::params::Filter::EgDepth as usize, t.feg_depth);
         put(Part::SlfoSpeed as usize, t.slfo_speed);
@@ -2528,13 +2545,26 @@ impl Engine {
         };
         // the filter's own laws and the sound LFO's, as prepared at the moved values (the filter's
         // boxed values set again on them)
-        let (oct, pan) = (d.filter.lfo_oct(), d.filter.box_pan());
+        let (oct, pan, old) = (d.filter.lfo_oct(), d.filter.box_pan(), d.filter);
         d.filter = n.filter;
         d.filter.set_lfo_oct(oct);
         d.filter.set_box_pan(pan);
         (d.slfo, d.slfo_hz, d.slfo_pitch, d.slfo_detune) = (n.slfo, n.slfo_hz, n.slfo_pitch, n.slfo_detune);
         (d.slfo_form, d.slfo_amp, d.slfo_fb, d.slfo_speed) = (n.slfo_form, n.slfo_amp, n.slfo_fb, n.slfo_speed);
-        d.opeg = n.opeg;
+        (d.opeg, d.peg_rate) = (n.opeg, n.peg_rate);
+        // the filter envelopes under way go on at their moved times
+        let feg = [boxes::Dest::FegAttack, boxes::Dest::FegDecay, boxes::Dest::FegRelease];
+        if d.filter.on && boxes::boxes(&d.sound).any(|b| feg.contains(&b.dest)) {
+            let f = d.filter;
+            for l in self.lanes.iter_mut().filter(|l| usize::from(l.sound) == sound) {
+                for s in (0..W).filter(|&s| has(u32::from(l.used), s)) {
+                    l.post.retime(&old, &f, s, rate);
+                }
+            }
+        }
+        let Some(d) = self.sounds.get_mut(sound) else {
+            return;
+        };
         if n.ms == d.ms && n.rate_step == d.rate_step {
             return;
         }

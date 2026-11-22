@@ -907,6 +907,28 @@ impl Voices {
         }
     }
 
+    /// Slot `s`'s envelope goes on from where it is at the segment's duration in `new` (laws moved
+    /// by the controller boxes) instead of `old`: its frames left scaled by the one over the other
+    /// (measured: an attack and a decay under way slow at once when their box moves).
+    pub fn retime(&mut self, old: &Laws, new: &Laws, s: usize, rate: f64) {
+        let seg = self.seg.get(s).copied().unwrap_or(DONE);
+        let (left, k, tv) = (at(&self.left, s), at(&self.kscale, s), at(&self.tv, s));
+        if !(1..DONE).contains(&seg) || left <= 0.0 {
+            return;
+        }
+        let (a, b) = (
+            old.frames(usize::from(seg), k, tv, rate),
+            new.frames(usize::from(seg), k, tv, rate),
+        );
+        if a <= 0.0 || a == b {
+            return;
+        }
+        let left = left * b / a;
+        let target = new.levels.get(usize::from(seg)).copied().unwrap_or(0.0);
+        put(&mut self.left, s, left);
+        put(&mut self.step, s, (target - at(&self.lvl, s)) / left.max(1.0));
+    }
+
     /// Enters envelope segment `i` of slot `s`: its duration, and a move a frame that reaches its
     /// level then (the hold stands still).
     fn enter(&mut self, f: &Laws, s: usize, i: u8, rate: f64) {
@@ -1550,6 +1572,35 @@ mod tests {
         v.start(&k, 0, 60, 100.0, 0.0, true, RATE);
         let half = frames(776.344) / laws::exp2(3.58) / 2.0;
         assert!(near(f64::from(v.advance(&k, 0, half as f32, RATE)), 600.0, 1.0));
+    }
+
+    /// A segment under way whose time a box moves goes on from its level at the moved segment's
+    /// rate (measured on the filter envelope's attack, decay and release boxes: each slowed at once
+    /// when the wheel moved): a decay a quarter of the way down, then four times as long, has its
+    /// other three quarters over four times the frames they had left.
+    #[test]
+    fn envelope_retimed_under_way() {
+        let text = "filter_type=7 filter_eg_level_decay1=-32 filter_eg_level_decay2=-32 filter_eg_depth=63";
+        let (a, b) = (
+            laws(&format!("{text} filter_eg_time_decay1=56")),
+            laws(&format!("{text} filter_eg_time_decay1=72")),
+        );
+        let frames = |ms: f64| ms * RATE / 1000.0;
+        let (d, e) = (frames(feg_segment_ms(56.0)), frames(feg_segment_ms(72.0)));
+        let mut v = VOICES0;
+        v.start(&a, 0, 60, 100.0, 0.0, true, RATE);
+        let at = |v: &mut Voices, l: &Laws, n: f64| f64::from(v.advance(l, 0, n as f32, RATE));
+        assert!(near(at(&mut v, &a, d / 4.0), -2400.0 / 4.0, 1.0));
+        v.retime(&a, &b, 0, RATE);
+        assert!(near(at(&mut v, &b, e * 0.75 / 2.0), -2400.0 * 0.625, 1.0));
+        assert!(near(at(&mut v, &b, e * 0.75 / 2.0), -2400.0, 1.0));
+        // the same laws: nothing moves
+        let mut w = VOICES0;
+        w.start(&a, 0, 60, 100.0, 0.0, true, RATE);
+        at(&mut w, &a, d / 4.0);
+        let before = (w.left, w.step);
+        w.retime(&a, &a, 0, RATE);
+        assert!(before == (w.left, w.step));
     }
 
     /// No parameters, input or LFO values make a non-finite or unbounded output: random types,
