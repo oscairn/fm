@@ -768,8 +768,8 @@ impl Prepared {
                 0
             }
             | if self.filter.uses_slfo() { SLFO_POST } else { 0 };
-        // shortcut: tempo sync and random speed are not played (the coverage report names them)
-        self.slfo_hz = laws::slfo_hz(part(Part::SlfoSpeed, 0)) as f32;
+        // with tempo sync at 120 until the engine sets its host's tempo ([`Engine::sync`])
+        self.slfo_hz = slfo_sync_hz(s, 120.0).unwrap_or(laws::slfo_hz(part(Part::SlfoSpeed, 0)) as f32);
         self.slfo_wave = part(Part::SlfoWave, 0).clamp(0, 12) as u8;
         // phase 0, 90, 120, 180, 240, 270 degrees
         const PHASES: [u32; 6] = [0, 1 << 30, 0x5555_5555, 1 << 31, 0xaaaa_aaab, 3 << 30];
@@ -1765,8 +1765,19 @@ impl Engine {
     /// not a positive number is ignored): a note's key-on delay with tempo sync lasts its note length
     /// at the tempo at its note-on.
     pub fn set_tempo(&mut self, bpm: f64) {
-        if bpm > 0.0 && bpm.is_finite() {
+        if bpm > 0.0 && bpm.is_finite() && bpm != self.budget.tempo {
             self.budget.tempo = bpm;
+            (0..SOUNDS).for_each(|s| self.sync(s));
+        }
+    }
+
+    /// A sound LFO with tempo sync of `sound` at the host's tempo now.
+    fn sync(&mut self, sound: usize) {
+        let tempo = self.budget.tempo;
+        if let Some(d) = self.sounds.get_mut(sound) {
+            if let Some(hz) = slfo_sync_hz(&d.sound, tempo) {
+                d.slfo_hz = hz;
+            }
         }
     }
 
@@ -2452,6 +2463,7 @@ impl Engine {
         if let Some(t) = read {
             self.retime(sound, &t);
         }
+        self.sync(sound);
     }
 
     /// What the boxes `t` of `sound` move in its prepared laws: the voice LFO's filter depth; the
@@ -3130,6 +3142,14 @@ impl Slfo {
             *v = slfo_wave(p, next, self.held) * slfo_env(self.t as f32, &env);
         }
     }
+}
+
+/// The sound LFO's rate with tempo sync, its cycle the tempo speed's note length at `tempo` quarter
+/// notes a minute (measured at 120), or `None` without tempo sync.
+fn slfo_sync_hz(s: &Sound, tempo: f64) -> Option<f32> {
+    let g = |k: usize| i32::from(s.get(k));
+    (g(Part::SlfoTempoSync as usize) != 0)
+        .then(|| (tempo / 60.0 / laws::slfo_cycle_quarters(g((Part::SlfoTempoSync as usize).wrapping_add(1)))) as f32)
 }
 
 /// A uniform value in [-1, 1) from the random source `r`.
@@ -6129,6 +6149,34 @@ mod tests {
         e.set_tempo(60.0);
         start(&mut e);
         assert_eq!(onset(&mut e, 8), Some(698));
+    }
+
+    /// The sound LFO with tempo sync: a cycle of its tempo speed's note length at the host's tempo,
+    /// measured on the reference at 120 (a sixteenth 7.9996 Hz, a quarter 2.0017 Hz, 16 quarters
+    /// 0.1253 Hz); 120 until a tempo is set, again at each tempo the host sets and after a reset;
+    /// without tempo sync the speed's rate.
+    #[test]
+    fn sound_lfo_tempo_sync() {
+        let hz = |e: &Engine| e.sounds.first().map_or(0.0, |d| f64::from(d.slfo_hz));
+        let synced = |v: i32| {
+            carrier(
+                1,
+                &format!("slfo_tempo_sync=1 slfo_tempo_speed={v} slfo_dest1=75 slfo_depth1=40"),
+            )
+        };
+        for (v, measured) in [(5, 7.9996), (11, 2.0017), (22, 0.1253)] {
+            let got = hz(&engine(&synced(v)));
+            assert!((got / measured - 1.0).abs() < 0.011, "{v}: {got} against {measured}");
+        }
+        let mut e = engine(&synced(11));
+        e.set_tempo(90.0);
+        assert_eq!(hz(&e), 1.5);
+        e.reset();
+        assert_eq!(hz(&e), 1.5);
+        assert!(e.set_sound(0, &synced(8)));
+        assert_eq!(hz(&e), 3.0);
+        let free = carrier(1, "slfo_tempo_speed=8 slfo_speed=40 slfo_dest1=75 slfo_depth1=40");
+        assert_eq!(hz(&engine(&free)), f64::from(laws::slfo_hz(40) as f32));
     }
 
     /// One note of `p` at key 60 with the wheel at `wheel` before it and moved to `(block, value)`

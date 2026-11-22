@@ -18,7 +18,7 @@ sound format: [sound-format.md](sound-format.md); differences from the reference
 | Operators | eight operators, the seven operator forms (sine, all harmonics, odd harmonics, resonant, with spread and formant), the 88 routings, feedback, level and envelope laws, level scaling | the level controller sensitivity |
 | Pitch | ratio and fixed frequencies, the operator and common pitch envelopes, key follow, velocity, random pitch, detune, bend, portamento, mono and key assign | micro tuning |
 | Filter | the filter types with the filter envelope | the output high-pass |
-| LFOs | the voice LFO; the sound LFO with all waves, destinations and the user wave | the sound LFO's tempo sync (not measured) and random speed |
+| LFOs | the voice LFO; the sound LFO with all waves, destinations, the user wave and tempo sync | the sound LFO's random speed (measured, its law not resolved) |
 | Modulation | the seven macros; the channel controllers and note volume; controller boxes on the operator level and frequency, cutoff, resonance, the voice LFO's speed and depths, and the pitch | the other box destinations; Key Controller Sets |
 | Voices and output | random, alternate and scaling pan; key-on delay time and note length (tempo sync at the host's tempo); stereo output; part envelope offsets | |
 
@@ -53,15 +53,15 @@ In the personal library, the FM parts' mod-wheel controller boxes: 16 carried in
 | `op1.key_ctrl_set1`: not played | 11 | 26 | yes | open |
 | `op3.key_ctrl_set1`: not played | 11 | 26 | yes | open |
 | `op7.key_ctrl_set1`: not played | 11 | 23 | yes | open |
-| `slfo_tempo_speed`: not played | 11 | 18 | yes | open; since 0.6.2 reported only with `slfo_tempo_sync` on (off, it changes nothing) |
+| `slfo_tempo_speed`: not played | 11 | 18 | yes | done (0.6.6): the note length at the host's tempo (measured at 120) |
 | `op2.key_ctrl_set2`: not played | 10 | 29 | yes | open |
 | `op5.key_ctrl_set2`: not played | 10 | 27 | yes | open |
 | `op8.key_ctrl_set2`: not played | 10 | 27 | yes | open |
 | `op6.key_ctrl_set2`: not played | 9 | 23 | yes | open |
 | `op8.key_ctrl_set1`: not played | 9 | 23 | yes | open |
 | `op5.key_ctrl_set1`: not played | 9 | 22 | yes | open |
-| `slfo_tempo_sync`: not played | 9 | 19 | yes | open |
-| `slfo_random_speed`: not played | 9 | 13 | yes | open |
+| `slfo_tempo_sync`: not played | 9 | 19 | yes | done (0.6.6): the note length at the host's tempo (measured at 120) |
+| `slfo_random_speed`: not played | 9 | 13 | yes | open; measured in 0.6.6's round (a new random rate each cycle), its law not resolved |
 | `op7.key_ctrl_set2`: not played | 8 | 23 | yes | open |
 | `op1.key_ctrl_set2`: not played | 8 | 21 | yes | open |
 | `op4.key_ctrl_set1`: not played | 8 | 21 | yes | open |
@@ -100,7 +100,7 @@ This engine's package is ninth of seventeen in the cross-engine order (605 stock
 order:
 
 1. Done in 0.6.2: the key-on delay's note length at the host's tempo (`key_on_delay_length`, 552 Performances). The
-   sound LFO's tempo sync and tempo speed wait for their law.
+   sound LFO's tempo sync and tempo speed: done in 0.6.6.
 2. The controller box destinations not played yet (`boxN_dst`, 407; 92, 95-97, 104, 107-109 and 111-115 done in 0.6.3; 52,
    53, 56-59, 88, 98, 110 and 117 in 0.6.4).
 3. The operator level controller sensitivities (`opN.level_ctrl_sens`, 15 to 41 per operator).

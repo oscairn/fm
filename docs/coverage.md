@@ -37,7 +37,7 @@ pan, the filter envelope's depth, the portamento time, the sound LFO's speed and
 step (docs/design.md, 3.9). A box on any other destination, from a source the host does not send,
 or on a curve not measured (played as linear) is reported by `fmbench coverage` beside the
 parameters, by its `boxN_dst`. Not played yet: the level controller sensitivity, the key
-controller sets, micro tuning, the sound LFO's random speed.
+controller sets, micro tuning, the sound LFO's random speed (measured, its law not resolved).
 
 | Parameter | Ids | Status | Range (default) | Law and accuracy |
 |---|---|---|---|---|
@@ -134,8 +134,8 @@ controller sets, micro tuning, the sound LFO's random speed.
 | `slfo_phase` | 214 | played | 0 to 5 (0) | the sound LFO, one a sound, evaluated every 16 frames (docs/design.md, 3.6): starts at 0, 90, 120, 180, 240 or 270 degrees; existing profile: the phases 4.8-8.0 cents (95th percentile at depth 8); the engine plays the law (test) |
 | `slfo_wave` | 215 | played | 0 to 12 (0) | triangle from 0 up, triangle 0 to 1, saw up 0 to 1, saw down 0 to -1, squares from their top for 1/4, 1/3, 1/2, 2/3, 3/4 of the cycle, trapezoid (the triangle doubled and clipped), two sample and holds (a uniform value a cycle; the second plays as the first: docs/known-differences.md), the user wave; existing profile: every wave 0.1-10.1 cents (95th percentile at depth 8, peak 227 cents); the engine within 1e-5 of the law at every step's end (test) |
 | `slfo_speed` | 216 | played | 0 to 63 (32) | measured rate table, every value (0 stands still, 1 is 0.0019 Hz, 2 is 0.062 Hz, about a doubling every 8 values to 11.86 Hz); existing profile: speeds 2-63 within 0.23 % (against the renders the table came from) |
-| `slfo_tempo_sync` | 217 | not covered (the sound LFO's tempo sync: not measured) | 0 to 1 (0) | the LFO plays at slfo_speed; the cycle's length and its phase against the beat are not measured on any engine |
-| `slfo_tempo_speed` | 218 | not covered (the sound LFO's tempo sync: not measured) | 5 to 24 (11) | as slfo_tempo_sync; reported only with slfo_tempo_sync on (off, it changes nothing) |
+| `slfo_tempo_sync` | 217 | played | 0 to 1 (0) | on: a cycle lasts slfo_tempo_speed's note length at the host's tempo (120 until a host gives one), set again when the host's tempo changes; measured on this part type at the host's 120 (the Performance's own tempo is ignored): every tempo speed 5-24 within 1.1 % of its note length; other tempos not measured; with key-on reset off the LFO runs on across notes (measured: a second note continues the first's cycle within 0.06 of a cycle) |
+| `slfo_tempo_speed` | 218 | played | 5 to 24 (11) | as slfo_tempo_sync: 5-21 the key-on delay's note lengths (1/16 to 8 quarters), 22-24 16, 32 and 64 quarters; off, it changes nothing |
 | `slfo_delay` | 219 | played | 0 to 127 (0) | an envelope on the LFO from its start: delay (0), fade in (straight up), hold (1; 127 for ever), fade out (straight down), then 0; one measured time table for the four (0 to 11.5 s), made non-decreasing where values 1-30 scatter by about 10 ms; existing profile: the delay at every value, 109 of 111 within 2 % or 10 ms (values 9 and 23 11 ms early); the engine plays the law within 1e-4 (test) |
 | `slfo_fade_in` | 220 | played | 0 to 127 (0) | as slfo_delay; measured every eighth value, agreeing with the delay from 48 up (below about 100 ms taken from the delay) |
 | `slfo_hold` | 221 | played | 0 to 127 (127) | as slfo_fade_in; 127 holds for ever (test) |
@@ -165,7 +165,7 @@ controller sets, micro tuning, the sound LFO's random speed.
 | `slfo_step14` | 245 | played | -64 to 63 (0) | as slfo_user_cycle |
 | `slfo_step15` | 246 | played | -64 to 63 (0) | as slfo_user_cycle |
 | `slfo_step16` | 247 | played | -64 to 63 (0) | as slfo_user_cycle |
-| `slfo_random_speed` | 248 | M7 (unmeasured) | 0 to 127 (0) | no law: neither measured nor documented as numbers |
+| `slfo_random_speed` | 248 | M7 (unmeasured) | 0 to 127 (0) | not played. Measured on this part type, not resolved into a law: each cycle runs at a new random rate (a cycle's slope and length agree), the slowest about (1 - depth / 128) of the rate (depths 48-127 at speed 56), the fastest about 1.5 times it from depth 48 up at speed 56 but 1.84 at speed 40, the rates denser below the stored one than above |
 | `amp_eg_attack_offset` | 249 | played | -64 to 63 (0) | every operator's attack time times 2^(offset / 4), held within attack times 0-99's, a positive offset on carriers only; existing profile: within one time value from -12 to +26, faster below -12, sooner at +28 and +30 (up to 5.6 dB); the engine plays the law (test) |
 | `amp_eg_decay_offset` | 250 | played | -64 to 63 (0) | 1.5 time values a step (rounded) added to every operator's decay 1 and decay 2 times; existing profile: 18 of 18 offsets within 0.3 dB (with release); the engine plays the law (test) |
 | `amp_eg_sustain_offset` | 251 | played | -64 to 63 (0) | decay 2 level steps from a measured table at even offsets -22 to +32 (odd ones halfway, 1.5 a step beyond, unmeasured); existing profile: 1.2-2.3 dB off; the engine plays the law (test) |

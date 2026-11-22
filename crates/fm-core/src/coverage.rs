@@ -9,9 +9,6 @@ use crate::sound::Sound;
 /// Played, or why not (the milestone that brings it).
 pub const PLAYED: &str = "played";
 
-/// The sound LFO's tempo sync: its law is not measured.
-const NO_TEMPO: &str = "not covered (the sound LFO's tempo sync: not measured)";
-
 /// A stored filter type value that is none of the model's types (9, 18, 20).
 const NO_TYPE: &str = "not covered (no filter type: played as thru)";
 
@@ -86,13 +83,11 @@ pub fn status(p: &Param) -> &'static str {
     let starts = |prefixes: &[&str]| prefixes.iter().any(|x| n.starts_with(x));
     if (op && played_op.contains(&n)) || (!op && played_part.contains(&n)) {
         PLAYED
-    } else if starts(&["slfo_tempo"]) {
-        NO_TEMPO
     } else if n == "slfo_random_speed" {
         "M7 (unmeasured)"
     } else if starts(&["slfo_"]) {
-        // M4: the sound LFO, its destinations (those not played: `slfo_destination`), boxes and
-        // ratios
+        // M4: the sound LFO, its tempo sync, its destinations (those not played:
+        // `slfo_destination`), boxes and ratios
         PLAYED
     } else if (op && starts(&["ctrl_set"])) || (!op && starts(&["box", "knob", "ribbon", "switch"])) {
         // M7: the controller boxes, their sources and the operators' switches for them (a box the
@@ -138,13 +133,9 @@ pub fn status(p: &Param) -> &'static str {
 }
 
 /// Calls `f` with each parameter of `s` at a non-default value that the engine does not play,
-/// its value and why, and each sound LFO destination with depth that it does not play. The sound
-/// LFO's note length is not reported with its tempo sync off: then it changes nothing.
+/// its value and why, and each sound LFO destination with depth that it does not play.
 pub fn not_covered(s: &Sound, mut f: impl FnMut(&'static Param, i16, &'static str)) {
     for (p, v) in s.changed() {
-        if p.name == "slfo_tempo_speed" && s.get(Part::SlfoTempoSync as usize) == 0 {
-            continue;
-        }
         let why = status(p);
         if why != PLAYED {
             f(p, v, why);
@@ -222,7 +213,6 @@ mod tests {
             got,
             vec![
                 (100, 18, NO_TYPE),
-                (217, 1, NO_TEMPO),
                 (224, 2, effect),
                 (
                     309,
@@ -234,21 +224,9 @@ mod tests {
         let mut n = 0;
         not_covered(&Sound::default(), |_, _, _| n += 1);
         assert_eq!(n, 0);
-        // the sound LFO's note length only with its tempo sync on; the key-on delay's note length
-        // played either way
-        for (text, want) in [
-            ("key_on_delay_length=8 slfo_tempo_speed=20", vec![]),
-            (
-                "key_on_delay_sync=1 key_on_delay_length=8 slfo_tempo_sync=1 slfo_tempo_speed=20",
-                vec![(217, 1), (218, 20)],
-            ),
-        ] {
-            let mut got = Vec::new();
-            not_covered(
-                &Sound::from_text(&format!("fm-sound/1\n{text}\n")).unwrap(),
-                |p, v, _| got.push((p.id, v)),
-            );
-            assert_eq!(got, want, "{text}");
-        }
+        // the note lengths and the sound LFO's tempo sync played
+        let s = "fm-sound/1\nkey_on_delay_sync=1 key_on_delay_length=8 slfo_tempo_sync=1 slfo_tempo_speed=20\n";
+        not_covered(&Sound::from_text(s).unwrap(), |_, _, _| n += 1);
+        assert_eq!(n, 0);
     }
 }

@@ -561,6 +561,18 @@ pub fn note_length_quarters(v: i32) -> f64 {
     Q.get(v.clamp(5, 21).wrapping_sub(5) as usize).copied().unwrap_or(2.0)
 }
 
+/// The sound LFO's tempo speed 5-24 with tempo sync: its cycle in quarter notes, the note lengths
+/// of [`note_length_quarters`] and then 16, 32 and 64 quarters (measured at the host's tempo 120:
+/// every value within 1.1 % of its note length).
+pub fn slfo_cycle_quarters(v: i32) -> f64 {
+    match v {
+        22 => 16.0,
+        23 => 32.0,
+        24.. => 64.0,
+        _ => note_length_quarters(v),
+    }
+}
+
 /// A sound LFO destination's depth 0-127 on an operator with depth ratio 0-127: depth × ratio / 128
 /// rounded down, ratio 127 counting as 128 (measured at 7 ratios, within 0.4 cents).
 pub fn slfo_depth(depth: i32, ratio: i32) -> i32 {
@@ -1510,6 +1522,10 @@ mod tests {
         assert_eq!(
             [5, 6, 11, 13, 15, 21].map(note_length_quarters),
             [0.25, 1.0 / 3.0, 1.0, 1.5, 8.0 / 3.0, 8.0]
+        );
+        assert_eq!(
+            [5, 11, 17, 21, 22, 23, 24].map(slfo_cycle_quarters),
+            [0.25, 1.0, 4.0, 8.0, 16.0, 32.0, 64.0]
         );
         // delay: none at 0; the hold at 99 2.66 s; each fifth of a row of 16 values doubles
         assert_eq!(lfo_delay_s(0), 0.0);
