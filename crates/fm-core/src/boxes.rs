@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn curves_and_what_is_not_played() {
         // the measured curve (0, 0, 8): 171 at the wheel's 64
-        let s = sound("box1_dst=102 box1_ratio=8 box1_p1=8 box2_dst=55 box2_ratio=8 box3_dst=102 box3_ratio=8 box3_src=20 box4_dst=102 box4_ratio=8 box4_curve=2 box4_p1=3 box4_p2=1");
+        let s = sound("box1_dst=102 box1_ratio=8 box1_p1=8 box2_dst=55 box2_ratio=8 box3_dst=102 box3_ratio=8 box3_src=20 box4_dst=102 box4_ratio=8 box4_curve=2 box4_p1=1 box4_p2=1");
         let b = boxes(&s).next().unwrap();
         assert_eq!(b.steps(512.0), (171.0f32 * 8.0 / 8.0 * 1024.0 / 8192.0) as i32);
         assert_eq!(curve_at(b.curve, 1024.0), 1024.0);
@@ -735,7 +735,7 @@ mod tests {
         assert!(not_played(&s, 2).unwrap().contains("source"));
         assert!(
             not_played(&s, 3).unwrap().contains("curve"),
-            "type 2 (3, 1) is not measured"
+            "type 2 (1, 1) is not measured"
         );
         assert_eq!(not_played(&s, 4), None);
     }
@@ -755,6 +755,20 @@ mod tests {
         assert_eq!([0, 64, 120].map(|v| at(10, 0, 0, v)), [0.0, 1024.0, 103.0]);
         assert_eq!([16, 31, 32].map(|v| at(18, 4, 0, v)), [341.0, 341.0, 541.0]);
         assert_eq!(at(17, 0, 0, 100), 0.0);
+        // measured later: a jagged one (repeating exactly), a window, a triangle, a falling one
+        // whose top is 0 (the wheel held there), one flattening at about half, a two-point ramp
+        assert_eq!(
+            [8, 16, 24, 64].map(|v| at(16, 9, 0, v)),
+            [-244.0, -920.0, -220.0, -318.0]
+        );
+        assert_eq!([10, 11, 21, 22].map(|v| at(11, 1, 0, v)), [0.0, 1024.0, 1024.0, 0.0]);
+        assert_eq!(
+            [32, 63, 64, 96].map(|v| at(14, 0, 0, v)),
+            [-261.0, -1024.0, -1024.0, -261.0]
+        );
+        assert_eq!([64, 126, 127].map(|v| at(4, 0, 0, v)), [-424.0, -1017.0, 0.0]);
+        assert_eq!([1, 64, 127].map(|v| at(15, 0, 0, v)), [242.0, 548.0, 552.0]);
+        assert_eq!([0, 32, 48, 64].map(|v| at(2, 3, 1, v)), [0.0, 304.0, 812.0, 1024.0]);
         // halfway between the wheel's 64 and 65 (c 512 and 520)
         let i = curve(0, 0, 8, 0).flatten();
         assert_eq!(curve_at(i, 516.0), (curve_at(i, 512.0) + curve_at(i, 520.0)) / 2.0);
@@ -795,9 +809,10 @@ mod tests {
                 );
             }
         }
-        // not measured: type 16 (erratic readings), any member of type 2 not probed, other banks
-        assert_eq!(curve(0, 16, 9, 0), None);
-        assert_eq!(curve(0, 2, 3, 1), None);
+        // not measured: type 5 (its held and swept readings disagree), any member of type 2 not
+        // probed, other banks
+        assert_eq!(curve(0, 5, 0, 0), None);
+        assert_eq!(curve(0, 2, 1, 1), None);
         assert_eq!(curve(1, 0, 8, 0), None);
     }
 }
