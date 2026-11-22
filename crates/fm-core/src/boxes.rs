@@ -81,7 +81,7 @@ fn curve_at(i: Option<usize>, c: f32) -> f32 {
 
 /// What a box moves: an operator's level (the reference's destination 106, the operators whose
 /// switch for the box is on), the filter's cutoff (102) or resonance (103), the voice LFO's speed
-/// (89, its normal range), pitch depth (90), amplitude depth (91) or filter depth (92), the sound's
+/// (89; in the extended range `LfoExtSpeed`), pitch depth (90), amplitude depth (91) or filter depth (92), the sound's
 /// pitch (54), an operator's frequency (105, the operators whose switch for the box is on, by their
 /// pitch controller sensitivity), the part's amplitude envelope attack (95), decay 1 and 2 (96)
 /// and release (97) offsets, the feedback (104); for the operators whose switch for the box is on:
@@ -93,6 +93,7 @@ pub enum Dest {
     Cutoff,
     Resonance,
     LfoSpeed,
+    LfoExtSpeed,
     LfoPitch,
     LfoAmp,
     LfoFilter,
@@ -163,7 +164,8 @@ impl Dest {
     /// A full box's steps: the level 96 and the cutoff 1024 (measured on this part type: 0.75 and
     /// 8 a ratio unit at full travel of a unipolar box), the resonance 128 (measured on the sample
     /// part's resonance, the same raw scale; not measured on this part type); the voice LFO's
-    /// speed and depths 100 of their 0-99 values, the pitch 8192 cents, an operator's frequency
+    /// speed and depths 100 of their 0-99 values (the extended speed 415 of its 0-415: measured at
+    /// 25, 51 and 103 steps, all the time, nothing below 0), the pitch 8192 cents, an operator's frequency
     /// 3600 cents at sensitivity +7 (measured on this part type; the pitches up to a quarter of
     /// a full box); the voice LFO's filter depth 100 (measured on this part type: 12, 25, 31 and 37
     /// steps); the part's envelope offsets 64 (measured: 8, 16, 32 and 63 steps); the feedback 7
@@ -177,6 +179,7 @@ impl Dest {
             Dest::Cutoff => 1024,
             Dest::Resonance => 128,
             Dest::LfoSpeed | Dest::LfoPitch | Dest::LfoAmp | Dest::LfoFilter => 100,
+            Dest::LfoExtSpeed => 415,
             Dest::Pitch => 8192,
             Dest::OpPitch => 3600,
             Dest::AmpAttack | Dest::AmpDecay | Dest::AmpRelease => 64,
@@ -215,9 +218,9 @@ impl Box {
         if dst == 0 || ratio == 0 {
             return Err(None);
         }
-        let dest = Dest::of(dst).ok_or(Some("not covered (a destination without a law, or not the engine's)"))?;
+        let mut dest = Dest::of(dst).ok_or(Some("not covered (a destination without a law, or not the engine's)"))?;
         if dest == Dest::LfoSpeed && s.get(Common::LfoSpeedRange as usize) != 0 {
-            return Err(Some("not covered (the voice LFO's extended speed range: not measured)"));
+            dest = Dest::LfoExtSpeed;
         }
         if !(0..SOURCES as i16).contains(&src) || src == 5 {
             return Err(Some("not covered (a source the host does not send)"));
@@ -343,7 +346,7 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
         match b.dest {
             Dest::Cutoff => add(&mut t.cutoff),
             Dest::Resonance => add(&mut t.resonance),
-            Dest::LfoSpeed => add(&mut t.lfo_speed),
+            Dest::LfoSpeed | Dest::LfoExtSpeed => add(&mut t.lfo_speed),
             Dest::LfoPitch => add(&mut t.lfo_pitch),
             Dest::LfoAmp => add(&mut t.lfo_amp),
             Dest::LfoFilter => add(&mut t.lfo_filter),
@@ -419,7 +422,14 @@ pub fn steps(s: &Sound, src: &[f32; SOURCES]) -> Steps {
     t.op_pitch = t.op_pitch.map(|x| clamp(x, Dest::OpPitch));
     t.cutoff = clamp(t.cutoff, Dest::Cutoff);
     t.resonance = clamp(t.resonance, Dest::Resonance);
-    t.lfo_speed = clamp(t.lfo_speed, Dest::LfoSpeed);
+    t.lfo_speed = clamp(
+        t.lfo_speed,
+        if s.get(Common::LfoSpeedRange as usize) != 0 {
+            Dest::LfoExtSpeed
+        } else {
+            Dest::LfoSpeed
+        },
+    );
     t.lfo_pitch = clamp(t.lfo_pitch, Dest::LfoPitch);
     t.lfo_amp = clamp(t.lfo_amp, Dest::LfoAmp);
     t.lfo_filter = clamp(t.lfo_filter, Dest::LfoFilter);
@@ -577,9 +587,21 @@ mod tests {
             let got = f64::from(one(54, 16, v, "").pitch);
             assert!((got - cents).abs() < 0.5, "{v}: {got} against {cents}");
         }
-        // the extended speed range is not measured: reported
+        // the extended range (measured on this part type from speed 40 and 100: the rate in Hz,
+        // read back through the extended table): 415 steps a full box, within 0-415
+        for (base, ratio, v, hz) in [
+            (40, 4, 127, 5.4686),
+            (40, 16, 64, 7.6546),
+            (40, 16, 127, 13.2904),
+            (100, -8, 64, 6.3100),
+            (100, 16, 64, 14.6356),
+        ] {
+            let st = one(89, ratio, v, &format!("lfo_speed_range=1 lfo_extended_speed={base}")).lfo_speed;
+            let got = laws::lfo_hz(true, (base + st).clamp(0, 415));
+            assert!((got / hz - 1.0).abs() < 0.01, "{base} {ratio} {v}: {got} against {hz}");
+        }
         let s = sound("box1_dst=89 box1_ratio=8 lfo_speed_range=1");
-        assert!(not_played(&s, 0).unwrap().contains("extended"));
+        assert_eq!(not_played(&s, 0), None);
     }
 
     /// An operator's frequency (105) by its pitch controller sensitivity, measured on the

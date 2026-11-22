@@ -2427,7 +2427,12 @@ impl Engine {
                 m.lfo_depths.1 = laws::lfo_amp_steps(moved(Common::LfoAmpDepth, t.lfo_amp)) as f32;
             }
             if t.lfo_speed != 0 {
-                m.lfo_speed = moved(Common::LfoSpeed, t.lfo_speed) as i16;
+                m.lfo_speed = if p.lfo_speed.0 {
+                    // the extended speed within 0-415 (measured)
+                    i32::from(p.lfo_speed.1).saturating_add(t.lfo_speed).clamp(0, 415) as i16
+                } else {
+                    moved(Common::LfoSpeed, t.lfo_speed) as i16
+                };
             }
             m.pitch = t.pitch as f32 / 1200.0;
             if p.op_pitch_box {
@@ -2954,7 +2959,7 @@ impl Engine {
             lfo_inc: if lfo_speed == p.lfo_speed.1 {
                 lfo_inc(p.lfo_hz, self.rate)
             } else {
-                lfo_inc(laws::lfo_hz(false, i32::from(lfo_speed)) as f32, self.rate)
+                lfo_inc(laws::lfo_hz(p.lfo_speed.0, i32::from(lfo_speed)) as f32, self.rate)
             },
             lfo_hold: (f64::from(p.lfo_hold) * self.rate) as f32,
             lfo_speed,
