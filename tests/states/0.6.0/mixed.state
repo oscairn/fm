@@ -1,0 +1,8 @@
+fm-state 1
+selected 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+sound 0 bus 0 Default
+fm-sound/1
+lfo_wave=2 lfo_pitch_depth=40 algorithm=40 feedback=3 mono_poly=0
+op1.level=90
+op3.fine=50 op3.level=70
+end

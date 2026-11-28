@@ -1,0 +1,8 @@
+fm-state 1
+selected 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+sound 0 bus 0 Default
+fm-sound/1
+algorithm=12 feedback=5
+op1.coarse=5 op1.level=99
+op2.level=80
+end
