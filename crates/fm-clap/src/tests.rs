@@ -1033,3 +1033,84 @@ fn reset_ends_everything_silently() {
     a.block(BLOCK, vec![on(0, 0, 60, 3)]);
     assert!(peak(&a.out[0][0][2 * BLOCK..]) > 0.0);
 }
+
+/// What each saved state in `tests/states/<version>/` sets from the defaults: (parameter id, value).
+const SAVED_STATES: [(&str, &[(u16, i16)]); 3] = [
+    ("default", &[]),
+    ("lead", &[(30, 12), (31, 5), (1042, 5), (1064, 99), (1164, 80)]),
+    (
+        "mixed",
+        &[
+            (30, 40),
+            (31, 3),
+            (22, 2),
+            (27, 40),
+            (200, 0),
+            (1243, 50),
+            (1264, 70),
+            (1064, 90),
+        ],
+    ),
+];
+
+/// A note on channel 0 through the plugin, after `first` in block 0.
+fn rendered(mut a: Inst, first: Vec<Ev>) -> Vec<f32> {
+    a.block(BLOCK, first);
+    for b in 1..40 {
+        let ev = match b {
+            1 => vec![on(5, 0, 60, 7)],
+            12 => vec![off(37, 0, 60, 7)],
+            _ => vec![],
+        };
+        a.block(BLOCK, ev);
+    }
+    a.out.swap_remove(0).into_iter().flatten().collect()
+}
+
+/// Every state saved by an older release (docs: tests/states/README.md) opens with this build, reads
+/// back the parameters it was saved with, writes back the same text, and renders as those
+/// parameters set on a fresh instance do.
+#[test]
+fn saved_states_of_every_covered_version_open() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/states");
+    let mut opened = 0;
+    for dir in std::fs::read_dir(&root).unwrap() {
+        let dir = dir.unwrap().path();
+        if !dir.is_dir() {
+            continue;
+        }
+        for (name, params) in SAVED_STATES {
+            let file = dir.join(format!("{name}.state"));
+            let bytes = std::fs::read(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            let text = std::str::from_utf8(&bytes).unwrap();
+            let what = file.display().to_string();
+            let st = crate::state::read(text).unwrap_or_else(|e| panic!("{what}: {e}"));
+            let mut want = Sound::default();
+            for &(id, v) in params {
+                want.set(id, v).unwrap();
+            }
+            assert!(
+                st.sounds[0].as_ref().unwrap().sound == want,
+                "{what}: parameters read back"
+            );
+            assert_eq!(
+                crate::state::write(&st).unwrap(),
+                bytes,
+                "{what}: written back as it was"
+            );
+            let a = Inst::new();
+            assert!(a.load(&bytes), "{what}: the plugin opens it");
+            let got = rendered(a, vec![]);
+            let set = params.iter().map(|&(id, v)| param(0, id.into(), 0, v.into())).collect();
+            let expect = rendered(Inst::new(), set);
+            assert!(peak(&got) > 0.01, "{what}: sounds");
+            let worst = got.iter().zip(&expect).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+            assert!(
+                worst <= 1e-3 * peak(&expect),
+                "{what}: renders as its parameters do ({worst})"
+            );
+            opened += 1;
+        }
+    }
+    assert!(opened >= SAVED_STATES.len(), "no saved states found");
+}
